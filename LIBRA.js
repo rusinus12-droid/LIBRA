@@ -1,7 +1,7 @@
 //@name libra
-//@display-name LIBRA v1.0.4
+//@display-name LIBRA v1.0.5
 //@api 3.0
-//@version 1.0.4
+//@version 1.0.5
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,7 +63,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
- * LIBRA v1.0.4
+ * LIBRA v1.0.5
+ *
+ * v1.0.5 makes candidateLimit a real precision-load ceiling through a persistent incremental recall catalog with compact semantic vector sketches, fixes Korean query-type precedence/false continuation matches, removes the unused recentQueryMessages setting, and enforces recallMaxTokens as a true hard cap by shrinking excerpt budgets before selection.
  *
  * v1.0.4 adds the RE:TRACE IPC contract, a read-only canonical-memory viewer feed, and durable next-session predecessor-memory handoff without legacy lorebook/World Manager transport.
  *
@@ -152,7 +154,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.4';
+  const PLUGIN_VERSION = '1.0.5';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -25588,7 +25590,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
   const LibraMemoryCore = (() => {
-    const VERSION = '1.0.4';
+    const VERSION = '1.0.5';
     const BATCH_SIZE = 5;
     const PREFIX = 'libra:v1';
     const SETTINGS_KEY = `${PREFIX}:memory-settings`;
@@ -25604,6 +25606,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const MEMORY_INJECTION_MARKER = '[LIBRA 장기기억 — 관련 기억만 시간순으로 제공됨]';
     const RETRIEVAL_PROJECTION_VERSION = 'libra.retrieval_projection.v2';
     const EMBEDDING_PROJECTION_SCHEMA = 'libra.embedding_projection.v2';
+    const RECALL_CATALOG_SCHEMA = 'libra.recall_catalog.v1';
+    const RECALL_VECTOR_SKETCH_DIMS = 128;
+    const RECALL_CATALOG_SEARCH_TEXT_MAX_CHARS = 2800;
+    const RECALL_CATALOG_ANCHOR_LIMIT = 112;
     const RETRIEVAL_SECTION_ORDER = Object.freeze([
       'chronology',
       'characters_relations',
@@ -25686,7 +25692,6 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       recallMaxMemories: 12,
       recallMaxTokens: 2600,
       recallMaxChars: 8000,
-      recentQueryMessages: 6,
       continuationTailMessages: 4,
       lexicalFallback: true,
       sectionVectors: true,
@@ -25739,6 +25744,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       embeddingRebuildStopRequested: false,
       queues: new Map(),
       timers: new Map(),
+      recallCatalogCache: new Map(),
       snapshot: {
         scope: null,
         manifest: null,
@@ -25809,6 +25815,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       handoffPackage: transferId => `${PREFIX}:handoff:${String(transferId || '')}`,
       handoffReceipt: transferId => `${PREFIX}:handoff-receipt:${String(transferId || '')}`,
       scopeRegistry: () => `${PREFIX}:scope-registry:v1`,
+      recallCatalog: scope => `${PREFIX}:scope:${scope.scopeKey}:recall-catalog:v1`,
       embeddingRebuild: () => EMBEDDING_REBUILD_STATE_KEY
     });
 
@@ -25855,7 +25862,6 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         recallMaxMemories: recallQualityValues.recallMaxMemories,
         recallMaxTokens: Math.floor(clamp(source.recallMaxTokens, 320, 12000, DEFAULT_SETTINGS.recallMaxTokens)),
         recallMaxChars: Math.floor(clamp(source.recallMaxChars, 1000, 30000, DEFAULT_SETTINGS.recallMaxChars)),
-        recentQueryMessages: Math.floor(clamp(source.recentQueryMessages, 1, 20, DEFAULT_SETTINGS.recentQueryMessages)),
         continuationTailMessages: Math.floor(clamp(source.continuationTailMessages, 1, 20, DEFAULT_SETTINGS.continuationTailMessages)),
         candidateLimit: recallQualityValues.candidateLimit,
         rrfK: Math.floor(clamp(source.rrfK, 1, 200, DEFAULT_SETTINGS.rrfK)),
@@ -25871,6 +25877,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       // dev.16: automatic cold-start was removed. Ignore the legacy persisted flag
       // so old settings cannot silently re-enable historical backfill.
       delete normalized.autoColdStart;
+      // v1.0.5: this setting was never consumed by query construction; keep old persisted
+      // values from leaking back into exports or UI-derived settings.
+      delete normalized.recentQueryMessages;
       return normalized;
     };
 
@@ -26329,6 +26338,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       handoffTransferId: string(memory?.handoffTransferId || ''),
       sourceSessionChatId: string(memory?.sourceSessionChatId || ''),
       sourceSessionScopeKey: string(memory?.sourceSessionScopeKey || ''),
+      runId: string(memory?.runId || ''),
       createdAt: createdAt || memory?.createdAt || nowIso(),
       updatedAt: nowIso(),
       history: asArray(history).slice(-12)
@@ -27052,12 +27062,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const classifyQueryType = value => {
       const body = normalizeLexicalText(value);
       if (!body) return QUERY_TYPES.FACT;
-      if (/(그래서|그다음|계속|이어|아까|방금|그녀|그|그것|그곳|then|continue|after that|what next|それで|続)/i.test(body) && body.length < 180) return QUERY_TYPES.CONTINUATION;
-      if (/(관계|사이|좋아|싫어|신뢰|감정|마음|생각해|relationship|feel about|trust|love|hate)/i.test(body)) return QUERY_TYPES.RELATION;
-      if (/(감정|기분|화났|슬펐|두려|행복|emotion|feeling|mood)/i.test(body)) return QUERY_TYPES.EMOTION;
-      if (/(세계|규칙|마법|조직|장소|어디|환경|설정|world|rule|magic|location|organization)/i.test(body)) return QUERY_TYPES.WORLD;
+      // Specific intent wins before generic continuation cues. In v1.0.4 the bare
+      // Korean syllable `그` could classify unrelated short inputs (e.g. 그림...) as
+      // continuation and relation checked `감정` before the emotion branch.
+      if (/(감정|기분|화났|슬펐|두려|행복|불안|분노|emotion|feeling|mood)/i.test(body)) return QUERY_TYPES.EMOTION;
+      if (/(관계|사이|좋아|싫어|신뢰|마음|생각해|relationship|feel about|trust|love|hate)/i.test(body)) return QUERY_TYPES.RELATION;
+      if (/(세계|규칙|마법|조직|장소|환경|설정|world|rule|magic|location|organization)/i.test(body)) return QUERY_TYPES.WORLD;
       if (/(지금|현재|누구에게|어디에|상태|소유|가지고|current|now|state|where is|who has)/i.test(body)) return QUERY_TYPES.STATE;
-      if (/(무슨 일|어떻게 됐|그 뒤|언제|사건|약속|계획|what happened|when|event|promise|plan)/i.test(body)) return QUERY_TYPES.EVENT;
+      if (/(무슨 일|어떻게 됐|그 뒤|그후|그 후|언제|사건|약속|계획|what happened|when|event|promise|plan)/i.test(body)) return QUERY_TYPES.EVENT;
+      if (/(그래서|그다음|그 다음|계속|이어|아까|방금|그녀|그 사람|그사람|그것|그곳|그때|그 때|그쪽|then|continue|after that|what next|それで|続)/i.test(body) && body.length < 180) return QUERY_TYPES.CONTINUATION;
       return QUERY_TYPES.FACT;
     };
 
@@ -28374,7 +28387,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           turnRange: clone(memory.turnRange), summary: memory.summary, embeddingStatus: memory.embedding.status,
           retrievalVersion: memory.embedding?.projectionVersion || memory.retrieval?.version || RETRIEVAL_PROJECTION_VERSION,
           vectorCount: Number(memory.embedding?.vectorCount || 0),
-          pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage),
+          pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage), runId: memory.runId, sessionEpoch: 0, inheritedSessionHistory: false,
           createdAt: activeRef?.createdAt || memory.createdAt, updatedAt: memory.updatedAt, history: retainedHistory
         };
         manifest.frontiers.committedTurn = Math.max(
@@ -28456,6 +28469,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         ref.embeddingStatus = memory.embedding.status;
         ref.retrievalVersion = memory.embedding?.projectionVersion || memory.retrieval?.version || RETRIEVAL_PROJECTION_VERSION;
         ref.vectorCount = Number(memory.embedding?.vectorCount || 0);
+        ref.updatedAt = nowIso();
         manifest.stats.embeddings += memory.embedding.status === 'ready' ? 1 : 0;
         await saveManifest(context.scope, manifest);
       } catch (error) {
@@ -28765,6 +28779,186 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return vectorKey ? await storage.getJson(vectorKey, null) : null;
     };
 
+    const recallCatalogRefFingerprint = ref => digest({
+      key: string(ref?.key || ''),
+      revision: Number(ref?.revision || 0),
+      sourceDigest: string(ref?.sourceDigest || ''),
+      embeddingStatus: string(ref?.embeddingStatus || ''),
+      retrievalVersion: string(ref?.retrievalVersion || ''),
+      vectorCount: Number(ref?.vectorCount || 0),
+      sessionEpoch: Number(ref?.sessionEpoch || 0),
+      updatedAt: string(ref?.updatedAt || '')
+    });
+
+    const foldRecallVectorSketch = (vector, dimensions = RECALL_VECTOR_SKETCH_DIMS) => {
+      if (!Array.isArray(vector) || !vector.length) return [];
+      const size = Math.max(8, Math.floor(Number(dimensions || RECALL_VECTOR_SKETCH_DIMS)));
+      const buckets = Array(size).fill(0);
+      for (let index = 0; index < vector.length; index += 1) {
+        const value = Number(vector[index]);
+        if (!Number.isFinite(value) || value === 0) continue;
+        const mixed = Math.imul(index + 1, 0x9e3779b1) >>> 0;
+        const sign = (mixed & 1) === 0 ? 1 : -1;
+        buckets[index % size] += value * sign;
+      }
+      const norm = Math.sqrt(buckets.reduce((sum, value) => sum + value * value, 0));
+      if (!(norm > 0)) return [];
+      return buckets.map(value => Math.round((value / norm) * 100000) / 100000);
+    };
+
+    const recallCatalogSearchText = (memory, projection) => compactMiddle([
+      memory?.summary || '',
+      asArray(memory?.recallKeys).length ? `[RECALL KEYS] ${asArray(memory.recallKeys).join(', ')}` : '',
+      asArray(projection?.anchors?.all).length ? `[ANCHORS] ${asArray(projection.anchors.all).slice(0, RECALL_CATALOG_ANCHOR_LIMIT).join(' ')}` : '',
+      projection?.sections?.characters_relations ? `[CHARACTERS] ${compactMiddle(projection.sections.characters_relations, 520)}` : '',
+      projection?.sections?.narrative_open_threads ? `[NARRATIVE] ${compactMiddle(projection.sections.narrative_open_threads, 520)}` : '',
+      projection?.sections?.chronology ? `[CHRONOLOGY] ${compactMiddle(projection.sections.chronology, 420)}` : '',
+      projection?.sections?.world_scene ? `[WORLD] ${compactMiddle(projection.sections.world_scene, 420)}` : '',
+      projection?.sections?.facts_uncertainty ? `[FACTS] ${compactMiddle(projection.sections.facts_uncertainty, 360)}` : ''
+    ].filter(Boolean).join('\n'), RECALL_CATALOG_SEARCH_TEXT_MAX_CHARS);
+
+    const recallCatalogEntryFromMemory = async ref => {
+      const memory = await loadMemoryRef(ref);
+      if (!memory || memory.status !== 'committed') return null;
+      const projection = buildMemoryRetrievalProjection(memory);
+      const vectorRecord = memory.embedding?.status === 'ready' ? await loadVectorForMemory(memory) : null;
+      const globalVector = normalizeProjectionEntries(vectorRecord).global?.vector || null;
+      return {
+        memoryKey: string(ref?.key || ''),
+        refFingerprint: recallCatalogRefFingerprint(ref),
+        memoryId: string(memory.memoryId || ref?.memoryId || ''),
+        revision: Number(memory.revision || ref?.revision || 0),
+        runId: string(memory.runId || ''),
+        turnRange: clone(memory.turnRange || ref?.turnRange || {}),
+        sessionEpoch: Number.isFinite(Number(memory.sessionEpoch)) ? Number(memory.sessionEpoch) : Number(ref?.sessionEpoch || 0),
+        inheritedSessionHistory: memory.inheritedSessionHistory === true || ref?.inheritedSessionHistory === true,
+        summary: compact(memory.summary || ref?.summary || '', 1200),
+        searchText: recallCatalogSearchText(memory, projection),
+        anchorTokens: asArray(projection?.anchors?.all).slice(0, RECALL_CATALOG_ANCHOR_LIMIT),
+        vectorSketch: foldRecallVectorSketch(globalVector),
+        vectorProfileId: string(vectorRecord?.profileId || memory.embedding?.profileId || ''),
+        vectorConfigHash: string(vectorRecord?.configHash || ''),
+        embeddingStatus: string(memory.embedding?.status || ref?.embeddingStatus || 'pending')
+      };
+    };
+
+    const recallCatalogSignature = manifest => digest(listMemoryRefs(manifest).map(ref => ({
+      key: string(ref?.key || ''), fingerprint: recallCatalogRefFingerprint(ref)
+    })));
+
+    const loadOrRefreshRecallCatalog = async (context, manifest) => {
+      const scopeKey = string(context?.scope?.scopeKey || '');
+      const refs = listMemoryRefs(manifest);
+      const signature = recallCatalogSignature(manifest);
+      const runtimeCatalog = state.recallCatalogCache.get(scopeKey) || null;
+      if (runtimeCatalog?.schema === RECALL_CATALOG_SCHEMA && runtimeCatalog.signature === signature) {
+        return { ...runtimeCatalog, source: 'memory', refreshedEntries: 0, reusedEntries: runtimeCatalog.entries?.length || 0 };
+      }
+      let previous = runtimeCatalog?.schema === RECALL_CATALOG_SCHEMA
+        ? runtimeCatalog
+        : await storage.getJson(key.recallCatalog(context.scope), null);
+      if (previous?.schema === RECALL_CATALOG_SCHEMA && previous.signature === signature) {
+        state.recallCatalogCache.set(scopeKey, previous);
+        return { ...previous, source: 'storage', refreshedEntries: 0, reusedEntries: previous.entries?.length || 0 };
+      }
+      if (previous?.schema !== RECALL_CATALOG_SCHEMA) previous = { entries: [] };
+      const oldByKey = new Map(asArray(previous.entries).map(entry => [string(entry?.memoryKey || ''), entry]).filter(([keyValue]) => keyValue));
+      const entries = [];
+      let refreshedEntries = 0;
+      let reusedEntries = 0;
+      let failedEntries = 0;
+      for (const ref of refs) {
+        const memoryKey = string(ref?.key || '');
+        if (!memoryKey) continue;
+        const fingerprint = recallCatalogRefFingerprint(ref);
+        const cached = oldByKey.get(memoryKey);
+        if (cached?.refFingerprint === fingerprint) {
+          entries.push(cached);
+          reusedEntries += 1;
+          continue;
+        }
+        try {
+          const entry = await recallCatalogEntryFromMemory(ref);
+          if (entry) {
+            entries.push(entry);
+            refreshedEntries += 1;
+          } else failedEntries += 1;
+        } catch (error) {
+          failedEntries += 1;
+          warn('LIBRA recall catalog entry refresh failed', error);
+        }
+      }
+      const catalog = {
+        schema: RECALL_CATALOG_SCHEMA,
+        scopeKey,
+        signature,
+        entries,
+        updatedAt: nowIso()
+      };
+      await storage.setJson(key.recallCatalog(context.scope), catalog);
+      state.recallCatalogCache.set(scopeKey, catalog);
+      return { ...catalog, source: previous?.entries?.length ? 'incremental_refresh' : 'rebuilt', refreshedEntries, reusedEntries, failedEntries };
+    };
+
+    const shortlistRecallCatalog = (catalog, manifest, queryBundle, queryVectors, settings) => {
+      const entries = asArray(catalog?.entries);
+      const refs = listMemoryRefs(manifest);
+      if (!entries.length || !refs.length) return { refs: refs.slice(0, settings.candidateLimit), rows: [], total: entries.length };
+      const refByKey = new Map(refs.map(ref => [string(ref?.key || ''), ref]));
+      const currentSketch = foldRecallVectorSketch(queryVectors.current);
+      const sceneSketch = foldRecallVectorSketch(queryVectors.scene);
+      const rows = entries.map(entry => {
+        const sketchCompatible = !!currentSketch.length
+          && !!entry.vectorSketch?.length
+          && (!queryVectors.profileId || entry.vectorProfileId === queryVectors.profileId)
+          && !!entry.vectorConfigHash
+          && entry.vectorConfigHash === queryVectors.configHash;
+        const currentDense = sketchCompatible ? Math.max(0, cosine(currentSketch, entry.vectorSketch)) : 0;
+        const sceneDense = sketchCompatible && sceneSketch.length ? Math.max(0, cosine(sceneSketch, entry.vectorSketch)) : 0;
+        const denseScore = Math.min(1, currentDense * queryBundle.currentWeight + sceneDense * queryBundle.sceneWeight);
+        const lexical = lexicalScore(queryBundle.sparseText, entry.searchText || entry.summary || '');
+        const currentExact = anchorMatchDetails(queryBundle.currentAnchors, { all: asArray(entry.anchorTokens) }, entry.searchText || '').score;
+        const sceneExact = queryBundle.sceneWeight > 0
+          ? anchorMatchDetails(queryBundle.sceneAnchors, { all: asArray(entry.anchorTokens) }, entry.searchText || '').score
+          : 0;
+        const exactScore = Math.min(1, currentExact + sceneExact * queryBundle.sceneWeight * 0.45);
+        return { entry, denseScore, lexicalScore: lexical, exactScore, forced: false, preRrf: 0, preScore: 0 };
+      });
+      if (settings.forceCurrentScene && [QUERY_TYPES.CONTINUATION, QUERY_TYPES.STATE, QUERY_TYPES.RELATION, QUERY_TYPES.EMOTION].includes(queryBundle.queryType)) {
+        const latest = rows.filter(row => row.entry?.inheritedSessionHistory !== true && Number(row.entry?.sessionEpoch || 0) >= 0)
+          .sort((a, b) => Number(b.entry?.turnRange?.end || 0) - Number(a.entry?.turnRange?.end || 0))[0];
+        if (latest) latest.forced = true;
+      }
+      const arms = {
+        dense: rows.filter(row => row.denseScore > 0).sort((a, b) => b.denseScore - a.denseScore),
+        sparse: rows.filter(row => row.lexicalScore > 0).sort((a, b) => b.lexicalScore - a.lexicalScore),
+        exact: rows.filter(row => row.exactScore > 0).sort((a, b) => b.exactScore - a.exactScore),
+        forced: rows.filter(row => row.forced)
+      };
+      const catalogRrfK = 24;
+      for (const [armName, armRows] of Object.entries(arms)) {
+        armRows.forEach((row, index) => {
+          row.preRrf += Number(RRF_WEIGHTS[armName] || 1) / (catalogRrfK + index + 1);
+        });
+      }
+      const maxPreRrf = Math.max(0, ...rows.map(row => row.preRrf));
+      for (const row of rows) {
+        const rrfNorm = maxPreRrf > 0 ? row.preRrf / maxPreRrf : 0;
+        row.preScore = Math.min(1,
+          rrfNorm * 0.50
+          + row.denseScore * 0.28
+          + row.lexicalScore * 0.14
+          + row.exactScore * 0.08
+          + (row.forced ? 0.20 : 0)
+        );
+      }
+      rows.sort((a, b) => b.preScore - a.preScore || Number(b.entry?.turnRange?.end || 0) - Number(a.entry?.turnRange?.end || 0));
+      const limit = Math.max(1, Math.min(Number(settings.candidateLimit || 80), rows.length));
+      const selectedRows = rows.slice(0, limit);
+      const selectedRefs = selectedRows.map(row => refByKey.get(string(row.entry?.memoryKey || ''))).filter(Boolean);
+      return { refs: selectedRefs, rows: selectedRows, total: rows.length, limit, arms: Object.fromEntries(Object.entries(arms).map(([name, values]) => [name, values.length])) };
+    };
+
     const bm25fScores = (rows, queryText) => {
       const queryTokens = Array.from(new Set(tokenStream(queryText))).slice(0, 160);
       const fields = Object.keys(BM25F_WEIGHTS);
@@ -28995,7 +29189,6 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         : queryInput;
       const pairs = queryBundle.pairs || buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
-      const refs = listMemoryRefs(manifest);
       const queryVectors = { current: null, scene: null, profileId: '', configHash: '' };
       const embeddingConfig = await loadEmbeddingSettings();
       queryVectors.configHash = embeddingConfigSignature(embeddingConfig);
@@ -29013,6 +29206,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         }
       }
 
+      const recallCatalog = await loadOrRefreshRecallCatalog(context, manifest);
+      const catalogShortlist = shortlistRecallCatalog(recallCatalog, manifest, queryBundle, queryVectors, settings);
+      const refs = catalogShortlist.refs;
       const rows = [];
       for (const ref of refs) {
         const memory = await loadMemoryRef(ref);
@@ -29115,7 +29311,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const possibleSelections = Math.max(1, Math.min(settings.recallMaxMemories, mmrPool.length));
       for (const row of mmrPool) {
         const remainingChars = Math.max(0, memoryCharCeiling - excerptChars);
-        if (remainingChars < 240 && selected.length) break;
+        const remainingTokens = Math.max(0, Number(settings.recallMaxTokens || 0) - tokens);
+        if (remainingChars < 180 || remainingTokens <= 0) break;
         const rank = selected.length;
         const itemsLeft = Math.max(1, possibleSelections - rank);
         const preferredChars = possibleSelections === 1
@@ -29125,12 +29322,17 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             : rank === 1
               ? Math.min(2600, Math.max(1100, Math.floor(remainingChars * 0.42)))
               : Math.min(1800, Math.max(520, Math.floor(remainingChars / itemsLeft)));
-        const excerpt = excerptForMemory(row, queryBundle, settings, Math.max(240, preferredChars));
+        // estimateTokens() uses ceil(chars / 3.2). Convert the remaining token budget
+        // back to a character ceiling before excerpt generation so even the first
+        // selected memory can never exceed recallMaxTokens under a custom setting.
+        const tokenCharCeiling = Math.max(0, Math.floor(remainingTokens * 3.2));
+        const excerptBudget = Math.min(remainingChars, preferredChars, tokenCharCeiling);
+        if (excerptBudget < 180) break;
+        const excerpt = excerptForMemory(row, queryBundle, settings, excerptBudget);
         if (!excerpt.text) continue;
         const cost = estimateTokens(excerpt.text);
         const charCost = excerpt.text.length;
-        if (tokens + cost > settings.recallMaxTokens && selected.length) continue;
-        if (excerptChars + charCost > memoryCharCeiling && selected.length) continue;
+        if (cost > remainingTokens || excerptChars + charCost > memoryCharCeiling) continue;
         row.excerpt = excerpt;
         row.text = excerpt.text;
         selected.push(row);
@@ -29141,7 +29343,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       selected.sort((a, b) => (Number(a.memory?.sessionEpoch || 0) - Number(b.memory?.sessionEpoch || 0)) || Number(a.memory.turnRange?.start || 0) - Number(b.memory.turnRange?.start || 0));
 
       const worldAdditional = [];
-      const activeRunIdsForRecall = new Set(rows.map(row => string(row.memory?.runId || '')).filter(Boolean));
+      const activeRunIdsForRecall = new Set(asArray(recallCatalog?.entries).map(entry => string(entry?.runId || '')).filter(Boolean));
       for (const itemId of asArray(manifest.worldAdditionalIds)) {
         const item = await loadWorldItem(context.scope, itemId);
         if (!item || !['eligible', 'injected'].includes(item.status)) continue;
@@ -29182,6 +29384,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         }),
         diagnostics: {
           candidates: rows.length,
+          catalogCandidates: Number(catalogShortlist.total || 0),
+          shortlistedCandidates: rows.length,
+          candidateLimitApplied: Number(catalogShortlist.limit || rows.length || 0),
+          catalogSource: recallCatalog.source || '',
+          catalogRefreshedEntries: Number(recallCatalog.refreshedEntries || 0),
+          catalogReusedEntries: Number(recallCatalog.reusedEntries || 0),
+          catalogFailedEntries: Number(recallCatalog.failedEntries || 0),
+          catalogArmCounts: clone(catalogShortlist.arms || {}),
           armCounts: Object.fromEntries(Object.entries(arms).map(([name, values]) => [name, values.length])),
           fused: fused.length,
           gateRejected,
@@ -29657,6 +29867,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       for (const itemId of manifest.worldAdditionalIds) await storage.remove(key.worldAdditional(context.scope, itemId));
       for (const startTurn of completeBatchStarts(pairs)) await storage.remove(key.work(context.scope, startTurn));
       await storage.remove(key.manifest(context.scope));
+      await storage.remove(key.recallCatalog(context.scope));
+      state.recallCatalogCache.delete(string(context.scope.scopeKey || ''));
       await refreshSnapshot(context);
       return true;
     };
@@ -34973,7 +35185,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           fieldNode('메모리당 최대 영역', numberInput('maxSectionsPerMemory', settings.maxSectionsPerMemory, 1, 5)),
           fieldNode('상세 실행 기록 보관 수', numberInput('runDetailRetention', settings.runDetailRetention, 5, 200))
         ]),
-        guiEl('div', { class: 'sga-note', text: '분석 간격은 완성된 U+A 5턴으로 고정됩니다. 리콜 주입 문자 상한은 기본 8,000자이며 채우기 목표가 아닙니다. 관련 자료가 적으면 필요한 만큼만 주입합니다. 정본은 한 건이지만 검색 시에는 종합·시간순·인물관계·세계장면·내러티브·사실 영역을 별도 투영하고, Dense/BM25F/Exact/Forced → RRF → Hypa 중복 억제 → 증거 게이트 → MMR → 적응형 다중 구간 발췌 순으로 리콜합니다.' }),
+        guiEl('div', { class: 'sga-note', text: '분석 간격은 완성된 U+A 5턴으로 고정됩니다. 리콜 주입 문자 상한은 기본 8,000자이며 채우기 목표가 아닙니다. 관련 자료가 적으면 필요한 만큼만 주입합니다. 정본은 한 건이지만 검색 시에는 종합·시간순·인물관계·세계장면·내러티브·사실 영역을 별도 투영하고, 경량 카탈로그에서 후보 한도만 먼저 추린 뒤 Dense/BM25F/Exact/Forced → RRF → Hypa 중복 억제 → 증거 게이트 → MMR → 적응형 다중 구간 발췌 순으로 정밀 리콜합니다. 후보 재랭킹 한도는 이제 정본·벡터 정밀 로드의 실제 상한으로 동작합니다.' }),
         guiEl('div', { class: 'sga-actions' }, [
           guiEl('button', { class: 'sga-btn good', type: 'button', text: 'LIBRA 설정 저장', onClick: async () => { await LibraMemoryCore.saveSettings(LibraMemoryCore.state.settings || settings); await renderSettingsGui(); guiSetStatus('LIBRA 기억 설정을 저장했습니다.'); } }),
           guiEl('button', { class: 'sga-btn danger', type: 'button', text: '현재 채팅 LIBRA 데이터 삭제', onClick: async () => {
@@ -35293,6 +35505,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('h3', { text: '최근 리콜' }),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '선택 메모리' }), guiEl('strong', { text: String(lastRecall?.memories?.length || 0) })]),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '질의 유형' }), guiEl('strong', { text: String(lastRecall?.query?.queryType || '-') })]),
+        guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '카탈로그 → 정밀 후보' }), guiEl('strong', { text: `${Number(lastRecall?.diagnostics?.catalogCandidates || 0)} → ${Number(lastRecall?.diagnostics?.shortlistedCandidates || 0)}` })]),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '게이트 제외' }), guiEl('strong', { text: String(lastRecall?.diagnostics?.gateRejected || 0) })]),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: 'Hypa 중복 억제' }), guiEl('strong', { text: String(lastRecall?.diagnostics?.hypaOverlap?.penalized || 0) })]),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '토큰 추정' }), guiEl('strong', { text: String(lastRecall?.tokens || 0) })])
