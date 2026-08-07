@@ -1,7 +1,7 @@
 //@name libra
-//@display-name LIBRA v1.0.5
+//@display-name LIBRA v1.0.7
 //@api 3.0
-//@version 1.0.5
+//@version 1.0.7
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,7 +63,10 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
- * LIBRA v1.0.5
+ * LIBRA v1.0.7
+ *
+ * v1.0.7 makes World Additional scarce and lifecycle-bound: World ito may request it only for concrete reusable canon gaps, generation is deduplicated/capped, recall injects at most one strongly relevant candidate with cooldown/retry limits, actual post-injection manifestation becomes an “적용 완료” tombstone, and applied/stale candidates are automatically removed after bounded turn windows.
+ * v1.0.6 makes RE:TRACE discovery explicit and cheap: the IPC listener is registered before slower hooks, a zero-storage ping/capabilities action is exposed, and RE:TRACE inspection loads canonical memories/world-additional records in parallel without rereading every memory to derive active run IDs.
  *
  * v1.0.5 makes candidateLimit a real precision-load ceiling through a persistent incremental recall catalog with compact semantic vector sketches, fixes Korean query-type precedence/false continuation matches, removes the unused recentQueryMessages setting, and enforces recallMaxTokens as a true hard cap by shrinking excerpt budgets before selection.
  *
@@ -154,12 +157,13 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.5';
+  const PLUGIN_VERSION = '1.0.7';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
   const LIBRA_RETRACE_IPC_RESPONSE_CHANNEL = 'libra_memory_bridge_response_v1';
   const LIBRA_RETRACE_INSPECT_SCHEMA = 'libra.retrace.inspect.v1';
+  const LIBRA_RETRACE_CAPABILITIES_SCHEMA = 'libra.retrace.capabilities.v1';
   const LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA = 'libra.session_handoff.package.v1';
   const LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA = 'libra.session_handoff.receipt.v1';
   const LIBRA_SESSION_HANDOFF_MARKER_SCHEMA = 'libra.session_handoff.marker.v1';
@@ -25590,7 +25594,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
   const LibraMemoryCore = (() => {
-    const VERSION = '1.0.5';
+    const VERSION = '1.0.7';
     const BATCH_SIZE = 5;
     const PREFIX = 'libra:v1';
     const SETTINGS_KEY = `${PREFIX}:memory-settings`;
@@ -25603,6 +25607,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const RUN_SCHEMA = 'libra.execution_run.v1';
     const WORK_SCHEMA = 'libra.memory_work.v1';
     const WORLD_ADDITIONAL_SCHEMA = 'libra.world_additional.v1';
+    const WORLD_ADDITIONAL_MAX_ACTIVE = 6;
+    const WORLD_ADDITIONAL_MAX_CREATE_PER_BATCH = 2;
+    const WORLD_ADDITIONAL_MAX_INJECT_PER_REQUEST = 1;
+    const WORLD_ADDITIONAL_MAX_INJECTIONS = 3;
+    const WORLD_ADDITIONAL_MIN_RECALL_SCORE = 0.14;
+    const WORLD_ADDITIONAL_REINJECT_COOLDOWN_TURNS = 3;
+    const WORLD_ADDITIONAL_CANDIDATE_TTL_TURNS = 20;
+    const WORLD_ADDITIONAL_APPLIED_RETENTION_TURNS = 10;
     const MEMORY_INJECTION_MARKER = '[LIBRA 장기기억 — 관련 기억만 시간순으로 제공됨]';
     const RETRIEVAL_PROJECTION_VERSION = 'libra.retrieval_projection.v2';
     const EMBEDDING_PROJECTION_SCHEMA = 'libra.embedding_projection.v2';
@@ -27712,7 +27724,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         'Separate the current scene state from durable world canon and remove unsupported setting inference.',
         'Add missing world information when directly supported.',
         'Do not remove character/relationship or narrative information merely because it is outside your domain.',
-        'In the domain object, optionally include world_additional_needed:boolean, world_additional_reason:string, and world_additional_focus:string[] when a non-canon expansion candidate would genuinely help later RP.'
+        'World Additional is scarce. Set world_additional_needed=true only when the five-turn evidence exposes a concrete reusable world/character/location/organization/object gap that is likely to recur and cannot be safely resolved from existing canon.',
+        'Keep world_additional_needed=false for flavor, decoration, one-off scene details, obvious consequences, next-scene plotting, or anything already covered by current canon. When true, give one precise world_additional_reason and 1~3 narrow world_additional_focus values.'
       ],
       plot_ito: [
         'You are Plot ito, the final editing stage of LIBRA.',
@@ -28116,77 +28129,221 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const worldAdditionalRequestFromStage = stage => {
       const domain = asObject(stage?.analysis?.domain);
       const needed = domain.world_additional_needed === true || String(domain.world_additional_needed || '').toLowerCase() === 'true';
+      const reason = string(domain.world_additional_reason || '');
+      const focus = asArray(domain.world_additional_focus).map(string).filter(Boolean).slice(0, 3);
       return {
-        needed,
-        reason: string(domain.world_additional_reason || ''),
-        focus: asArray(domain.world_additional_focus).map(string).filter(Boolean)
+        needed: needed && Boolean(reason) && focus.length > 0,
+        reason,
+        focus
       };
+    };
+
+    const worldAdditionalSourceEndTurn = item => Math.max(0, Number(
+      item?.sourceTurnRange?.end
+      || item?.sourceTurnEnd
+      || item?.sourceTurn
+      || 0
+    ) || 0);
+
+    const worldAdditionalAppliedTurn = item => Math.max(0, Number(
+      item?.tombstone?.appliedTurn
+      || item?.appliedTurn
+      || item?.manifestedTurn
+      || 0
+    ) || 0);
+
+    const worldAdditionalIsActive = item => ['eligible', 'injected'].includes(string(item?.status));
+
+    const worldAdditionalDuplicateScore = (left, right) => {
+      const leftText = `${string(left?.title)} ${string(left?.content)} ${asArray(left?.keywords).map(string).join(' ')}`.trim();
+      const rightText = `${string(right?.title)} ${string(right?.content)} ${asArray(right?.keywords).map(string).join(' ')}`.trim();
+      if (!leftText || !rightText) return 0;
+      const leftTitle = string(left?.title).toLowerCase();
+      const rightTitle = string(right?.title).toLowerCase();
+      if (leftTitle && rightTitle && leftTitle === rightTitle) return 1;
+      return Math.min(lexicalScore(leftText, rightText), lexicalScore(rightText, leftText));
+    };
+
+    const worldAdditionalManifestationEvidence = (item, evidenceText) => {
+      const evidence = string(evidenceText).toLowerCase();
+      if (!evidence) return { matched: false, exactTitle: false, matchedKeywords: [], contentScore: 0 };
+      const title = string(item?.title).toLowerCase();
+      const keywords = asArray(item?.keywords).map(value => string(value).toLowerCase()).filter(value => value.length >= 2);
+      const exactTitle = title.length >= 3 && evidence.includes(title);
+      const matchedKeywords = keywords.filter(keyword => evidence.includes(keyword));
+      const contentScore = lexicalScore(`${item?.title || ''} ${item?.content || ''} ${keywords.join(' ')}`, evidence);
+      const matched = exactTitle
+        || (matchedKeywords.length >= 2 && contentScore >= 0.16)
+        || (matchedKeywords.length >= 1 && contentScore >= 0.30);
+      return { matched, exactTitle, matchedKeywords, contentScore };
+    };
+
+    const pruneWorldAdditionalLifecycle = async (scope, manifest, currentTurn = 0) => {
+      const turn = Math.max(0, Number(currentTurn || 0) || 0);
+      const retainedIds = [];
+      const removedIds = [];
+      const migratedIds = [];
+      for (const itemId of asArray(manifest.worldAdditionalIds)) {
+        const item = await loadWorldItem(scope, itemId);
+        if (!item) continue;
+        const status = string(item.status);
+        if (status === 'canonicalized') {
+          const appliedTurn = worldAdditionalAppliedTurn(item) || worldAdditionalSourceEndTurn(item) || turn;
+          item.status = 'applied_tombstone';
+          item.appliedTurn = appliedTurn;
+          item.appliedAt = item.canonicalizedAt || item.manifestedAt || item.updatedAt || nowIso();
+          item.tombstone = {
+            kind: 'world_additional_applied',
+            label: '적용 완료',
+            appliedAt: item.appliedAt,
+            appliedTurn,
+            expiresAfterTurn: appliedTurn + WORLD_ADDITIONAL_APPLIED_RETENTION_TURNS
+          };
+          item.updatedAt = nowIso();
+          await storage.setJson(key.worldAdditional(scope, itemId), item);
+          migratedIds.push(itemId);
+        }
+        const effectiveStatus = string(item.status);
+        const sourceEndTurn = worldAdditionalSourceEndTurn(item);
+        const appliedTurn = worldAdditionalAppliedTurn(item);
+        const expiresAfterTurn = Math.max(0, Number(item?.tombstone?.expiresAfterTurn || 0) || 0)
+          || (appliedTurn ? appliedTurn + WORLD_ADDITIONAL_APPLIED_RETENTION_TURNS : 0);
+        const appliedExpired = effectiveStatus === 'applied_tombstone' && turn > 0 && expiresAfterTurn > 0 && turn >= expiresAfterTurn;
+        const staleCandidate = worldAdditionalIsActive(item)
+          && turn > 0
+          && sourceEndTurn > 0
+          && turn >= sourceEndTurn + WORLD_ADDITIONAL_CANDIDATE_TTL_TURNS;
+        if (appliedExpired || staleCandidate) {
+          await storage.remove(key.worldAdditional(scope, itemId));
+          removedIds.push(itemId);
+          continue;
+        }
+        retainedIds.push(itemId);
+      }
+      if (removedIds.length || retainedIds.length !== asArray(manifest.worldAdditionalIds).length) {
+        manifest.worldAdditionalIds = retainedIds;
+      }
+      return { removedIds, migratedIds, retainedIds };
     };
 
     const createWorldAdditional = async (scope, manifest, memory, request, run) => {
       const settings = await loadMemorySettings();
       if (!settings.worldAdditionalEnabled || !request?.needed) return [];
+      const currentTurn = Math.max(0, Number(memory?.turnRange?.end || 0) || 0);
+      await pruneWorldAdditionalLifecycle(scope, manifest, currentTurn);
+      const activeRunIds = await activeCanonicalRunIds(scope, manifest);
+      const existingActive = [];
+      for (const itemId of asArray(manifest.worldAdditionalIds)) {
+        const item = await loadWorldItem(scope, itemId);
+        if (!worldAdditionalIsActive(item)) continue;
+        if (item.sourceRunId && !activeRunIds.has(string(item.sourceRunId))) continue;
+        existingActive.push(item);
+      }
+      const availableSlots = Math.max(0, WORLD_ADDITIONAL_MAX_ACTIVE - existingActive.length);
+      if (!availableSlots) {
+        run.worldAdditional = { status: 'skipped', reason: 'active_candidate_cap', activeCandidates: existingActive.length };
+        return [];
+      }
       const system = [
-        'You are LIBRA World Additional, an optional non-canon augmentation generator.',
-        'Based on the canonical memory, create only reusable future world/character/location/organization/object candidates that have not yet happened.',
-        'They are suggestions, never current canon. Return one JSON object only:',
+        'You are LIBRA World Additional, a scarce optional non-canon augmentation generator.',
+        'Create a proposal only when a concrete reusable continuity gap cannot be safely filled from current canon and is likely to matter again.',
+        'Do not create flavor, decorative detail, one-off scene dressing, obvious consequences, next-scene plotting, alternate outcomes, or duplicates of existing candidates.',
+        `Return at most ${WORLD_ADDITIONAL_MAX_CREATE_PER_BATCH} proposals. Returning an empty proposals array is preferred when nothing is genuinely necessary.`,
+        'Every proposal must remain a suggestion, never current canon. Return one JSON object only:',
         '{"proposals":[{"title":"","content":"","kind":"world|character|location|organization|object","keywords":[],"reason":""}]}'
       ].join('\n');
-      const user = `[정본 메모리]\n${memory.text}\n\n[생성 이유]\n${request.reason || '(none)'}\n\n[초점]\n${request.focus.join(', ') || '(none)'}`;
-      const result = await LibraProviderBridge.callTask('world_additional', system, user, { temp: 0.45, maxTokens: 2400, jsonMode: true, forceNonStreaming: true, domain: 'world_additional', featureDomain: 'world_additional' });
+      const existing = existingActive.length
+        ? existingActive.map(item => `- ${item.title}: ${compact(item.content, 360)}`).join('\n')
+        : '(none)';
+      const user = `[정본 메모리]\n${memory.text}\n\n[생성 이유]\n${request.reason || '(none)'}\n\n[초점]\n${request.focus.join(', ') || '(none)'}\n\n[이미 존재하는 활성 후보 — 중복 금지]\n${existing}`;
+      const result = await LibraProviderBridge.callTask('world_additional', system, user, { temp: 0.35, maxTokens: 1400, jsonMode: true, forceNonStreaming: true, domain: 'world_additional', featureDomain: 'world_additional' });
       if (!result?.ok) return [];
       const parsed = relaxedJsonParse(result.content);
-      const proposals = asArray(parsed?.proposals).slice(0, 6);
+      const proposals = asArray(parsed?.proposals).slice(0, Math.min(WORLD_ADDITIONAL_MAX_CREATE_PER_BATCH, availableSlots));
       const created = [];
       for (const proposal of proposals) {
         const title = compact(proposal?.title || '', 180);
-        const content = compact(proposal?.content || '', 1800);
-        if (!title || !content) continue;
+        const content = compact(proposal?.content || '', 1600);
+        const reason = compact(proposal?.reason || request.reason || '', 500);
+        const keywords = asArray(proposal?.keywords).map(string).filter(Boolean).slice(0, 16);
+        if (!title || !content || !reason) continue;
+        const candidate = { title, content, keywords };
+        if ([...existingActive, ...created].some(item => worldAdditionalDuplicateScore(candidate, item) >= 0.72)) continue;
         const itemId = id('wa');
         const item = {
           schema: WORLD_ADDITIONAL_SCHEMA, itemId, scopeKey: scope.scopeKey, sourceMemoryId: memory.memoryId,
-          sourceRunId: run.runId, sourceDigest: memory.sourceDigest || '', sourceRevision: Number(memory.revision || 0), status: 'eligible', title, content,
-          kind: string(proposal?.kind || 'world'), keywords: asArray(proposal?.keywords).map(string).filter(Boolean).slice(0, 24),
-          reason: compact(proposal?.reason || request.reason || '', 500), createdAt: nowIso(), updatedAt: nowIso(),
-          injectedAt: '', manifestedAt: '', canonicalMemoryId: ''
+          sourceRunId: run.runId, sourceDigest: memory.sourceDigest || '', sourceRevision: Number(memory.revision || 0),
+          sourceTurnRange: clone(memory.turnRange || {}), status: 'eligible', title, content,
+          kind: string(proposal?.kind || 'world'), keywords, reason, createdAt: nowIso(), updatedAt: nowIso(),
+          injectedAt: '', firstInjectedAt: '', lastInjectedAt: '', firstInjectedTurn: 0, lastInjectedTurn: 0, injectionCount: 0,
+          manifestedAt: '', manifestedTurn: 0, appliedAt: '', appliedTurn: 0, tombstone: null, canonicalMemoryId: ''
         };
         await storage.setJson(key.worldAdditional(scope, itemId), item);
         manifest.worldAdditionalIds.push(itemId);
         created.push(item);
       }
-      if (created.length) {
-        run.worldAdditional = {
-          status: 'complete', count: created.length, provider: result.provider || '', presetName: result.presetName || '',
-          model: result.model || '', rawResponse: result.content || '', itemIds: created.map(item => item.itemId)
-        };
-      }
+      run.worldAdditional = created.length ? {
+        status: 'complete', count: created.length, provider: result.provider || '', presetName: result.presetName || '',
+        model: result.model || '', rawResponse: result.content || '', itemIds: created.map(item => item.itemId),
+        activeCandidatesBefore: existingActive.length, activeCap: WORLD_ADDITIONAL_MAX_ACTIVE
+      } : {
+        status: 'skipped', reason: 'no_necessary_novel_candidate', activeCandidates: existingActive.length,
+        rawResponse: result.content || ''
+      };
       return created;
     };
 
     const canonicalizeManifestedWorldAdditional = async (scope, manifest, batch, memory, run) => {
-      const evidence = `${transcript(batch)}\n\n${memory.text}`.toLowerCase();
+      const currentTurn = Math.max(0, Number(batch?.at?.(-1)?.turn || memory?.turnRange?.end || 0) || 0);
+      await pruneWorldAdditionalLifecycle(scope, manifest, currentTurn);
       const updated = [];
       const activeRunIds = await activeCanonicalRunIds(scope, manifest);
       for (const itemId of asArray(manifest.worldAdditionalIds)) {
         const item = await loadWorldItem(scope, itemId);
-        if (!item || !['injected', 'manifested'].includes(item.status)) continue;
+        if (!item || string(item.status) !== 'injected') continue;
         if (!item.sourceRunId || !activeRunIds.has(string(item.sourceRunId))) continue;
-        const title = string(item.title).toLowerCase();
-        const keywords = asArray(item.keywords).map(value => string(value).toLowerCase()).filter(Boolean);
-        const exactTitle = title.length >= 2 && evidence.includes(title);
-        const matchedKeywords = keywords.filter(keyword => keyword.length >= 2 && evidence.includes(keyword));
-        if (!exactTitle && matchedKeywords.length < Math.min(2, Math.max(1, keywords.length))) continue;
-        item.status = 'canonicalized';
-        item.manifestedAt ||= nowIso();
-        item.canonicalizedAt = nowIso();
-        item.retiredAt = item.canonicalizedAt;
+        const firstInjectedTurn = Math.max(1, Number(item.firstInjectedTurn || item.lastInjectedTurn || 1) || 1);
+        let manifested = null;
+        for (const pair of asArray(batch)) {
+          if (Number(pair?.turn || 0) < firstInjectedTurn) continue;
+          const evidence = `${pair?.assistant?.text || ''}`;
+          const match = worldAdditionalManifestationEvidence(item, evidence);
+          if (match.matched) {
+            manifested = { turn: Number(pair.turn || currentTurn), ...match };
+            break;
+          }
+        }
+        if (!manifested) continue;
+        const appliedAt = nowIso();
+        item.status = 'applied_tombstone';
+        item.manifestedAt ||= appliedAt;
+        item.manifestedTurn = manifested.turn;
+        item.appliedAt = appliedAt;
+        item.appliedTurn = manifested.turn;
+        item.canonicalizedAt = appliedAt;
+        item.retiredAt = appliedAt;
         item.canonicalMemoryId = memory.memoryId;
         item.canonicalRunId = run.runId;
-        item.updatedAt = nowIso();
+        item.tombstone = {
+          kind: 'world_additional_applied',
+          label: '적용 완료',
+          appliedAt,
+          appliedTurn: manifested.turn,
+          expiresAfterTurn: manifested.turn + WORLD_ADDITIONAL_APPLIED_RETENTION_TURNS,
+          evidence: {
+            exactTitle: manifested.exactTitle === true,
+            matchedKeywords: manifested.matchedKeywords.slice(0, 8),
+            contentScore: Number(Number(manifested.contentScore || 0).toFixed(4))
+          }
+        };
+        item.updatedAt = appliedAt;
         await storage.setJson(key.worldAdditional(scope, item.itemId), item);
         updated.push(item.itemId);
       }
-      if (updated.length) run.worldAdditionalCanonicalized = { status: 'complete', itemIds: updated, memoryId: memory.memoryId };
+      if (updated.length) {
+        run.worldAdditionalApplied = { status: 'complete', itemIds: updated, memoryId: memory.memoryId, retentionTurns: WORLD_ADDITIONAL_APPLIED_RETENTION_TURNS };
+        run.worldAdditionalCanonicalized = { status: 'complete', itemIds: updated, memoryId: memory.memoryId, compatibility: true };
+      }
       return updated;
     };
 
@@ -29342,23 +29499,36 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       selected.sort((a, b) => (Number(a.memory?.sessionEpoch || 0) - Number(b.memory?.sessionEpoch || 0)) || Number(a.memory.turnRange?.start || 0) - Number(b.memory.turnRange?.start || 0));
 
+      const completedTurn = buildPairs(context.chat).length;
+      const targetTurn = completedTurn + 1;
+      await pruneWorldAdditionalLifecycle(context.scope, manifest, completedTurn);
       const worldAdditional = [];
       const activeRunIdsForRecall = new Set(asArray(recallCatalog?.entries).map(entry => string(entry?.runId || '')).filter(Boolean));
       for (const itemId of asArray(manifest.worldAdditionalIds)) {
         const item = await loadWorldItem(context.scope, itemId);
-        if (!item || !['eligible', 'injected'].includes(item.status)) continue;
+        if (!item || !worldAdditionalIsActive(item)) continue;
         // World Additional is branch-scoped auxiliary data. Never let a proposal whose
         // source canonical revision is inactive leak into a rollback/reroll branch.
         if (!item.sourceRunId || !activeRunIdsForRecall.has(string(item.sourceRunId))) continue;
+        const injectionCount = Math.max(0, Number(item.injectionCount || 0) || 0);
+        if (injectionCount >= WORLD_ADDITIONAL_MAX_INJECTIONS) continue;
+        const lastInjectedTurn = Math.max(0, Number(item.lastInjectedTurn || 0) || 0);
+        if (lastInjectedTurn && targetTurn - lastInjectedTurn < WORLD_ADDITIONAL_REINJECT_COOLDOWN_TURNS) continue;
         const score = lexicalScore(queryBundle.sparseText, `${item.title} ${item.content} ${asArray(item.keywords).join(' ')}`);
-        if (score > 0.08) worldAdditional.push({ ...item, score });
+        if (score >= WORLD_ADDITIONAL_MIN_RECALL_SCORE) worldAdditional.push({ ...item, score });
       }
       worldAdditional.sort((a, b) => b.score - a.score);
-      const selectedWorld = worldAdditional.slice(0, 3);
+      const selectedWorld = worldAdditional.slice(0, WORLD_ADDITIONAL_MAX_INJECT_PER_REQUEST);
       for (const item of selectedWorld) {
+        const injectedAt = nowIso();
         item.status = 'injected';
-        item.injectedAt = nowIso();
-        item.updatedAt = nowIso();
+        item.injectedAt ||= injectedAt;
+        item.firstInjectedAt ||= injectedAt;
+        item.lastInjectedAt = injectedAt;
+        item.firstInjectedTurn ||= targetTurn;
+        item.lastInjectedTurn = targetTurn;
+        item.injectionCount = Math.max(0, Number(item.injectionCount || 0) || 0) + 1;
+        item.updatedAt = injectedAt;
         await storage.setJson(key.worldAdditional(context.scope, item.itemId), item);
       }
 
@@ -29445,7 +29615,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         '관련 기억은 필요할 때 자연스럽게 반영하되, 기억이 주입되었다는 이유만으로 이를 인용·요약·재연하지 않는다.',
         '과거 사건을 현재 사건처럼 되풀이하지 말고, 최신 가시 대화가 바꾼 상태는 오래된 기억보다 우선한다.',
         '인물별 지식 경계·비밀·약속·관계 변화·지속되는 결과·미해결 문제를 보존하되, 현재 근거 없이 새로 해결하거나 다른 인물에게 전파하지 않는다.',
-        '불확실로 기록된 정보는 계속 불확실하게 유지한다. 월드 에디셔널은 이야기에서 실제로 구현되기 전까지 비정본 선택 후보다.'
+        '불확실로 기록된 정보는 계속 불확실하게 유지한다. 월드 에디셔널은 이야기에서 실제로 구현되기 전까지 비정본 선택 후보다.',
+        '월드 에디셔널은 관련성이 높더라도 반드시 사용할 의무가 없다. 현재 장면에 자연스럽게 필요한 경우에만 하나의 후보를 채택하고, 이미 적용된 후보를 다시 끌어오지 않는다.'
       ].join('\n');
       const fixedChars = MEMORY_INJECTION_MARKER.length + contract.length + 6;
       let remaining = Math.max(0, charCeiling - fixedChars);
@@ -29476,7 +29647,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
 
       if (remaining >= 240 && result.worldAdditional?.length) {
-        const heading = '[LIBRA 월드 에디셔널 — 아직 정본이 아닌 사용 가능 후보]';
+        const heading = '[LIBRA 월드 에디셔널 — 필요할 때만 선택적으로 사용할 비정본 후보]';
         if (heading.length + 2 <= remaining) {
           parts.push(heading);
           remaining -= heading.length + 2;
@@ -29614,25 +29785,59 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       throw lastError || new Error(`대상 채팅 ${string(targetChatId)}을 찾지 못했습니다.`);
     };
 
+    const mapForRetrace = async (items, loader, concurrency = 12) => {
+      const source = asArray(items);
+      const width = Math.max(1, Math.min(24, Number(concurrency || 12) || 12));
+      const out = new Array(source.length);
+      for (let offset = 0; offset < source.length; offset += width) {
+        const batch = source.slice(offset, offset + width);
+        const loaded = await Promise.all(batch.map((item, index) => loader(item, offset + index)));
+        for (let index = 0; index < loaded.length; index += 1) out[offset + index] = loaded[index];
+      }
+      return out;
+    };
+
+    const retraceCapabilities = () => clone({
+      schema: LIBRA_RETRACE_CAPABILITIES_SCHEMA,
+      pluginVersion: VERSION,
+      available: true,
+      inspectSchema: LIBRA_RETRACE_INSPECT_SCHEMA,
+      actions: ['ping', 'capabilities', 'inspect', 'prepare_session_handoff', 'adopt_session_handoff', 'verify_session_handoff'],
+      features: {
+        lightweightProbe: true,
+        canonicalViewer: true,
+        sessionHandoff: true,
+        parallelInspect: true,
+        inspectConcurrency: 12
+      },
+      respondedAt: nowIso()
+    });
+
     const inspectForRetrace = async () => {
       const context = await resolveContext();
       const pairs = buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
-      const memories = [];
-      const missingMemoryKeys = [];
-      for (const ref of listMemoryRefs(manifest)) {
-        const memory = await loadMemoryRef(ref);
-        if (memory) memories.push(memory);
-        else if (ref?.key) missingMemoryKeys.push(string(ref.key));
-      }
-      const activeRunIds = await activeCanonicalRunIds(context.scope, manifest);
-      const worldAdditional = [];
-      for (const itemId of manifest.worldAdditionalIds) {
-        const item = await loadWorldItem(context.scope, itemId);
-        if (!item) continue;
-        if (item.sourceRunId && !activeRunIds.has(string(item.sourceRunId))) continue;
-        worldAdditional.push(item);
-      }
+      const memoryRefs = listMemoryRefs(manifest);
+      const loadedMemories = await mapForRetrace(memoryRefs, ref => loadMemoryRef(ref), 12);
+      const memories = loadedMemories.filter(Boolean);
+      const missingMemoryKeys = memoryRefs
+        .filter((ref, index) => !loadedMemories[index] && ref?.key)
+        .map(ref => string(ref.key));
+
+      // Derive active run IDs from the records already loaded above. The previous
+      // implementation reread every canonical memory serially here, which made a
+      // harmless RE:TRACE viewer probe scale poorly on long sessions.
+      const activeRunIds = new Set(memories
+        .filter(memory => memory?.status === 'committed' && memory?.runId)
+        .map(memory => string(memory.runId)));
+      const loadedWorldAdditional = await mapForRetrace(
+        manifest.worldAdditionalIds,
+        itemId => loadWorldItem(context.scope, itemId),
+        12
+      );
+      const worldAdditional = loadedWorldAdditional.filter(item => (
+        item && (!item.sourceRunId || activeRunIds.has(string(item.sourceRunId)))
+      ));
       const inheritedCount = memories.filter(memory => memory?.inheritedSessionHistory === true || Number(memory?.sessionEpoch || 0) < 0).length;
       return clone({
         schema: LIBRA_RETRACE_INSPECT_SCHEMA,
@@ -29888,7 +30093,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       debugExtractCurrentRequestHypaEvidence: extractCurrentRequestHypaEvidence,
       debugHypaOverlapForMemory: hypaOverlapForMemory,
       debugBuildAriadneHistoricalHypaPacket: buildAriadneHistoricalHypaPacket,
-      refreshSnapshot, exportCurrentScope, inspectForRetrace, prepareSessionHandoff, adoptSessionHandoff, verifySessionHandoff, resolveTargetContextForHandoff, waitForTargetContextForHandoff, resolveStableScopeKey, deleteCurrentScope, retryFailed,
+      refreshSnapshot, exportCurrentScope, retraceCapabilities, inspectForRetrace, prepareSessionHandoff, adoptSessionHandoff, verifySessionHandoff, resolveTargetContextForHandoff, waitForTargetContextForHandoff, resolveStableScopeKey, deleteCurrentScope, retryFailed,
       listEmbeddingProviders: () => EmbeddingProviderRegistry.list(),
       getSnapshot: () => clone(state.snapshot),
       getSettings: () => clone(state.settings || DEFAULT_SETTINGS),
@@ -35142,12 +35347,23 @@ html,body{width:100%;height:100%;overflow:hidden}
 
   const buildLibraWorldAdditionalPanel = () => {
     const items = LibraMemoryCore.getSnapshot().worldAdditional || [];
-    if (!items.length) return guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '월드 에디셔널 후보가 없습니다.' }), guiEl('div', { class: 'sga-note', text: '세계 ito가 실제로 보충 후보가 필요하다고 판단한 5턴 분석에서만 조건부 생성됩니다.' })]);
-    return guiEl('div', { class: 'sga-list-items' }, items.slice().reverse().map(item => guiEl('details', { class: 'sga-card wide' }, [
-      guiEl('summary', {}, [guiEl('strong', { text: item.title }), libraStatusBadge(item.status, item.status === 'eligible' ? 'good' : 'warn')]),
-      guiEl('div', { class: 'sga-live-result-text', text: item.content }),
-      guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ itemId: item.itemId, kind: item.kind, keywords: item.keywords, reason: item.reason, sourceMemoryId: item.sourceMemoryId, sourceRunId: item.sourceRunId, injectedAt: item.injectedAt }, null, 2) })
-    ])));
+    if (!items.length) return guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '월드 에디셔널 후보가 없습니다.' }), guiEl('div', { class: 'sga-note', text: '세계 ito가 반복 사용 가능성이 높은 구체적 설정 공백을 발견했을 때만 소수 후보를 만듭니다.' })]);
+    return guiEl('div', { class: 'sga-list-items' }, items.slice().reverse().map(item => {
+      const applied = item.status === 'applied_tombstone';
+      const statusLabel = applied ? (item.tombstone?.label || '적용 완료') : item.status;
+      const statusTone = applied ? 'good' : item.status === 'eligible' ? 'good' : 'warn';
+      const lifecycle = applied
+        ? `TURN ${item.appliedTurn || item.tombstone?.appliedTurn || '?'} 적용 · TURN ${item.tombstone?.expiresAfterTurn || '?'} 이후 자동 삭제`
+        : item.status === 'injected'
+          ? `주입 ${Number(item.injectionCount || 0)}회 · 마지막 TURN ${item.lastInjectedTurn || '?'}`
+          : `후보 생성 TURN ${item.sourceTurnRange?.end || '?'}`;
+      return guiEl('details', { class: 'sga-card wide' }, [
+        guiEl('summary', {}, [guiEl('strong', { text: item.title }), libraStatusBadge(statusLabel, statusTone)]),
+        guiEl('div', { class: 'sga-live-result-text', text: item.content }),
+        guiEl('div', { class: 'sga-note', text: lifecycle }),
+        guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ itemId: item.itemId, kind: item.kind, keywords: item.keywords, reason: item.reason, sourceMemoryId: item.sourceMemoryId, sourceRunId: item.sourceRunId, sourceTurnRange: item.sourceTurnRange, injectedAt: item.injectedAt, firstInjectedTurn: item.firstInjectedTurn, lastInjectedTurn: item.lastInjectedTurn, injectionCount: item.injectionCount, appliedAt: item.appliedAt, appliedTurn: item.appliedTurn, tombstone: item.tombstone }, null, 2) })
+      ]);
+    }));
   };
 
   const buildLibraMemorySettingsPanel = () => {
@@ -35173,6 +35389,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           toggle('forceCurrentScene', '연속 입력에서 최근 장면 후보 보호'),
           toggle('worldAdditionalEnabled', '월드 에디셔널 사용')
         ]),
+        guiEl('div', { class: 'sga-note', style: { marginTop: '10px' }, text: '월드 에디셔널은 활성 후보 최대 6개, 5턴 분석당 신규 최대 2개, 요청당 주입 최대 1개로 제한됩니다. 실제 후속 대화에 반영되면 “적용 완료” tombstone으로 전환되어 다시 주입되지 않고, 적용 TURN 기준 10턴 뒤 자동 삭제됩니다. 적용되지 않은 후보도 생성 기준 20턴이 지나면 정리됩니다.' }),
         guiEl('div', { class: 'sga-note', style: { marginTop: '10px' }, text: '기존 세션의 과거 대화는 자동으로 분석하지 않습니다. 홈의 “수동 콜드스타트”를 눌렀을 때만 누락된 과거 5턴 구간을 구축합니다.' }),
         guiEl('div', { class: 'sga-grid', style: { marginTop: '12px' } }, [
           fieldNode('리콜 토큰 예산', numberInput('recallMaxTokens', settings.recallMaxTokens, 320, 12000)),
@@ -35835,6 +36052,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     async getCanonicalMemories() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().memories; },
     async getMemoryRuns() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().runs; },
     async getWorldAdditional() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().worldAdditional; },
+    getRetraceCapabilities() { return LibraMemoryCore.retraceCapabilities(); },
     async inspectForRetrace() { return await LibraMemoryCore.inspectForRetrace(); },
     async prepareSessionHandoff(options = {}) { return await LibraMemoryCore.prepareSessionHandoff(options); },
     async adoptSessionHandoff(options = {}) { return await LibraMemoryCore.adoptSessionHandoff(options); },
@@ -35974,7 +36192,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       let result = null;
       let error = '';
       try {
-        if (action === 'inspect') result = await LibraMemoryCore.inspectForRetrace();
+        if (action === 'ping' || action === 'capabilities') result = LibraMemoryCore.retraceCapabilities();
+        else if (action === 'inspect') result = await LibraMemoryCore.inspectForRetrace();
         else if (action === 'prepare_session_handoff') result = await LibraMemoryCore.prepareSessionHandoff(request.payload || {});
         else if (action === 'adopt_session_handoff') result = await LibraMemoryCore.adoptSessionHandoff(request.payload || {});
         else if (action === 'verify_session_handoff') result = await LibraMemoryCore.verifySessionHandoff(request.payload || {});
@@ -36064,9 +36283,11 @@ html,body{width:100%;height:100%;overflow:hidden}
       }
     };
     Runtime.hookStatus.input = false;
+    // Register cross-plugin discovery first. Permission prompts, replacer setup, or
+    // output-listener setup must never delay RE:TRACE from discovering LIBRA.
+    await registerRetraceIpc().catch(error => { Runtime.hookStatus.retraceIpc = false; warn('LIBRA RE:TRACE IPC registration failed.', error); });
     await registerBeforeRequestHook();
     await registerOutputListener();
-    await registerRetraceIpc().catch(error => { Runtime.hookStatus.retraceIpc = false; warn('LIBRA RE:TRACE IPC registration failed.', error); });
 
     const unload = async () => {
       try {
