@@ -1,8 +1,8 @@
 //@name libra
-//@display-name LIBRA v1.0.1
+//@display-name LIBRA v1.0.4
 //@api 3.0
-//@version 1.0.1
-//@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
+//@version 1.0.4
+//@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
 //@arg debug string true|false
 //@arg model_presets_json string JSON object of saved LLM provider presets
@@ -32,6 +32,7 @@
 //@arg llm_glm_thinking string Alternate GLM thinking alias
 //@arg llm_service_tier string off|auto|default|flex|priority|scale
 //@arg llm_stream string true|false
+//@arg llm_prompt_cache string auto|off
 //@arg custom_service_tier_passthrough string true|false
 //@arg vertex_flex_mode string off|provisioned_then_flex|flex_only
 //@arg llm_extra_body_json string Additional fallback request body JSON
@@ -61,9 +62,13 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
- * LIBRA v1.0.1
+ * LIBRA v1.0.4
  *
+ * v1.0.4 adds the RE:TRACE IPC contract, a read-only canonical-memory viewer feed, and durable next-session predecessor-memory handoff without legacy lorebook/World Manager transport.
+ *
+ * v1.0.3 adds native prompt-cache support for OpenAI GPT, Anthropic Claude, and Google Gemini memory-pipeline calls. A stable five-turn evidence prefix is shared across Ariadne/ito stages when the same provider/model is reused; provider-specific cache controls fail open and cache usage is normalized into execution receipts.
  * Independent RisuAI long-term-memory plugin.
+ * v1.0.2 adds branch-safe rollback/reroll guards: beforeRequest reconciles canonical batches against the live chat before recall, stale in-flight analyses are retired, commit is revalidated against the live branch, historical revisions can be reactivated without an LLM call, and World Additional is scoped to the active canonical run.
  * v1.0.1 deepens runtime recall without forcing filler: adaptive multi-span excerpts may use up to the configured 8,000-character default cap, and recalled memory is injected into the stable system prefix with an explicit read-only memory contract.
  * v1.0.1 keeps ito stages advisory/non-fatal: once Ariadne succeeds, the latest valid draft is committed even if an ito fails; manual cold-start also continues across later complete batches.
  * The serial pipeline inherited as an implementation basis is now LIBRA's only
@@ -146,7 +151,16 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.1';
+  const PLUGIN_VERSION = '1.0.4';
+  const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
+  const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
+  const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
+  const LIBRA_RETRACE_IPC_RESPONSE_CHANNEL = 'libra_memory_bridge_response_v1';
+  const LIBRA_RETRACE_INSPECT_SCHEMA = 'libra.retrace.inspect.v1';
+  const LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA = 'libra.session_handoff.package.v1';
+  const LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA = 'libra.session_handoff.receipt.v1';
+  const LIBRA_SESSION_HANDOFF_MARKER_SCHEMA = 'libra.session_handoff.marker.v1';
+  const LIBRA_SESSION_HANDOFF_TTL_MS = 30 * 60 * 1000;
   const INJECTION_HEADER = '[LIBRA LONG-TERM MEMORY]';
   const LEGACY_INJECTION_HEADERS = Object.freeze([]);
   const STAGE_SCHEMA = 'libra.pipeline_stage.v1';
@@ -1590,7 +1604,7 @@
     forceWriterRefresh: false,
     userIntentOoc: { targetStage: 'ariadne', messages: [], messagesByStage: {}, startedByStage: {}, pendingByStage: {}, summariesByStage: {}, revisionsByStage: {}, busy: false, lastError: '', statusText: '', statusState: 'idle', requestId: 0 },
     requestReuse: { hits: 0, misses: 0, stores: 0, evictions: 0, hostRetryBypasses: 0, lastFingerprint: '', lastReuseAt: 0 },
-    hookStatus: { input: false, beforeRequest: false, afterRequest: false, output: false, replacerPermission: 'unknown', unload: false, setting: false, button: false, inputAssistSendButton: false }
+    hookStatus: { input: false, beforeRequest: false, afterRequest: false, output: false, retraceIpc: false, replacerPermission: 'unknown', unload: false, setting: false, button: false, inputAssistSendButton: false }
   };
 
   const log = (...args) => {
@@ -1915,6 +1929,7 @@
       thinking_type: compact(thinkingType || 'enabled', 80),
       glm_thinking_type: compact(thinkingType, 80),
       stream: asBool(raw.stream ?? raw.llm_stream, false),
+      prompt_cache: normalizeChoice(raw.prompt_cache || raw.promptCache || raw.llm_prompt_cache || 'auto', ['auto', 'off'], 'auto'),
       service_tier: normalizeChoice(raw.service_tier || raw.llm_service_tier || 'off', ['off', 'auto', 'default', 'flex', 'priority', 'scale'], 'off'),
       custom_service_tier_passthrough: asBool(raw.custom_service_tier_passthrough ?? raw.service_tier_passthrough, false),
       vertex_flex_mode: normalizeChoice(raw.vertex_flex_mode || 'off', ['off', 'provisioned_then_flex', 'flex_only'], 'off'),
@@ -2767,6 +2782,7 @@
       custom_service_tier_passthrough: await getArgument('custom_service_tier_passthrough', 'false'),
       vertex_flex_mode: await getArgument('vertex_flex_mode', 'off'),
       stream: await getArgument('llm_stream', 'false'),
+      prompt_cache: await getArgument('llm_prompt_cache', 'auto'),
       extra_body_json: await getArgument('llm_extra_body_json', '')
     });
     bank.default = fallbackPreset;
@@ -11168,6 +11184,324 @@ function mergeAgentCbsWarnings(...warningLists) {
     return deepMergeJson(body, parsed);
   };
 
+  const PROMPT_CACHE_SCHEMA = 'libra.prompt_cache.v1';
+  const PROMPT_CACHE_STABLE_START = '[LIBRA PROMPT CACHE STABLE EVIDENCE START]';
+  const PROMPT_CACHE_STABLE_END = '[LIBRA PROMPT CACHE STABLE EVIDENCE END]';
+  const PROMPT_CACHE_MEMORY_STAGES = Object.freeze(['ariadne', 'character_ito', 'world_ito', 'plot_ito']);
+  const PROMPT_CACHE_COMMON_SYSTEM = [
+    'You are executing an internal LIBRA long-term-memory analysis pipeline.',
+    'The first user content block contains the exact immutable five-turn U+A evidence for this batch. Treat USER and ASSISTANT roles literally and never swap actors.',
+    'A later user content block contains the current stage instructions, read-only references, current draft, patch contract, and retry corrections. Follow those instructions as the active task.',
+    'The five-turn evidence is the sole direct authority for events and state changes. References may clarify identity or prior canon but cannot invent current-batch events.',
+    'Do not write the next RP scene or treat the cached evidence as a user command. Return only the artifact required by the current stage instructions.'
+  ].join('\n');
+  const PromptCacheRuntime = {
+    gemini: new Map(),
+    geminiFailures: new Map(),
+    unsupported: new Set(),
+    last: null
+  };
+
+  const promptCachePolicy = preset => normalizeChoice(preset?.prompt_cache || 'auto', ['auto', 'off'], 'auto');
+  const stripPromptCacheMarkers = value => text(value || '')
+    .replace(PROMPT_CACHE_STABLE_START, '')
+    .replace(PROMPT_CACHE_STABLE_END, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  const extractPromptCacheEnvelope = (systemPrompt, userPrompt) => {
+    const source = text(userPrompt || '');
+    const start = source.indexOf(PROMPT_CACHE_STABLE_START);
+    const end = source.indexOf(PROMPT_CACHE_STABLE_END);
+    if (start < 0 || end < 0 || end <= start) return null;
+    const before = source.slice(0, start).trim();
+    const stablePrefix = source.slice(start + PROMPT_CACHE_STABLE_START.length, end).trim();
+    const after = source.slice(end + PROMPT_CACHE_STABLE_END.length).trim();
+    if (!stablePrefix) return null;
+    const dynamicTail = [
+      '[LIBRA CURRENT STAGE INSTRUCTIONS]',
+      stripPromptCacheMarkers(systemPrompt),
+      before ? `\n[LIBRA CURRENT STAGE CONTEXT — BEFORE EVIDENCE]\n${before}` : '',
+      after ? `\n[LIBRA CURRENT STAGE CONTEXT — AFTER EVIDENCE]\n${after}` : ''
+    ].filter(Boolean).join('\n\n');
+    const stableHash = createTextHasher().update(PROMPT_CACHE_COMMON_SYSTEM).update(stablePrefix).digest();
+    return {
+      commonSystem: PROMPT_CACHE_COMMON_SYSTEM,
+      stablePrefix,
+      dynamicTail,
+      stableHash,
+      estimatedPrefixTokens: estimateTokensFromText(`${PROMPT_CACHE_COMMON_SYSTEM}\n${stablePrefix}`)
+    };
+  };
+
+  const openAIExplicitPromptCacheModel = model => {
+    const leaf = providerModelLeaf(model).toLowerCase();
+    const match = leaf.match(/^gpt-(\d+)(?:\.(\d+))?/);
+    if (!match) return false;
+    const major = Number(match[1] || 0);
+    const minor = Number(match[2] || 0);
+    return major > 5 || (major === 5 && minor >= 6);
+  };
+
+  const openAIAutomaticPromptCacheModel = model => {
+    const leaf = providerModelLeaf(model).toLowerCase();
+    if (/^gpt-(?:[5-9]|\d{2,})(?:[.-]|$)/.test(leaf)) return true;
+    if (/^gpt-4(?:\.1|o)(?:[.-]|$)/.test(leaf)) return true;
+    return /^o\d(?:[.-]|$)/.test(leaf);
+  };
+
+  const geminiPromptCacheMinimumTokens = model => {
+    const leaf = providerModelLeaf(model).toLowerCase();
+    if (/gemini-(?:3|[4-9]|\d{2,})(?:[.\-]|$)/.test(leaf)) return 4096;
+    if (/gemini-2\.5(?:[.\-]|$)/.test(leaf)) return 2048;
+    return 2048;
+  };
+
+  const claudePromptCacheMinimumTokens = model => {
+    const leaf = providerModelLeaf(model).toLowerCase().replace(/[_-]+/g, '.');
+    if (/(?:opus|fable|mythos)\.5(?:\.|$)/.test(leaf)) return 512;
+    if (/mythos.*preview|opus\.4\.7/.test(leaf)) return 2048;
+    if (/opus\.4\.[56]|haiku\.4\.5/.test(leaf)) return 4096;
+    if (/haiku\.3\.5/.test(leaf)) return 2048;
+    if (/opus\.4\.8|sonnet\.5(?:\.|$)|sonnet\.4\.[56]|opus\.4\.1|(?:opus|sonnet)\.4(?:\.|$)/.test(leaf)) return 1024;
+    return 1024;
+  };
+
+  const openAILegacyPromptCacheMinimumTokens = model => {
+    const leaf = providerModelLeaf(model).toLowerCase();
+    if (/^gpt-4o(?:[.-]|$)/.test(leaf)) return 1024;
+    return 2048;
+  };
+
+  const promptCacheCredentialFingerprint = preset => providerCredentialCacheFingerprint(preset?.key || '');
+  const promptCachePresetIdentity = preset => [
+    canonicalProvider(preset?.provider || 'custom'),
+    modeForProvider(preset?.provider || 'custom'),
+    providerModelLeaf(preset?.model || '').toLowerCase(),
+    normalizeLLMRequestFormat(preset?.request_format || 'chat_completions'),
+    normalizeReasoningPresetKey(preset?.reasoning_preset || 'auto'),
+    String(preset?.reasoning_effort || 'none').trim().toLowerCase(),
+    String(preset?.thinking_type || '').trim().toLowerCase(),
+    createTextHasher().update(String(preset?.extra_body_json || '')).digest(),
+    promptCacheCredentialFingerprint(preset)
+  ].join('|');
+
+  const memoryPromptCacheReuseCount = (settings, preset) => {
+    const target = promptCachePresetIdentity(preset);
+    let count = 0;
+    for (const stage of PROMPT_CACHE_MEMORY_STAGES) {
+      try {
+        const peer = resolvePreset(settings, stage)?.preset;
+        if (!peer || promptCachePolicy(peer) === 'off') continue;
+        if (promptCachePresetIdentity(peer) === target) count += 1;
+      } catch (_) {}
+    }
+    return count;
+  };
+
+  const promptCacheUnsupportedKey = (preset, providerMode = '', strategy = '') => [
+    promptCachePresetIdentity(preset),
+    String(providerMode || modeForProvider(preset?.provider || 'custom')),
+    String(strategy || 'native')
+  ].join('|');
+
+  const markPromptCacheUnsupported = (preset, providerMode, strategy) => {
+    const key = promptCacheUnsupportedKey(preset, providerMode, strategy);
+    PromptCacheRuntime.unsupported.add(key);
+    if (PromptCacheRuntime.unsupported.size > 32) {
+      const first = PromptCacheRuntime.unsupported.values().next().value;
+      if (first) PromptCacheRuntime.unsupported.delete(first);
+    }
+    return key;
+  };
+
+  const invalidateGeminiPromptCache = (preset, decision, reason = '') => {
+    const stableHash = decision?.envelope?.stableHash || '';
+    if (!stableHash) return false;
+    const cacheId = [promptCacheCredentialFingerprint(preset), providerModelLeaf(preset.model), stableHash].join('|');
+    PromptCacheRuntime.gemini.delete(cacheId);
+    PromptCacheRuntime.geminiFailures.set(cacheId, { at: Date.now(), message: compact(reason || 'cached_content_rejected', 700) });
+    return true;
+  };
+
+  const isOfficialGeminiApiPreset = preset => {
+    if (canonicalProvider(preset?.provider) !== 'gemini') return false;
+    try {
+      const raw = resolveProviderBaseUrl('gemini', preset?.url || '', 'llm') || defaultUrlForProvider('gemini');
+      const parsed = new URL(raw);
+      return parsed.hostname === 'generativelanguage.googleapis.com';
+    } catch (_) { return false; }
+  };
+
+  const buildPromptCacheDecision = (settings, stageName, preset, systemPrompt, userPrompt, options = {}) => {
+    const context = options?.promptCacheContext;
+    const envelope = context ? extractPromptCacheEnvelope(systemPrompt, userPrompt) : null;
+    const provider = canonicalProvider(preset?.provider || 'custom');
+    const providerMode = modeForProvider(provider);
+    const base = {
+      schema: PROMPT_CACHE_SCHEMA,
+      enabled: false,
+      strategy: 'off',
+      reason: '',
+      provider,
+      providerMode,
+      model: preset?.model || '',
+      stageName,
+      reuseCount: 0,
+      cacheKey: '',
+      envelope,
+      cacheKeySeed: text(context?.cacheKeySeed || ''),
+      estimatedPrefixTokens: Number(envelope?.estimatedPrefixTokens || 0)
+    };
+    if (!context || !envelope) return { ...base, reason: 'no_cacheable_memory_prefix' };
+    if (promptCachePolicy(preset) === 'off' || options.disablePromptCache === true) return { ...base, reason: 'disabled' };
+    const explicitStrategy = provider === 'openai' && openAIExplicitPromptCacheModel(preset.model)
+      ? 'openai_explicit'
+      : providerMode === 'anthropic' ? 'anthropic_explicit' : '';
+    if (explicitStrategy && PromptCacheRuntime.unsupported.has(promptCacheUnsupportedKey(preset, providerMode, explicitStrategy))) {
+      return { ...base, reason: 'session_cached_unsupported' };
+    }
+    const reuseCount = Math.max(1, memoryPromptCacheReuseCount(settings, preset));
+    const cacheKeySeed = text(context.cacheKeySeed || envelope.stableHash || '').replace(/[^a-z0-9:_-]/gi, '').slice(0, 64) || 'batch';
+    const cacheKey = `libra:memory:${providerModelLeaf(preset.model || 'model').slice(0, 48)}:${cacheKeySeed}`;
+    const out = { ...base, reuseCount, cacheKey };
+
+    if (provider === 'openai') {
+      if (openAIExplicitPromptCacheModel(preset.model)) {
+        if (reuseCount >= 2 && envelope.estimatedPrefixTokens >= 1024) return { ...out, enabled: true, strategy: 'openai_explicit', reason: 'stable_batch_reused' };
+        return { ...out, reason: reuseCount < 2 ? 'no_reuse_benefit' : 'prefix_below_1024' };
+      }
+      if (reuseCount >= 2 && openAIAutomaticPromptCacheModel(preset.model)) {
+        const minimum = openAILegacyPromptCacheMinimumTokens(preset.model);
+        if (envelope.estimatedPrefixTokens >= minimum) return { ...out, enabled: true, strategy: 'openai_implicit', reason: 'legacy_automatic_cache' };
+        return { ...out, reason: `prefix_below_${minimum}` };
+      }
+      return { ...out, reason: reuseCount < 2 ? 'no_reuse_benefit' : 'model_cache_capability_unknown' };
+    }
+    if (providerMode === 'anthropic') {
+      if (reuseCount < 2) return { ...out, reason: 'no_reuse_benefit' };
+      const minimum = claudePromptCacheMinimumTokens(preset.model);
+      if (envelope.estimatedPrefixTokens >= minimum) return { ...out, enabled: true, strategy: 'anthropic_explicit', reason: 'stable_batch_reused' };
+      return { ...out, reason: `prefix_below_${minimum}` };
+    }
+    if (providerMode === 'gemini' || providerMode === 'vertex_gemini') {
+      if (reuseCount < 2) return { ...out, reason: 'no_reuse_benefit' };
+      if (providerMode === 'gemini' && isOfficialGeminiApiPreset(preset) && envelope.estimatedPrefixTokens >= geminiPromptCacheMinimumTokens(preset.model)) {
+        return { ...out, enabled: true, strategy: 'gemini_explicit', reason: 'stable_batch_reused' };
+      }
+      return { ...out, enabled: true, strategy: 'gemini_implicit', reason: providerMode === 'vertex_gemini' ? 'vertex_prefix_optimization' : 'explicit_threshold_or_endpoint_unavailable' };
+    }
+    return { ...out, reason: 'provider_not_supported' };
+  };
+
+  const promptCacheErrorInfo = error => {
+    const message = text(error?.message || error || '');
+    if (!/(?:prompt[_ -]?cache|cache[_ -]?control|cachedcontent|cached content|cache breakpoint)/i.test(message)) return null;
+    return { message: compact(message, 700) };
+  };
+
+  const normalizePromptCacheUsage = (provider, usage = null, decision = null, providerMeta = null) => {
+    const data = usage && typeof usage === 'object' ? usage : {};
+    const promptDetails = data.prompt_tokens_details || data.input_tokens_details || {};
+    const readTokens = Number(
+      promptDetails.cached_tokens
+      ?? data.cache_read_input_tokens
+      ?? data.cachedContentTokenCount
+      ?? data.cached_content_token_count
+      ?? data.total_cached_tokens
+      ?? data.totalCachedTokens
+      ?? data.cached_tokens
+      ?? 0
+    ) || 0;
+    const writeTokens = Number(
+      promptDetails.cache_write_tokens
+      ?? data.cache_creation_input_tokens
+      ?? providerMeta?.cacheWriteTokens
+      ?? 0
+    ) || 0;
+    const inputTokens = Number(
+      data.prompt_tokens
+      ?? data.input_tokens
+      ?? data.promptTokenCount
+      ?? data.prompt_token_count
+      ?? 0
+    ) || 0;
+    const totalInput = Math.max(inputTokens, inputTokens + (canonicalProvider(provider) === 'claude' ? readTokens + writeTokens : 0));
+    const denom = Math.max(0, totalInput || inputTokens || readTokens + writeTokens);
+    return {
+      schema: PROMPT_CACHE_SCHEMA,
+      supported: !!decision?.enabled,
+      strategy: decision?.strategy || 'off',
+      reason: decision?.reason || '',
+      reuseCount: Number(decision?.reuseCount || 0),
+      cacheKey: decision?.cacheKey || '',
+      estimatedPrefixTokens: Number(decision?.estimatedPrefixTokens || 0),
+      readTokens,
+      writeTokens,
+      inputTokens,
+      hitRate: denom > 0 ? Number((readTokens / denom).toFixed(4)) : 0,
+      hit: readTokens > 0,
+      explicitResourceCreated: providerMeta?.explicitResourceCreated === true,
+      explicitResourceReused: providerMeta?.explicitResourceReused === true,
+      fallback: providerMeta?.fallback || ''
+    };
+  };
+
+  const geminiCacheModelName = model => {
+    const leaf = text(model || '').trim().replace(/^models\//i, '');
+    return leaf ? `models/${leaf}` : '';
+  };
+
+  const geminiPromptCacheCreateUrl = () => 'https://generativelanguage.googleapis.com/v1beta/cachedContents';
+  const getOrCreateGeminiPromptCache = async (preset, decision) => {
+    if (decision?.strategy !== 'gemini_explicit' || !decision?.envelope) return null;
+    const cacheId = [promptCacheCredentialFingerprint(preset), providerModelLeaf(preset.model), decision.envelope.stableHash].join('|');
+    const now = Date.now();
+    const cached = PromptCacheRuntime.gemini.get(cacheId);
+    if (cached?.name && Number(cached.expiresAt || 0) > now + 30000) {
+      PromptCacheRuntime.last = { at: now, provider: 'gemini', strategy: 'gemini_explicit', event: 'reuse', cacheId, name: cached.name };
+      return { ...cached, created: false, reused: true };
+    }
+    const failed = PromptCacheRuntime.geminiFailures.get(cacheId);
+    if (failed && now - Number(failed.at || 0) < 120000) return null;
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (preset.key) headers['x-goog-api-key'] = preset.key;
+      const body = {
+        model: geminiCacheModelName(preset.model),
+        systemInstruction: { parts: [{ text: decision.envelope.commonSystem }] },
+        contents: [{ role: 'user', parts: [{ text: decision.envelope.stablePrefix }] }],
+        ttl: '600s'
+      };
+      const response = await RisuCompat.nativeFetch(geminiPromptCacheCreateUrl(), { method: 'POST', headers, body: JSON.stringify(body) }, preset.timeout_ms);
+      const data = await responseToJsonOrText(response);
+      const name = text(data?.name || '').trim();
+      if (!name) throw new Error(`Gemini cachedContents.create returned no cache name: ${compact(data, 500)}`);
+      const parsedExpiry = Date.parse(text(data?.expireTime || data?.expire_time || ''));
+      const writeTokens = Number(data?.usageMetadata?.totalTokenCount ?? data?.usage_metadata?.total_token_count ?? data?.usageMetadata?.promptTokenCount ?? 0) || 0;
+      const record = { name, expiresAt: Number.isFinite(parsedExpiry) ? parsedExpiry : now + 570000, cacheWriteTokens: writeTokens, createdAt: now };
+      PromptCacheRuntime.gemini.set(cacheId, record);
+      PromptCacheRuntime.geminiFailures.delete(cacheId);
+      for (const [key, value] of PromptCacheRuntime.gemini) {
+        if (!value?.name || Number(value.expiresAt || 0) <= now) PromptCacheRuntime.gemini.delete(key);
+      }
+      if (PromptCacheRuntime.gemini.size > 24) {
+        const ordered = Array.from(PromptCacheRuntime.gemini.entries()).sort((a, b) => Number(a[1]?.expiresAt || 0) - Number(b[1]?.expiresAt || 0));
+        while (ordered.length > 24) PromptCacheRuntime.gemini.delete(ordered.shift()[0]);
+      }
+      for (const [key, value] of PromptCacheRuntime.geminiFailures) {
+        if (now - Number(value?.at || 0) > 120000) PromptCacheRuntime.geminiFailures.delete(key);
+      }
+      PromptCacheRuntime.last = { at: now, provider: 'gemini', strategy: 'gemini_explicit', event: 'create', cacheId, name, cacheWriteTokens: writeTokens };
+      return { ...record, created: true, reused: false };
+    } catch (error) {
+      PromptCacheRuntime.geminiFailures.set(cacheId, { at: now, message: compact(error?.message || error, 700) });
+      PromptCacheRuntime.last = { at: now, provider: 'gemini', strategy: 'gemini_explicit', event: 'fallback', cacheId, error: compact(error?.message || error, 700) };
+      warn('gemini_prompt_cache_fallback', `Gemini explicit cache unavailable; continuing with implicit/full prompt: ${compact(error?.message || error, 700)}`);
+      return null;
+    }
+  };
+
   const hasReasoningStyle = (preset) => preset.reasoning_effort && preset.reasoning_effort !== 'none';
   const kimiK3ReasoningEffort = (preset = {}, budget = {}) => {
     if (budget.requestDisablesReasoning || budget.configuredPreset === 'off') return 'low';
@@ -11234,15 +11568,30 @@ function mergeAgentCbsWarnings(...warningLists) {
       explicitOllamaCloudReasoningDisable
       || budget.reasoningAllowed
       || budget.transformActive;
+    const cacheDecision = options.promptCacheDecision;
+    const cacheEnvelope = cacheDecision?.enabled ? cacheDecision.envelope : null;
+    const useOpenAICacheEnvelope = cacheEnvelope && ['openai_explicit', 'openai_implicit'].includes(cacheDecision.strategy);
     const body = {
       model: preset.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
+      messages: useOpenAICacheEnvelope ? [
+        { role: 'system', content: [{ type: 'text', text: cacheEnvelope.commonSystem }] },
+        { role: 'user', content: [
+          {
+            type: 'text',
+            text: cacheEnvelope.stablePrefix,
+            ...(cacheDecision.strategy === 'openai_explicit' ? { prompt_cache_breakpoint: { mode: 'explicit' } } : {})
+          },
+          { type: 'text', text: cacheEnvelope.dynamicTail }
+        ] }
+      ] : [
+        { role: 'system', content: stripPromptCacheMarkers(systemPrompt) },
+        { role: 'user', content: stripPromptCacheMarkers(userPrompt) }
       ],
       temperature: options.temp ?? preset.temp,
       stream: !!preset.stream
     };
+    if (useOpenAICacheEnvelope && cacheDecision.cacheKey) body.prompt_cache_key = cacheDecision.cacheKey;
+    if (cacheDecision?.strategy === 'openai_explicit') body.prompt_cache_options = { mode: 'explicit', ttl: '30m' };
     if (shouldUseMaxCompletionTokens(preset, family)) body.max_completion_tokens = budget.providerMaxTokens;
     else body.max_tokens = budget.providerMaxTokens;
     if (options.jsonMode === true && options.omitNativeJsonMode !== true) body.response_format = { type: 'json_object' };
@@ -11346,13 +11695,26 @@ function mergeAgentCbsWarnings(...warningLists) {
     const provider = canonicalProvider(preset.provider || 'custom');
     const family = effectiveReasoningFamilyForPreset(preset);
     const budget = resolveProviderOutputBudget(preset, options, family);
+    const cacheDecision = options.promptCacheDecision;
+    const cacheEnvelope = cacheDecision?.enabled ? cacheDecision.envelope : null;
+    const useOpenAICacheEnvelope = cacheEnvelope && ['openai_explicit', 'openai_implicit'].includes(cacheDecision.strategy);
     let body = {
       model: preset.model,
-      input: [{ role: 'user', content: [{ type: 'input_text', text: String(userPrompt || '') }] }],
+      input: [{ role: 'user', content: useOpenAICacheEnvelope ? [
+        {
+          type: 'input_text',
+          text: cacheEnvelope.stablePrefix,
+          ...(cacheDecision.strategy === 'openai_explicit' ? { prompt_cache_breakpoint: { mode: 'explicit' } } : {})
+        },
+        { type: 'input_text', text: cacheEnvelope.dynamicTail }
+      ] : [{ type: 'input_text', text: stripPromptCacheMarkers(String(userPrompt || '')) }] }],
       max_output_tokens: budget.providerMaxTokens,
       stream: !!preset.stream
     };
-    if (String(systemPrompt || '').trim()) body.instructions = String(systemPrompt);
+    if (useOpenAICacheEnvelope) body.instructions = cacheEnvelope.commonSystem;
+    else if (String(systemPrompt || '').trim()) body.instructions = stripPromptCacheMarkers(String(systemPrompt));
+    if (useOpenAICacheEnvelope && cacheDecision.cacheKey) body.prompt_cache_key = cacheDecision.cacheKey;
+    if (cacheDecision?.strategy === 'openai_explicit') body.prompt_cache_options = { mode: 'explicit', ttl: '30m' };
     if (options.jsonMode === true && options.omitNativeJsonMode !== true) body.text = { format: { type: 'json_object' } };
     if (family === 'openrouter' && budget.transformActive) {
       if (!budget.reasoningAllowed) body.reasoning = { enabled: false };
@@ -11386,7 +11748,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       const raw = await responseBodyToText(response, options.onStreamChunk);
       const streamed = parseStreamText(raw, `${provider}:responses`);
       rememberProviderResponse(traceMeta, response, raw);
-      return { content: streamed.content, raw, usage: streamed.usage, finishReason: streamed.finishReason, model: preset.model, streamMeta: streamed.streamMeta, streamed: true };
+      return { content: streamed.content, raw, usage: streamed.usage, finishReason: streamed.finishReason, model: preset.model, streamMeta: streamed.streamMeta, streamed: true, promptCacheDecision: options.promptCacheDecision || null };
     }
     const data = await responseToJsonOrText(response);
     rememberProviderResponse(traceMeta, response, data);
@@ -11427,10 +11789,15 @@ function mergeAgentCbsWarnings(...warningLists) {
   const buildAnthropicPayload = (preset, systemPrompt, userPrompt, options = {}) => {
     const family = effectiveReasoningFamilyForPreset(preset);
     const budget = resolveProviderOutputBudget(preset, options, family);
+    const cacheDecision = options.promptCacheDecision;
+    const cacheEnvelope = cacheDecision?.enabled && cacheDecision.strategy === 'anthropic_explicit' ? cacheDecision.envelope : null;
     let body = {
       model: preset.model,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      system: cacheEnvelope ? [{ type: 'text', text: cacheEnvelope.commonSystem }] : stripPromptCacheMarkers(systemPrompt),
+      messages: cacheEnvelope ? [{ role: 'user', content: [
+        { type: 'text', text: cacheEnvelope.stablePrefix, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: cacheEnvelope.dynamicTail }
+      ] }] : [{ role: 'user', content: stripPromptCacheMarkers(userPrompt) }],
       temperature: options.temp ?? preset.temp,
       max_tokens: budget.providerMaxTokens,
       stream: !!preset.stream
@@ -11639,11 +12006,29 @@ function mergeAgentCbsWarnings(...warningLists) {
   };
 
   const buildGeminiRequestBody = (preset, systemPrompt, userPrompt, options = {}) => {
-    let body = {
-      systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      generationConfig: buildGeminiGenerationConfig(preset, options)
-    };
+    const cacheDecision = options.promptCacheDecision;
+    const cacheEnvelope = cacheDecision?.enabled && ['gemini_explicit', 'gemini_implicit'].includes(cacheDecision.strategy) ? cacheDecision.envelope : null;
+    const cachedContentName = text(options.geminiCachedContentName || '').trim();
+    let body;
+    if (cacheEnvelope && cachedContentName) {
+      body = {
+        cachedContent: cachedContentName,
+        contents: [{ role: 'user', parts: [{ text: cacheEnvelope.dynamicTail }] }],
+        generationConfig: buildGeminiGenerationConfig(preset, options)
+      };
+    } else if (cacheEnvelope) {
+      body = {
+        systemInstruction: { parts: [{ text: cacheEnvelope.commonSystem }] },
+        contents: [{ role: 'user', parts: [{ text: cacheEnvelope.stablePrefix }, { text: cacheEnvelope.dynamicTail }] }],
+        generationConfig: buildGeminiGenerationConfig(preset, options)
+      };
+    } else {
+      body = {
+        systemInstruction: systemPrompt ? { parts: [{ text: stripPromptCacheMarkers(systemPrompt) }] } : undefined,
+        contents: [{ role: 'user', parts: [{ text: stripPromptCacheMarkers(userPrompt) }] }],
+        generationConfig: buildGeminiGenerationConfig(preset, options)
+      };
+    }
     body = applyPresetExtraBody(body, preset);
     return stripGemini3DeprecatedRequestFields(body, preset.model);
   };
@@ -11661,7 +12046,14 @@ function mergeAgentCbsWarnings(...warningLists) {
       applyVertexFlexHeaders(headers, preset);
     }
     else if (key) headers['x-goog-api-key'] = key;
-    const body = buildGeminiRequestBody(preset, systemPrompt, userPrompt, options);
+    let cacheDecision = options.promptCacheDecision || null;
+    let geminiCache = null;
+    if (cacheDecision?.strategy === 'gemini_explicit') {
+      geminiCache = await getOrCreateGeminiPromptCache(preset, cacheDecision);
+      if (!geminiCache?.name) cacheDecision = { ...cacheDecision, strategy: 'gemini_implicit', reason: 'explicit_create_failed_fallback_implicit' };
+    }
+    const requestOptions = { ...options, promptCacheDecision: cacheDecision, geminiCachedContentName: geminiCache?.name || '' };
+    const body = buildGeminiRequestBody(preset, systemPrompt, userPrompt, requestOptions);
     const traceMeta = { ...(options.traceMeta || {}), provider: mode, model: preset.model };
     rememberProviderRequest(traceMeta, url, body, headers);
     const response = await RisuCompat.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) }, preset.timeout_ms);
@@ -11669,13 +12061,23 @@ function mergeAgentCbsWarnings(...warningLists) {
       const raw = await responseBodyToText(response, options.onStreamChunk);
       const streamed = parseStreamText(raw, isVertex ? 'vertex' : 'gemini');
       rememberProviderResponse(traceMeta, response, raw);
-      return { content: streamed.content, raw, usage: streamed.usage, finishReason: streamed.finishReason, model: preset.model, streamMeta: streamed.streamMeta, streamed: true };
+      return {
+        content: streamed.content, raw, usage: streamed.usage, finishReason: streamed.finishReason, model: preset.model,
+        streamMeta: streamed.streamMeta, streamed: true,
+        promptCacheMeta: {
+          explicitResourceCreated: geminiCache?.created === true,
+          explicitResourceReused: geminiCache?.reused === true,
+          cacheWriteTokens: Number(geminiCache?.created ? geminiCache?.cacheWriteTokens || 0 : 0),
+          fallback: cacheDecision?.reason || ''
+        },
+        promptCacheDecision: cacheDecision
+      };
     }
     const data = await responseToJsonOrText(response);
     rememberProviderResponse(traceMeta, response, data);
     const parts = data?.candidates?.[0]?.content?.parts || data?.candidates?.[0]?.content?.Parts || [];
     const content = Array.isArray(parts) ? parts.map(p => p?.text || '').join('') : data?.text || data?.response || '';
-    return { content: text(content), raw: data, usage: data?.usageMetadata || data?.usage || null, finishReason: providerFinishReason(data), model: preset.model };
+    return { content: text(content), raw: data, usage: data?.usageMetadata || data?.usage || null, finishReason: providerFinishReason(data), model: preset.model, promptCacheMeta: { explicitResourceCreated: geminiCache?.created === true, explicitResourceReused: geminiCache?.reused === true, cacheWriteTokens: Number(geminiCache?.created ? geminiCache?.cacheWriteTokens || 0 : 0), fallback: cacheDecision?.reason || '' }, promptCacheDecision: cacheDecision };
   };
 
   const callVertexOpenAI = async (preset, systemPrompt, userPrompt, options = {}) => {
@@ -11836,10 +12238,18 @@ function mergeAgentCbsWarnings(...warningLists) {
     const startedAt = Date.now();
     const provider = canonicalProvider(preset.provider || 'custom');
     const mode = modeForProvider(provider);
+    let promptCacheDecision = buildPromptCacheDecision(settings, stageName, preset, systemPrompt, userPrompt, options);
     const effectiveOptions = {
       ...options,
-      maxTokens: options.maxTokens || stageOutputTokenBudget(settings, stageName, systemPrompt, preset, options)
+      maxTokens: options.maxTokens || stageOutputTokenBudget(settings, stageName, systemPrompt, preset, options),
+      promptCacheDecision
     };
+    // Native structured-output/tool schemas become part of the provider-side prefix on GPT/Claude.
+    // When the same five-turn evidence is explicitly cached across ito stages, prompt-enforced JSON
+    // keeps that prefix stable; LIBRA already validates and retries malformed JSON patches.
+    if (promptCacheDecision.enabled && options.jsonMode === true && (provider === 'openai' || mode === 'anthropic')) {
+      effectiveOptions.omitNativeJsonMode = true;
+    }
     const tracedOptions = { ...effectiveOptions, traceMeta: { stageName, presetName: name, provider, model: preset.model } };
     let result;
     try {
@@ -11850,6 +12260,18 @@ function mergeAgentCbsWarnings(...warningLists) {
       else result = await callOpenAICompat({ ...preset, provider }, systemPrompt, userPrompt, tracedOptions);
     } catch (error) {
       rememberProviderError({ stageName, presetName: name, provider, model: preset.model }, error);
+      const cacheUnsupported = promptCacheDecision?.enabled ? promptCacheErrorInfo(error) : null;
+      if (cacheUnsupported && !options.promptCacheUnsupportedRetry) {
+        if (mode === 'gemini' || mode === 'vertex_gemini') invalidateGeminiPromptCache(preset, promptCacheDecision, cacheUnsupported.message);
+        else markPromptCacheUnsupported(preset, mode, promptCacheDecision.strategy);
+        warn('prompt_cache_unsupported_retry', `${stageName}: ${cacheUnsupported.message}; retrying without provider cache controls`);
+        return await callLLMWithPreset(settings, stageName, systemPrompt, userPrompt, {
+          ...options,
+          maxTokens: effectiveOptions.maxTokens,
+          disablePromptCache: true,
+          promptCacheUnsupportedRetry: true
+        });
+      }
       const thinkingUnsupported = unsupportedThinkingErrorInfo(error);
       if (thinkingUnsupported && !options.thinkingUnsupportedRetry) {
         warn('thinking_unsupported_retry', `${stageName}: ${thinkingUnsupported.message}; retrying without think parameter`);
@@ -11956,6 +12378,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         provider,
         model: result.model || preset.model,
         usage: result.usage || null,
+        cache: normalizePromptCacheUsage(provider, result.usage || null, result.promptCacheDecision || promptCacheDecision, result.promptCacheMeta || null),
         finishReason: result.finishReason || '',
         effectiveSystemPrompt: result.effectiveSystemPrompt || systemPrompt,
         effectiveUserPrompt: result.effectiveUserPrompt || userPrompt,
@@ -11998,11 +12421,14 @@ function mergeAgentCbsWarnings(...warningLists) {
         presetName: name,
         provider,
         model: result.model || preset.model,
+        cache: normalizePromptCacheUsage(provider, result.usage || null, result.promptCacheDecision || promptCacheDecision, result.promptCacheMeta || null),
         effectiveSystemPrompt: result.effectiveSystemPrompt || systemPrompt,
         effectiveUserPrompt: result.effectiveUserPrompt || userPrompt,
         contextFit: result.contextFit || null
       };
     }
+    const cache = normalizePromptCacheUsage(provider, result.usage || null, result.promptCacheDecision || promptCacheDecision, result.promptCacheMeta || null);
+    PromptCacheRuntime.last = { at: Date.now(), stageName, presetName: name, provider, model: result.model || preset.model, ...cache };
     return {
       ok: true,
       content: text(result.content),
@@ -12010,6 +12436,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       provider,
       presetName: name,
       usage: result.usage || null,
+      cache,
       finishReason: result.finishReason || '',
       streamMeta: result.streamMeta || null,
       streamed: !!result.streamed,
@@ -25160,7 +25587,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
   const LibraMemoryCore = (() => {
-    const VERSION = '1.0.1';
+    const VERSION = '1.0.4';
     const BATCH_SIZE = 5;
     const PREFIX = 'libra:v1';
     const SETTINGS_KEY = `${PREFIX}:memory-settings`;
@@ -25376,6 +25803,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       work: (scope, startTurn) => `${PREFIX}:scope:${scope.scopeKey}:work:${startTurn}`,
       run: (scope, runId) => `${PREFIX}:scope:${scope.scopeKey}:run:${runId}`,
       worldAdditional: (scope, itemId) => `${PREFIX}:scope:${scope.scopeKey}:world-additional:${itemId}`,
+      predecessorMemory: (scope, transferId, ordinal, memoryId, revision) => `${PREFIX}:scope:${scope.scopeKey}:predecessor:${String(transferId || 'handoff')}:${String(ordinal).padStart(5, '0')}:${String(memoryId || 'memory')}:r${Number(revision || 0)}`,
+      predecessorVector: (scope, transferId, ordinal, memoryId, revision, profileId) => `${PREFIX}:scope:${scope.scopeKey}:predecessor-vector:${String(transferId || 'handoff')}:${String(ordinal).padStart(5, '0')}:${String(memoryId || 'memory')}:r${Number(revision || 0)}:${String(profileId || 'profile')}`,
+      handoffPackage: transferId => `${PREFIX}:handoff:${String(transferId || '')}`,
+      handoffReceipt: transferId => `${PREFIX}:handoff-receipt:${String(transferId || '')}`,
+      scopeRegistry: () => `${PREFIX}:scope-registry:v1`,
       embeddingRebuild: () => EMBEDDING_REBUILD_STATE_KEY
     });
 
@@ -25690,6 +26122,37 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return await LibraProviderBridge.testEmbedding(config);
     };
 
+    const scopeRegistryIdentity = (characterId, chatId) => `${string(characterId || '')}::${string(chatId || '')}`;
+    const resolveStableScopeKey = async (characterId, chatId, identity = '') => {
+      const registryKey = key.scopeRegistry();
+      const registry = asObject(await storage.getJson(registryKey, {}));
+      const registryId = scopeRegistryIdentity(characterId, chatId);
+      const registered = string(registry?.[registryId]?.scopeKey || '');
+      if (registered) return registered;
+
+      // v1.0.3 and earlier included chat index identity in scopeKey. Search existing
+      // manifests once so upgrading does not orphan memories when a new session is
+      // unshifted and every older chat index changes.
+      const manifestSuffix = ':manifest';
+      for (const storageKey of await storage.keys()) {
+        if (!storageKey.startsWith(`${PREFIX}:scope:`) || !storageKey.endsWith(manifestSuffix)) continue;
+        const manifest = await storage.getJson(storageKey, null);
+        if (!manifest || string(manifest.characterId) !== string(characterId) || string(manifest.chatId) !== string(chatId)) continue;
+        const existingScope = string(manifest.scopeKey || storageKey.slice(`${PREFIX}:scope:`.length, -manifestSuffix.length));
+        if (existingScope) {
+          registry[registryId] = { scopeKey: existingScope, characterId: string(characterId), chatId: string(chatId), adoptedAt: nowIso(), source: 'existing_manifest' };
+          await storage.setJson(registryKey, registry);
+          return existingScope;
+        }
+      }
+
+      const legacyIdentity = string(identity || `${characterId}:${chatId}`);
+      const createdScope = `${stableDraftHash(`${legacyIdentity}|${characterId}|${chatId}`)}_${legacyIdentity.replace(/[^\w:-]+/g, '_').slice(0, 80)}`;
+      registry[registryId] = { scopeKey: createdScope, characterId: string(characterId), chatId: string(chatId), adoptedAt: nowIso(), source: 'created' };
+      await storage.setJson(registryKey, registry);
+      return createdScope;
+    };
+
     const contextId = (value, fallback) => string(value?.id || value?.chatId || value?.chaId || value?.characterId || value?.uuid || value?.name || fallback);
     const resolveContext = async () => {
       const characterInfo = await loadCurrentCharacterForRisuContext(false);
@@ -25700,7 +26163,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const identity = chatInfo.identity || await loadCurrentChatIdentity(false) || `${contextId(character, 'character')}:${contextId(chat, 'chat')}`;
       const characterId = contextId(character, 'character');
       const chatId = contextId(chat, identity || 'chat');
-      const scopeKey = `${stableDraftHash(`${identity}|${characterId}|${chatId}`)}_${String(identity).replace(/[^\w:-]+/g, '_').slice(0, 80)}`;
+      const scopeKey = await resolveStableScopeKey(characterId, chatId, identity);
       return { character, chat, identity, scope: { characterId, chatId, scopeKey } };
     };
 
@@ -25792,10 +26255,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       updatedAt: nowIso(),
       frontiers: { observedTurn, committedTurn: 0 },
       memories: {},
+      inheritedMemories: [],
       runIds: [],
       worldAdditionalIds: [],
       inFlight: null,
-      stats: { commits: 0, failures: 0, ariadneFailures: 0, itoFailures: 0, partialCommits: 0, recalls: 0, embeddings: 0 }
+      stats: { commits: 0, failures: 0, ariadneFailures: 0, itoFailures: 0, partialCommits: 0, staleDiscards: 0, recalls: 0, embeddings: 0, handoffImports: 0 }
     });
 
     const loadManifest = async (scope, observedTurn = 0) => {
@@ -25803,6 +26267,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const manifest = loaded?.schema === MANIFEST_SCHEMA ? loaded : defaultManifest(scope, observedTurn);
       manifest.frontiers = { ...defaultManifest(scope, observedTurn).frontiers, ...asObject(manifest.frontiers), observedTurn };
       manifest.memories = asObject(manifest.memories);
+      manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => ref && typeof ref === 'object');
       manifest.runIds = asArray(manifest.runIds);
       manifest.worldAdditionalIds = asArray(manifest.worldAdditionalIds);
       manifest.stats = { ...defaultManifest(scope, observedTurn).stats, ...asObject(manifest.stats) };
@@ -25816,7 +26281,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const memoryRefForStart = (manifest, startTurn) => asObject(manifest.memories)[String(startTurn)] || null;
-    const listMemoryRefs = manifest => Object.values(asObject(manifest.memories)).filter(ref => ref?.status === 'committed').sort((a, b) => Number(a.turnRange?.start) - Number(b.turnRange?.start));
+    const memoryRefSessionEpoch = ref => Number.isFinite(Number(ref?.sessionEpoch)) ? Number(ref.sessionEpoch) : 0;
+    const listCurrentMemoryRefs = manifest => Object.values(asObject(manifest.memories)).filter(ref => ref?.status === 'committed');
+    const listInheritedMemoryRefs = manifest => asArray(manifest?.inheritedMemories).filter(ref => ref?.status === 'committed');
+    const listMemoryRefs = manifest => [...listInheritedMemoryRefs(manifest), ...listCurrentMemoryRefs(manifest)].sort((a, b) => (
+      memoryRefSessionEpoch(a) - memoryRefSessionEpoch(b)
+      || Number(a.turnRange?.start || 0) - Number(b.turnRange?.start || 0)
+      || Number(a.turnRange?.end || 0) - Number(b.turnRange?.end || 0)
+      || Number(a.revision || 0) - Number(b.revision || 0)
+    ));
     const loadMemoryRef = async ref => ref?.key ? await storage.getJson(ref.key, null) : null;
     const removeMemoryRecord = async ref => {
       if (!ref?.key) return false;
@@ -25825,6 +26298,187 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       if (vectorKey) await storage.remove(vectorKey);
       await storage.remove(ref.key);
       return true;
+    };
+
+    const inactiveHistoryEntryForRef = (ref, reason = 'superseded') => ref?.key ? {
+      key: ref.key,
+      revision: Number(ref.revision || 0),
+      sourceDigest: string(ref.sourceDigest || ''),
+      status: 'inactive',
+      supersededAt: nowIso(),
+      reason: string(reason || 'superseded')
+    } : null;
+
+    const memoryRefFromStoredMemory = (memory, memoryKey, history = [], createdAt = '') => ({
+      memoryId: memory?.memoryId || '',
+      key: memoryKey,
+      revision: Number(memory?.revision || 0),
+      sourceDigest: string(memory?.sourceDigest || ''),
+      status: 'committed',
+      turnRange: clone(memory?.turnRange || {}),
+      summary: memory?.summary || memorySummary(memory?.text || ''),
+      embeddingStatus: memory?.embedding?.status || 'pending',
+      retrievalVersion: memory?.embedding?.projectionVersion || memory?.retrieval?.version || RETRIEVAL_PROJECTION_VERSION,
+      vectorCount: Number(memory?.embedding?.vectorCount || 0),
+      pipelineStatus: memory?.pipeline?.status || 'complete',
+      failedItoStages: asArray(memory?.pipeline?.failedItoStages).map(item => string(item?.stage || item)).filter(Boolean),
+      sessionEpoch: Number.isFinite(Number(memory?.sessionEpoch)) ? Number(memory.sessionEpoch) : 0,
+      inheritedSessionHistory: memory?.inheritedSessionHistory === true,
+      authorityClass: string(memory?.authorityClass || ''),
+      handoffTransferId: string(memory?.handoffTransferId || ''),
+      sourceSessionChatId: string(memory?.sourceSessionChatId || ''),
+      sourceSessionScopeKey: string(memory?.sourceSessionScopeKey || ''),
+      createdAt: createdAt || memory?.createdAt || nowIso(),
+      updatedAt: nowIso(),
+      history: asArray(history).slice(-12)
+    });
+
+    const activeCanonicalRunIds = async (scope, manifest) => {
+      const out = new Set();
+      for (const ref of listMemoryRefs(manifest)) {
+        const memory = await loadMemoryRef(ref);
+        if (memory?.status === 'committed' && memory?.runId) out.add(string(memory.runId));
+      }
+      return out;
+    };
+
+    const reactivateHistoricalRevision = async (context, manifest, startTurn, ref, currentDigest) => {
+      const history = asArray(ref?.history);
+      const matchIndex = history.findIndex(item => item?.key && string(item?.sourceDigest || '') === string(currentDigest || ''));
+      if (matchIndex < 0) return null;
+      const matchedEntry = history[matchIndex];
+      const memory = await loadMemoryRef(matchedEntry);
+      if (!memory || string(memory.sourceDigest || '') !== string(currentDigest || '')) return null;
+      const nextHistory = history.filter((_, index) => index !== matchIndex);
+      const currentEntry = inactiveHistoryEntryForRef(ref, 'branch_reactivated_other_revision');
+      if (currentEntry && currentEntry.key !== matchedEntry.key) nextHistory.push(currentEntry);
+      const retainedHistory = nextHistory.slice(-12);
+      manifest.memories[String(startTurn)] = memoryRefFromStoredMemory(memory, matchedEntry.key, retainedHistory, ref?.createdAt || memory?.createdAt || '');
+      return { startTurn, revision: Number(memory.revision || 0), sourceDigest: currentDigest, runId: memory.runId || '', key: matchedEntry.key };
+    };
+
+    const reconcileCanonicalBranchBeforeRecall = async (context, options = {}) => {
+      const pairs = buildPairs(context.chat);
+      const manifest = await loadManifest(context.scope, pairs.length);
+      const starts = completeBatchStarts(pairs);
+      const startSet = new Set(starts.map(Number));
+      const digestByStart = new Map(starts.map(startTurn => [Number(startTurn), sourceDigest(batchForStart(pairs, startTurn))]));
+      const changes = [];
+      const reactivated = [];
+      let changed = false;
+
+      for (const [keyName, ref] of Object.entries(asObject(manifest.memories))) {
+        const startTurn = Number(ref?.turnRange?.start || keyName || 0);
+        if (!startTurn) continue;
+        const currentDigest = digestByStart.get(startTurn) || '';
+        if (!startSet.has(startTurn)) {
+          if (ref?.status === 'committed') {
+            ref.status = 'inactive';
+            ref.inactiveReason = 'rollback_or_incomplete_batch';
+            ref.inactiveAt = nowIso();
+            changes.push({ startTurn, action: 'inactive', reason: ref.inactiveReason, previousDigest: ref.sourceDigest || '' });
+            changed = true;
+          }
+          continue;
+        }
+        if (string(ref?.sourceDigest || '') === currentDigest) {
+          if (ref?.status !== 'committed') {
+            ref.status = 'committed';
+            delete ref.inactiveReason;
+            delete ref.inactiveAt;
+            ref.updatedAt = nowIso();
+            changes.push({ startTurn, action: 'reactivated_current', sourceDigest: currentDigest, revision: ref.revision || 0 });
+            reactivated.push({ startTurn, revision: Number(ref.revision || 0), sourceDigest: currentDigest, runId: '' });
+            changed = true;
+          }
+          continue;
+        }
+        const restored = await reactivateHistoricalRevision(context, manifest, startTurn, ref, currentDigest);
+        if (restored) {
+          changes.push({ startTurn, action: 'reactivated_history', sourceDigest: currentDigest, revision: restored.revision });
+          reactivated.push(restored);
+          changed = true;
+        } else if (ref?.status === 'committed') {
+          ref.status = 'inactive';
+          ref.inactiveReason = 'reroll_or_branch_digest_changed';
+          ref.inactiveAt = nowIso();
+          changes.push({ startTurn, action: 'inactive', reason: ref.inactiveReason, previousDigest: ref.sourceDigest || '', currentDigest });
+          changed = true;
+        }
+      }
+
+      if (manifest.inFlight) {
+        const inFlightStart = Number(manifest.inFlight.startTurn || 0);
+        const expectedDigest = string(manifest.inFlight.sourceDigest || '');
+        const currentDigest = digestByStart.get(inFlightStart) || '';
+        if (!inFlightStart || !currentDigest || currentDigest !== expectedDigest) {
+          const staleRunId = string(manifest.inFlight.runId || '');
+          const staleReason = !currentDigest ? 'rollback_removed_inflight_batch' : 'reroll_changed_inflight_batch';
+          const staleWorkKey = inFlightStart ? key.work(context.scope, inFlightStart) : '';
+          if (staleWorkKey) await storage.remove(staleWorkKey);
+          if (staleRunId) {
+            const staleRun = await loadRun(context.scope, staleRunId);
+            if (staleRun && !['complete', 'complete_with_warnings', 'stale_discarded'].includes(string(staleRun.status || ''))) {
+              staleRun.status = 'stale_discarded';
+              staleRun.finishedAt = nowIso();
+              staleRun.commit = { ...(staleRun.commit || {}), status: 'discarded_stale_branch' };
+              staleRun.errors = [...asArray(staleRun.errors), { stage: 'branch_guard', message: staleReason, at: nowIso(), stale: true }];
+              await storage.setJson(key.run(context.scope, staleRunId), staleRun);
+            }
+          }
+          changes.push({ startTurn: inFlightStart, action: 'discard_inflight', reason: staleReason, expectedDigest, currentDigest });
+          manifest.inFlight = null;
+          manifest.stats.staleDiscards = Number(manifest.stats.staleDiscards || 0) + 1;
+          changed = true;
+        }
+      }
+
+      manifest.frontiers.observedTurn = pairs.length;
+      manifest.frontiers.committedTurn = Math.max(0, ...Object.values(manifest.memories).filter(ref => ref?.status === 'committed').map(ref => Number(ref.turnRange?.end || 0)));
+      if (changed) await saveManifest(context.scope, manifest);
+      const result = { changed, changes, reactivated, observedTurns: pairs.length, completeBatches: starts.length, reason: string(options.reason || 'before_request') };
+      Runtime.lastBranchReconcile = clone(result);
+      return result;
+    };
+
+    const verifyBatchStillCurrent = async (expectedContext, startTurn, expectedDigest) => {
+      try {
+        const liveContext = await resolveContext();
+        if (liveContext.scope.scopeKey !== expectedContext.scope.scopeKey) {
+          return { ok: false, reason: 'scope_changed', currentDigest: '', liveContext };
+        }
+        const livePairs = buildPairs(liveContext.chat);
+        const liveBatch = batchForStart(livePairs, startTurn);
+        if (liveBatch.length !== BATCH_SIZE) return { ok: false, reason: 'batch_no_longer_complete', currentDigest: '', liveContext };
+        const currentDigest = sourceDigest(liveBatch);
+        return { ok: currentDigest === expectedDigest, reason: currentDigest === expectedDigest ? 'matched' : 'source_digest_changed', currentDigest, liveContext };
+      } catch (error) {
+        return { ok: false, reason: `context_unavailable:${compact(error?.message || error, 240)}`, currentDigest: '', liveContext: null };
+      }
+    };
+
+    const discardStaleBatchBuild = async ({ context, manifest, work, run, workKey, startTurn, sourceHash, revision, verification, provisionalVectorKey = '' }) => {
+      const reason = `stale_branch_discarded:${verification?.reason || 'unknown'}`;
+      if (provisionalVectorKey) {
+        try { await storage.remove(provisionalVectorKey); } catch (_) {}
+      }
+      work.status = 'stale_discarded';
+      work.lastError = reason;
+      work.updatedAt = nowIso();
+      run.status = 'stale_discarded';
+      run.finishedAt = nowIso();
+      run.commit = { status: 'discarded_stale_branch', revision, contentHash: '', memoryKey: '', expectedSourceDigest: sourceHash, currentSourceDigest: verification?.currentDigest || '' };
+      run.errors = [...asArray(run.errors), { stage: 'branch_guard', message: reason, at: nowIso(), stale: true }];
+      if (manifest.inFlight?.runId === run.runId) manifest.inFlight = null;
+      manifest.stats.staleDiscards = Number(manifest.stats.staleDiscards || 0) + 1;
+      await storage.setJson(key.run(context.scope, run.runId), run);
+      await storage.remove(workKey);
+      await saveManifest(context.scope, manifest);
+      state.lastScan = { at: Date.now(), ok: true, staleDiscarded: true, startTurn, runId: run.runId, expectedSourceDigest: sourceHash, currentSourceDigest: verification?.currentDigest || '', reason: verification?.reason || 'unknown' };
+      Runtime.lastBranchGuard = clone(state.lastScan);
+      await finishPipelineWorkStatus(`TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 분석 결과 폐기 · 롤백/리롤로 원문 분기가 변경됨`, true, 2600, 'completed_with_warnings');
+      scheduleGuiTraceRefresh();
+      return { staleDiscarded: true, startTurn, runId: run.runId, expectedSourceDigest: sourceHash, currentSourceDigest: verification?.currentDigest || '', reason: verification?.reason || 'unknown' };
     };
 
 
@@ -25891,7 +26545,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const manifest = await storage.getJson(manifestKey, null);
         if (!manifest) continue;
         const scopeKey = string(manifest.scopeKey || manifestKey.slice(`${PREFIX}:scope:`.length, -':manifest'.length));
-        for (const ref of Object.values(asObject(manifest.memories))) {
+        for (const ref of listMemoryRefs(manifest)) {
           if (ref?.status !== 'committed' || !ref?.key) continue;
           const memory = await storage.getJson(ref.key, null);
           if (!memory || memory.status !== 'committed') continue;
@@ -25971,7 +26625,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const updateManifestEmbeddingRef = async (manifestKey, memoryKey, embedding) => {
       const manifest = await storage.getJson(manifestKey, null);
       if (!manifest) return false;
-      for (const ref of Object.values(asObject(manifest.memories))) {
+      for (const ref of [...Object.values(asObject(manifest.memories)), ...asArray(manifest.inheritedMemories)]) {
         if (string(ref?.key) !== string(memoryKey)) continue;
         ref.embeddingStatus = string(embedding?.status || 'rebuild_required');
         ref.retrievalVersion = embedding?.projectionVersion || ref.retrievalVersion || RETRIEVAL_PROJECTION_VERSION;
@@ -27023,8 +27677,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         '아래 5턴 원문만 이번 기억에서 실제로 발생한 사건·변화의 직접 근거로 사용하라. USER와 ASSISTANT의 행동 주체를 바꾸지 마라.',
         referenceContext?.block || '',
         referenceContext?.block ? '' : '',
-        '[이번 정본의 직접 근거 — 정확히 이 5턴]',
-        transcript(batch)
+        PROMPT_CACHE_STABLE_START,
+        '[LIBRA 5-TURN EVIDENCE / EXACT U+A SOURCE]',
+        transcript(batch),
+        PROMPT_CACHE_STABLE_END
       ].join('\n')
     });
 
@@ -27086,8 +27742,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           `[근거 범위] TURN ${batch[0]?.turn || 0}~${batch.at(-1)?.turn || 0}`,
           loreContext?.block || '',
           loreContext?.block ? '' : '',
-          '[원문 근거 — 현재 사건과 상태 변화의 최종 권위]',
+          PROMPT_CACHE_STABLE_START,
+          '[LIBRA 5-TURN EVIDENCE / EXACT U+A SOURCE]',
           transcript(batch),
+          PROMPT_CACHE_STABLE_END,
           '',
           '[현재 종합 메모리 초안 — 지정된 블록 ID와 hash를 사용]',
           formatDraftPatchDocumentForPrompt(document),
@@ -27126,8 +27784,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const callMemoryProvider = async (stageName, systemPrompt, userPrompt, options = {}) => {
       const routeKey = PROVIDER_ROUTE_BY_STAGE[stageName] || stageName;
+      const cacheBatch = asArray(options.cacheBatch);
+      const promptCacheContext = cacheBatch.length === BATCH_SIZE ? {
+        schema: PROMPT_CACHE_SCHEMA,
+        domain: 'libra_memory',
+        cacheKeySeed: sourceDigest(cacheBatch),
+        turnRange: { start: Number(cacheBatch[0]?.turn || 0), end: Number(cacheBatch.at(-1)?.turn || 0) }
+      } : null;
       const result = await LibraProviderBridge.callTask(routeKey, systemPrompt, userPrompt, {
         ...options,
+        promptCacheContext,
         label: `LIBRA ${STAGE_LABELS[stageName] || routeKey}`,
         debugLabel: `libra-${routeKey}`,
         domain: 'libra_memory',
@@ -27156,12 +27822,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       const prompts = ariadnePrompts(batch, referenceContext);
       const startedAt = Date.now();
-      let result = await callMemoryProvider('ariadne', prompts.system, prompts.user, { temp: 0.2, maxTokens: 6000 });
+      let result = await callMemoryProvider('ariadne', prompts.system, prompts.user, { temp: 0.2, maxTokens: 6000, cacheBatch: batch });
       let validation = validateMemoryText(result?.content || '');
       if (result?.ok !== true || !validation.valid) {
         const retrySystem = `${prompts.system}\n\nCORRECTION: The previous result was missing, too short, or not a memory. Return one complete natural-language memory now with all required headings.`;
         const retryUser = `${prompts.user}\n\nReturn only the complete memory. Do not explain the correction.`;
-        result = await callMemoryProvider('ariadne', retrySystem, retryUser, { temp: 0.15, maxTokens: 7000, lengthLimitRetry: true });
+        result = await callMemoryProvider('ariadne', retrySystem, retryUser, { temp: 0.15, maxTokens: 7000, lengthLimitRetry: true, cacheBatch: batch });
         validation = validateMemoryText(result?.content || '');
       }
       if (result?.ok !== true || !validation.valid) {
@@ -27184,14 +27850,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         provider: result.provider || '', presetName: result.presetName || '', model: result.model || '',
         elapsedMs: stage.elapsedMs, systemPrompt: result.effectiveSystemPrompt || prompts.system,
         userPrompt: result.effectiveUserPrompt || prompts.user, rawResponse: result.content || '', parsed: stage,
-        usage: result.usage || null, finishReason: result.finishReason || ''
+        usage: result.usage || null, cache: clone(result.cache || {}), finishReason: result.finishReason || ''
       });
       return {
         stage,
         receipt: {
           stage: 'ariadne', label: STAGE_LABELS.ariadne, status: 'complete', outputType: 'full_draft',
           output: draft, rawResponse: result.content || '', provider: result.provider || '', presetName: result.presetName || '',
-          model: result.model || '', durationMs: stage.elapsedMs, usage: clone(result.usage || {}), validation,
+          model: result.model || '', durationMs: stage.elapsedMs, usage: clone(result.usage || {}), cache: clone(result.cache || {}), validation,
           referenceMeta: clone(referenceContext.meta)
         }
       };
@@ -27209,7 +27875,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       const prompts = itoPrompts(stageName, batch, previousDraft, loreContext);
       const startedAt = Date.now();
-      let result = await callMemoryProvider(stageName, prompts.system, prompts.user, { temp: 0.15, maxTokens: 3600, jsonMode: true });
+      let result = await callMemoryProvider(stageName, prompts.system, prompts.user, { temp: 0.15, maxTokens: 3600, jsonMode: true, cacheBatch: batch });
       let patch = result?.ok === true ? normalizeAidePatchResult(stageName, result.content) : null;
       if (!patch) {
         const issue = itoPatchContractIssue(stageName, result?.content || '');
@@ -27217,7 +27883,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stageName,
           `${prompts.system}\n\nCORRECTION: Return the exact JSON patch object. Contract issue: ${issue || result?.reason || 'invalid_patch'}.`,
           `${prompts.user}\n\nDo not return prose outside the JSON object. Copy block hashes exactly.`,
-          { temp: 0.1, maxTokens: 4200, jsonMode: true, lengthLimitRetry: true }
+          { temp: 0.1, maxTokens: 4200, jsonMode: true, lengthLimitRetry: true, cacheBatch: batch }
         );
         patch = result?.ok === true ? normalizeAidePatchResult(stageName, result.content) : null;
       }
@@ -27246,7 +27912,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stageName,
           `${prompts.system}\n\nCORRECTION: Your JSON parsed, but none of its requested edits could be applied to the current draft. Return a corrected JSON patch for the SAME draft. Copy block IDs and hashes exactly from the authoritative list. If no edit is actually needed, return an empty edits array.`,
           `${prompts.user}\n\n[CURRENT AUTHORITATIVE BLOCK HASHES]\n${authoritativeHashes}\n\n[PREVIOUS APPLICATION ISSUE]\n${skippedSummary || 'no_applicable_edits'}\n\nReturn only the corrected JSON object.`,
-          { temp: 0.05, maxTokens: 4200, jsonMode: true, lengthLimitRetry: true }
+          { temp: 0.05, maxTokens: 4200, jsonMode: true, lengthLimitRetry: true, cacheBatch: batch }
         );
         patch = result?.ok === true ? normalizeAidePatchResult(stageName, result.content) : null;
         applied = patch ? applyDraftPatchOperations(prompts.document, patch.edits) : null;
@@ -27285,7 +27951,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         stage: stageName, ok: true, reason: stage.reason, memoryMode: true, patchMode: true,
         provider: result.provider || '', presetName: result.presetName || '', model: result.model || '', elapsedMs,
         systemPrompt: result.effectiveSystemPrompt || prompts.system, userPrompt: result.effectiveUserPrompt || prompts.user,
-        rawResponse: result.content || '', parsed: stage, usage: result.usage || null, finishReason: result.finishReason || '',
+        rawResponse: result.content || '', parsed: stage, usage: result.usage || null, cache: clone(result.cache || {}), finishReason: result.finishReason || '',
         referenceMeta: clone(loreContext.meta)
       });
       return {
@@ -27295,7 +27961,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stage: stageName, label: STAGE_LABELS[stageName], status: 'complete', outputType: 'patch',
           patch: clone(patch), changeSummary: clone(stage.change_log), preview: validation.text,
           rawResponse: result.content || '', provider: result.provider || '', presetName: result.presetName || '',
-          model: result.model || '', durationMs: elapsedMs, usage: clone(result.usage || {}), validation,
+          model: result.model || '', durationMs: elapsedMs, usage: clone(result.usage || {}), cache: clone(result.cache || {}), validation,
           referenceMeta: clone(loreContext.meta)
         }
       };
@@ -27465,7 +28131,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const itemId = id('wa');
         const item = {
           schema: WORLD_ADDITIONAL_SCHEMA, itemId, scopeKey: scope.scopeKey, sourceMemoryId: memory.memoryId,
-          sourceRunId: run.runId, status: 'eligible', title, content,
+          sourceRunId: run.runId, sourceDigest: memory.sourceDigest || '', sourceRevision: Number(memory.revision || 0), status: 'eligible', title, content,
           kind: string(proposal?.kind || 'world'), keywords: asArray(proposal?.keywords).map(string).filter(Boolean).slice(0, 24),
           reason: compact(proposal?.reason || request.reason || '', 500), createdAt: nowIso(), updatedAt: nowIso(),
           injectedAt: '', manifestedAt: '', canonicalMemoryId: ''
@@ -27486,9 +28152,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const canonicalizeManifestedWorldAdditional = async (scope, manifest, batch, memory, run) => {
       const evidence = `${transcript(batch)}\n\n${memory.text}`.toLowerCase();
       const updated = [];
+      const activeRunIds = await activeCanonicalRunIds(scope, manifest);
       for (const itemId of asArray(manifest.worldAdditionalIds)) {
         const item = await loadWorldItem(scope, itemId);
         if (!item || !['injected', 'manifested'].includes(item.status)) continue;
+        if (!item.sourceRunId || !activeRunIds.has(string(item.sourceRunId))) continue;
         const title = string(item.title).toLowerCase();
         const keywords = asArray(item.keywords).map(value => string(value).toLowerCase()).filter(Boolean);
         const exactTitle = title.length >= 2 && evidence.includes(title);
@@ -27636,6 +28304,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const finalText = stripFence(stageDraft(currentStage) || work.currentDraft);
         const finalValidation = validateMemoryText(finalText);
         if (!finalValidation.valid) throw new Error(`최종 메모리 검증 실패: ${finalValidation.errors.join(',')}`);
+        const preCommitVerification = await verifyBatchStillCurrent(context, startTurn, sourceHash);
+        if (!preCommitVerification.ok) {
+          return await discardStaleBatchBuild({ context, manifest, work, run, workKey, startTurn, sourceHash, revision, verification: preCommitVerification });
+        }
         const previousMemory = activeRef?.key ? await loadMemoryRef(activeRef) : null;
         const memory = {
           schema: MEMORY_SCHEMA,
@@ -27676,6 +28348,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         } catch (embeddingError) {
           memory.embedding = { status: 'retry_pending', reason: compact(embeddingError?.message || embeddingError, 500) };
           run.errors.push({ stage: 'embedding', message: memory.embedding.reason, at: nowIso() });
+        }
+
+        const finalCommitVerification = await verifyBatchStillCurrent(context, startTurn, sourceHash);
+        if (!finalCommitVerification.ok) {
+          return await discardStaleBatchBuild({
+            context, manifest, work, run, workKey, startTurn, sourceHash, revision,
+            verification: finalCommitVerification,
+            provisionalVectorKey: string(memory?.embedding?.vectorKey || '')
+          });
         }
 
         const memoryKey = key.memory(context.scope, startTurn, revision);
@@ -27810,6 +28491,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const inFlightMode = string(manifest.inFlight?.mode || manifest.inFlight?.scanMode || '').toLowerCase();
         let processed = 0;
         let partialCommitted = 0;
+        let staleDiscarded = 0;
         const failedBatches = [];
 
         for (const ref of Object.values(manifest.memories)) {
@@ -27845,8 +28527,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           }
           try {
             const committedMemory = await processBatch(context, manifest, pairs, startTurn, { ...options, mode: scanMode });
-            processed += 1;
-            if (committedMemory?.pipeline?.status === 'partial') partialCommitted += 1;
+            if (committedMemory?.staleDiscarded) {
+              staleDiscarded += 1;
+              continue;
+            }
+            if (committedMemory) {
+              processed += 1;
+              if (committedMemory?.pipeline?.status === 'partial') partialCommitted += 1;
+            }
           } catch (error) {
             const failed = {
               startTurn, endTurn: startTurn + BATCH_SIZE - 1,
@@ -27872,7 +28560,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         await saveManifest(context.scope, manifest);
         await refreshSnapshot(context);
         return {
-          ok: failedBatches.length === 0, processed, partialCommitted, failed: failedBatches.length, failedBatches,
+          ok: failedBatches.length === 0, processed, partialCommitted, staleDiscarded, failed: failedBatches.length, failedBatches,
           observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn,
           mode: scanMode, historicalBackfill: allowHistoricalBackfill, eligibleBatches: eligibleStarts.length, totalCompleteBatches: starts.length
         };
@@ -28367,9 +29055,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
 
       if (settings.forceCurrentScene && rows.length && [QUERY_TYPES.CONTINUATION, QUERY_TYPES.STATE, QUERY_TYPES.RELATION, QUERY_TYPES.EMOTION].includes(queryBundle.queryType)) {
-        const latest = rows.slice().sort((a, b) => Number(b.memory.turnRange?.end || 0) - Number(a.memory.turnRange?.end || 0))[0];
-        latest.forced = true;
-        latest.forcedReasons.push('current_scene_tail');
+        const liveRows = rows.filter(row => row.memory?.inheritedSessionHistory !== true && Number(row.memory?.sessionEpoch || 0) >= 0);
+        const latest = liveRows.slice().sort((a, b) => Number(b.memory.turnRange?.end || 0) - Number(a.memory.turnRange?.end || 0))[0];
+        if (latest) {
+          latest.forced = true;
+          latest.forcedReasons.push('current_scene_tail');
+        }
       }
 
       const hypaOverlapEvidence = queryBundle.hypaOverlapEvidence || extractCurrentRequestHypaEvidence([]);
@@ -28446,12 +29137,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         excerptChars += charCost;
         if (selected.length >= settings.recallMaxMemories) break;
       }
-      selected.sort((a, b) => Number(a.memory.turnRange?.start) - Number(b.memory.turnRange?.start));
+      selected.sort((a, b) => (Number(a.memory?.sessionEpoch || 0) - Number(b.memory?.sessionEpoch || 0)) || Number(a.memory.turnRange?.start || 0) - Number(b.memory.turnRange?.start || 0));
 
       const worldAdditional = [];
+      const activeRunIdsForRecall = new Set(rows.map(row => string(row.memory?.runId || '')).filter(Boolean));
       for (const itemId of asArray(manifest.worldAdditionalIds)) {
         const item = await loadWorldItem(context.scope, itemId);
         if (!item || !['eligible', 'injected'].includes(item.status)) continue;
+        // World Additional is branch-scoped auxiliary data. Never let a proposal whose
+        // source canonical revision is inactive leak into a rollback/reroll branch.
+        if (!item.sourceRunId || !activeRunIdsForRecall.has(string(item.sourceRunId))) continue;
         const score = lexicalScore(queryBundle.sparseText, `${item.title} ${item.content} ${asArray(item.keywords).join(' ')}`);
         if (score > 0.08) worldAdditional.push({ ...item, score });
       }
@@ -28549,7 +29244,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (remaining < 180) break;
         const memory = row.memory;
         const labels = asArray(row.excerpt?.labels).join(', ') || '종합';
-        const header = `[TURN ${memory.turnRange.start}~${memory.turnRange.end} · revision ${memory.revision} · 관련 영역: ${labels}]`;
+        const epoch = Number(memory?.sessionEpoch || 0);
+        const timelineLabel = memory?.inheritedSessionHistory === true || epoch < 0
+          ? `PREVIOUS SESSION ${Math.abs(epoch || -1)} · TURN ${memory.turnRange.start}~${memory.turnRange.end}`
+          : `TURN ${memory.turnRange.start}~${memory.turnRange.end}`;
+        const header = `[${timelineLabel} · revision ${memory.revision} · 관련 영역: ${labels}]`;
         const body = row.excerpt?.text || row.text || memory.summary || '';
         const full = `${header}\n${body}`;
         if (full.length <= remaining) {
@@ -28590,6 +29289,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if ((Array.isArray(messages) ? messages : []).some(item => contentToText(item?.content ?? item?.data ?? '').includes(MEMORY_INJECTION_MARKER))) return messages;
         const context = await resolveContext();
         const settings = await loadMemorySettings();
+        // Branch guard runs before recall so a rollback cannot inject future memories and
+        // a reroll cannot feed the discarded assistant branch into its replacement.
+        await reconcileCanonicalBranchBeforeRecall(context, { reason: 'before_request' });
         const queryBundle = buildQueryBundle(messages, context, settings);
         if (!queryBundle.currentText) return messages;
         const result = await recall(context, queryBundle);
@@ -28665,6 +29367,282 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       });
     };
 
+    const resolveTargetContextForHandoff = async targetChatId => {
+      const wanted = string(targetChatId || '').trim();
+      if (!wanted) throw new Error('targetChatId가 비어 있습니다.');
+      const liveApi = getLiveApi(['getCurrentCharacterIndex', 'getCharacterFromIndex']);
+      if (typeof liveApi?.getCurrentCharacterIndex !== 'function' || typeof liveApi?.getCharacterFromIndex !== 'function') {
+        const current = await resolveContext();
+        if (string(current.scope?.chatId) !== wanted) throw new Error('대상 채팅 스코프를 안정적으로 계산할 RisuAI index API가 없습니다.');
+        return current;
+      }
+      const charIndexRaw = await safeApi('getCurrentCharacterIndex', () => liveApi.getCurrentCharacterIndex(), false);
+      const charIndex = Number(charIndexRaw);
+      if (!Number.isFinite(charIndex)) throw new Error('현재 캐릭터 인덱스를 읽지 못했습니다.');
+      const character = await safeApi('getCharacterFromIndex', () => liveApi.getCharacterFromIndex(Math.trunc(charIndex)), false);
+      if (!character) throw new Error('현재 캐릭터 데이터를 읽지 못했습니다.');
+      const chats = Array.isArray(character?.chats) ? character.chats : [];
+      const chatIndex = chats.findIndex(chat => contextId(chat, '') === wanted);
+      if (chatIndex < 0) throw new Error(`대상 채팅 ${wanted}을 현재 캐릭터에서 찾지 못했습니다.`);
+      const chat = chats[chatIndex];
+      const identity = `${Math.trunc(charIndex)}:${chatIndex}`;
+      const characterId = contextId(character, 'character');
+      const chatId = contextId(chat, wanted);
+      const scopeKey = await resolveStableScopeKey(characterId, chatId, identity);
+      return { character, chat, identity, characterIndex: Math.trunc(charIndex), chatIndex, scope: { characterId, chatId, scopeKey } };
+    };
+
+    const waitForTargetContextForHandoff = async (targetChatId, timeoutMs = 3500) => {
+      const deadline = Date.now() + Math.max(300, Number(timeoutMs || 3500));
+      let lastError = null;
+      do {
+        try { return await resolveTargetContextForHandoff(targetChatId); }
+        catch (error) { lastError = error; }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } while (Date.now() < deadline);
+      throw lastError || new Error(`대상 채팅 ${string(targetChatId)}을 찾지 못했습니다.`);
+    };
+
+    const inspectForRetrace = async () => {
+      const context = await resolveContext();
+      const pairs = buildPairs(context.chat);
+      const manifest = await loadManifest(context.scope, pairs.length);
+      const memories = [];
+      const missingMemoryKeys = [];
+      for (const ref of listMemoryRefs(manifest)) {
+        const memory = await loadMemoryRef(ref);
+        if (memory) memories.push(memory);
+        else if (ref?.key) missingMemoryKeys.push(string(ref.key));
+      }
+      const activeRunIds = await activeCanonicalRunIds(context.scope, manifest);
+      const worldAdditional = [];
+      for (const itemId of manifest.worldAdditionalIds) {
+        const item = await loadWorldItem(context.scope, itemId);
+        if (!item) continue;
+        if (item.sourceRunId && !activeRunIds.has(string(item.sourceRunId))) continue;
+        worldAdditional.push(item);
+      }
+      const inheritedCount = memories.filter(memory => memory?.inheritedSessionHistory === true || Number(memory?.sessionEpoch || 0) < 0).length;
+      return clone({
+        schema: LIBRA_RETRACE_INSPECT_SCHEMA,
+        pluginVersion: VERSION,
+        available: true,
+        scope: context.scope,
+        manifest: {
+          schema: manifest.schema,
+          version: manifest.version,
+          frontiers: manifest.frontiers,
+          inFlight: manifest.inFlight,
+          stats: manifest.stats,
+          updatedAt: manifest.updatedAt
+        },
+        integrity: { ok: missingMemoryKeys.length === 0, missingMemoryKeys },
+        memories,
+        worldAdditional,
+        counts: {
+          memories: memories.length,
+          liveMemories: memories.length - inheritedCount,
+          inheritedMemories: inheritedCount,
+          partialMemories: memories.filter(memory => memory?.pipeline?.status === 'partial').length,
+          worldAdditional: worldAdditional.length
+        },
+        inspectedAt: nowIso()
+      });
+    };
+
+    const cleanupExpiredHandoffPackages = async () => {
+      const prefix = `${PREFIX}:handoff:`;
+      const now = Date.now();
+      for (const storageKey of await storage.keys()) {
+        if (!storageKey.startsWith(prefix)) continue;
+        const value = await storage.getJson(storageKey, null);
+        const expiresAt = Date.parse(string(value?.expiresAt || '')) || 0;
+        if (expiresAt && expiresAt <= now) await storage.remove(storageKey);
+      }
+    };
+
+    const prepareSessionHandoff = async (options = {}) => {
+      const transferId = string(options.transferId || id('libra_handoff')).trim();
+      if (!transferId) throw new Error('LIBRA handoff transferId가 비어 있습니다.');
+      await cleanupExpiredHandoffPackages();
+      const context = await resolveContext();
+      const pairs = buildPairs(context.chat);
+      const manifest = await loadManifest(context.scope, pairs.length);
+      const memoryRefs = listMemoryRefs(manifest).map(ref => ({
+        key: string(ref.key), memoryId: string(ref.memoryId), revision: Number(ref.revision || 0),
+        sourceDigest: string(ref.sourceDigest || ''), sessionEpoch: memoryRefSessionEpoch(ref),
+        turnRange: clone(ref.turnRange || {}), runId: string(ref.runId || '')
+      })).filter(ref => ref.key);
+      const activeRunIds = await activeCanonicalRunIds(context.scope, manifest);
+      const worldAdditionalRefs = [];
+      for (const itemId of manifest.worldAdditionalIds) {
+        const item = await loadWorldItem(context.scope, itemId);
+        if (!item || !['eligible', 'injected'].includes(string(item.status))) continue;
+        if (item.sourceRunId && !activeRunIds.has(string(item.sourceRunId))) continue;
+        worldAdditionalRefs.push({ itemId: string(item.itemId || itemId), key: key.worldAdditional(context.scope, itemId) });
+      }
+      const preparedAt = nowIso();
+      const packageValue = {
+        schema: LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA,
+        transferId,
+        source: { scope: clone(context.scope), identity: context.identity },
+        memoryRefs,
+        worldAdditionalRefs,
+        preparedAt,
+        expiresAt: new Date(Date.now() + LIBRA_SESSION_HANDOFF_TTL_MS).toISOString()
+      };
+      await storage.setJson(key.handoffPackage(transferId), packageValue);
+      return clone({
+        schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
+        action: 'prepared', transferId, prepared: true, sourceScope: context.scope,
+        records: memoryRefs.length, worldAdditional: worldAdditionalRefs.length,
+        preparedAt, expiresAt: packageValue.expiresAt
+      });
+    };
+
+    const inheritedMemoryRefForTransfer = (memory, memoryKey, transferId, sourceScope) => ({
+      ...memoryRefFromStoredMemory(memory, memoryKey, [], memory.createdAt || nowIso()),
+      status: 'committed',
+      sessionEpoch: Number(memory.sessionEpoch || -1),
+      inheritedSessionHistory: true,
+      authorityClass: 'permanent_predecessor',
+      handoffTransferId: transferId,
+      sourceSessionChatId: string(sourceScope?.chatId || memory.sourceSessionChatId || ''),
+      sourceSessionScopeKey: string(sourceScope?.scopeKey || memory.sourceSessionScopeKey || '')
+    });
+
+    const verifySessionHandoff = async (options = {}) => {
+      const transferId = string(options.transferId || '').trim();
+      const targetChatId = string(options.targetChatId || '').trim();
+      if (!transferId || !targetChatId) throw new Error('LIBRA handoff 검증에는 transferId와 targetChatId가 필요합니다.');
+      const target = await waitForTargetContextForHandoff(targetChatId);
+      const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
+      const refs = asArray(manifest.inheritedMemories).filter(ref => ref?.status === 'committed' && string(ref.handoffTransferId) === transferId);
+      let readable = 0;
+      let vectorsReady = 0;
+      for (const ref of refs) {
+        const memory = await loadMemoryRef(ref);
+        if (!memory) continue;
+        readable += 1;
+        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey) {
+          const vector = await storage.getJson(memory.embedding.vectorKey, null);
+          if (vector) vectorsReady += 1;
+        }
+      }
+      const expectedRaw = options.expectedRecords;
+      const expectedRecords = expectedRaw === undefined || expectedRaw === null || expectedRaw === ''
+        ? refs.length
+        : Math.max(0, Number(expectedRaw) || 0);
+      const verified = readable === refs.length && readable === expectedRecords;
+      return clone({
+        schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
+        action: 'verified', transferId, targetChatId, targetScope: target.scope,
+        verified, durable: verified, records: readable, expectedRecords,
+        vectorsReady, reason: verified ? 'libra_handoff_durable' : 'libra_handoff_readback_mismatch'
+      });
+    };
+
+    const adoptSessionHandoff = async (options = {}) => {
+      const transferId = string(options.transferId || '').trim();
+      const targetChatId = string(options.targetChatId || '').trim();
+      if (!transferId || !targetChatId) throw new Error('LIBRA handoff 채택에는 transferId와 targetChatId가 필요합니다.');
+      const packageValue = await storage.getJson(key.handoffPackage(transferId), null);
+      if (!packageValue || packageValue.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA) {
+        const prior = await storage.getJson(key.handoffReceipt(transferId), null);
+        if (prior?.targetChatId === targetChatId && prior?.verified === true) return clone(prior);
+        throw new Error('준비된 LIBRA handoff package를 찾지 못했습니다.');
+      }
+      if (Date.parse(string(packageValue.expiresAt || '')) && Date.parse(string(packageValue.expiresAt)) <= Date.now()) {
+        await storage.remove(key.handoffPackage(transferId));
+        throw new Error('LIBRA handoff package가 만료되었습니다. 다시 다음 세션 전환을 실행하세요.');
+      }
+      const target = await waitForTargetContextForHandoff(targetChatId);
+      if (string(packageValue.source?.scope?.chatId) === targetChatId) throw new Error('LIBRA handoff 대상이 원본 채팅과 같습니다.');
+      const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
+      manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => string(ref.handoffTransferId) !== transferId);
+      const copiedRefs = [];
+      const sourceScope = packageValue.source?.scope || {};
+      for (let index = 0; index < asArray(packageValue.memoryRefs).length; index += 1) {
+        const sourceRef = packageValue.memoryRefs[index];
+        const sourceMemory = await storage.getJson(sourceRef?.key, null);
+        if (!sourceMemory || sourceMemory.status !== 'committed') throw new Error(`LIBRA 원본 정본을 읽지 못했습니다: ${string(sourceRef?.memoryId || sourceRef?.key)}`);
+        const sourceEpoch = Number.isFinite(Number(sourceMemory.sessionEpoch)) ? Number(sourceMemory.sessionEpoch) : 0;
+        const inheritedEpoch = Math.min(-1, sourceEpoch - 1);
+        const predecessorLineage = {
+          sourceScopeKey: string(sourceScope.scopeKey || ''), sourceChatId: string(sourceScope.chatId || ''),
+          sourceMemoryId: string(sourceMemory.memoryId || ''), sourceRevision: Number(sourceMemory.revision || 0),
+          sourceRunId: string(sourceMemory.runId || ''), sourceSessionEpoch: sourceEpoch,
+          prior: clone(sourceMemory.predecessorLineage || null)
+        };
+        const inheritedId = `prev_${stableDraftHash(`${transferId}|${index}|${sourceMemory.memoryId}|${sourceMemory.revision}`)}`;
+        const memory = clone(sourceMemory);
+        Object.assign(memory, {
+          memoryId: inheritedId,
+          scopeKey: target.scope.scopeKey,
+          status: 'committed',
+          sessionEpoch: inheritedEpoch,
+          inheritedSessionHistory: true,
+          authorityClass: 'permanent_predecessor',
+          handoffTransferId: transferId,
+          sourceSessionChatId: string(sourceScope.chatId || ''),
+          sourceSessionScopeKey: string(sourceScope.scopeKey || ''),
+          predecessorLineage,
+          createdAt: memory.createdAt || nowIso(),
+          updatedAt: nowIso()
+        });
+        const memoryKey = key.predecessorMemory(target.scope, transferId, index, inheritedId, memory.revision);
+        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey) {
+          const sourceVector = await storage.getJson(memory.embedding.vectorKey, null);
+          if (sourceVector) {
+            const profileId = string(sourceVector.profileId || memory.embedding.profileId || 'profile');
+            const targetVectorKey = key.predecessorVector(target.scope, transferId, index, inheritedId, memory.revision, profileId);
+            const targetVector = { ...clone(sourceVector), scopeKey: target.scope.scopeKey, memoryId: inheritedId, createdAt: nowIso() };
+            await storage.setJson(targetVectorKey, targetVector);
+            memory.embedding = { ...memory.embedding, vectorKey: targetVectorKey };
+          } else {
+            memory.embedding = { ...memory.embedding, status: 'retry_pending', reason: 'handoff_source_vector_missing' };
+          }
+        }
+        await storage.setJson(memoryKey, memory);
+        copiedRefs.push(inheritedMemoryRefForTransfer(memory, memoryKey, transferId, sourceScope));
+      }
+      manifest.inheritedMemories.push(...copiedRefs);
+      const copiedWorldIds = [];
+      for (let index = 0; index < asArray(packageValue.worldAdditionalRefs).length; index += 1) {
+        const sourceItemRef = packageValue.worldAdditionalRefs[index];
+        const sourceItem = await storage.getJson(sourceItemRef?.key, null);
+        if (!sourceItem) continue;
+        const itemId = `prevwa_${stableDraftHash(`${transferId}|${index}|${sourceItem.itemId || sourceItemRef.itemId}`)}`;
+        const item = {
+          ...clone(sourceItem), itemId, scopeKey: target.scope.scopeKey,
+          status: 'eligible', injectedAt: '', updatedAt: nowIso(), createdAt: sourceItem.createdAt || nowIso(),
+          inheritedSessionHistory: true, authorityClass: 'permanent_predecessor', handoffTransferId: transferId,
+          sourceSessionChatId: string(sourceScope.chatId || ''), sourceSessionScopeKey: string(sourceScope.scopeKey || '')
+        };
+        await storage.setJson(key.worldAdditional(target.scope, itemId), item);
+        copiedWorldIds.push(itemId);
+      }
+      manifest.worldAdditionalIds = Array.from(new Set([...manifest.worldAdditionalIds, ...copiedWorldIds]));
+      manifest.stats.handoffImports = Number(manifest.stats.handoffImports || 0) + 1;
+      manifest.lastSessionHandoff = {
+        schema: LIBRA_SESSION_HANDOFF_MARKER_SCHEMA, transferId,
+        sourceChatId: string(sourceScope.chatId || ''), sourceScopeKey: string(sourceScope.scopeKey || ''),
+        targetChatId, targetScopeKey: target.scope.scopeKey, records: copiedRefs.length,
+        worldAdditional: copiedWorldIds.length, adoptedAt: nowIso()
+      };
+      await saveManifest(target.scope, manifest);
+      const verification = await verifySessionHandoff({ transferId, targetChatId, expectedRecords: asArray(packageValue.memoryRefs).length });
+      const receipt = {
+        ...verification,
+        action: 'adopted', adopted: verification.verified === true,
+        sourceScope: clone(sourceScope), worldAdditional: copiedWorldIds.length, adoptedAt: nowIso()
+      };
+      await storage.setJson(key.handoffReceipt(transferId), receipt);
+      if (verification.verified) await storage.remove(key.handoffPackage(transferId));
+      if (string((await resolveContext()).scope?.chatId) === targetChatId) await refreshSnapshot(target);
+      return clone(receipt);
+    };
+
     const deleteCurrentScope = async () => {
       const context = await resolveContext();
       const pairs = buildPairs(context.chat);
@@ -28673,6 +29651,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         await removeMemoryRecord(ref);
         for (const old of asArray(ref?.history)) await removeMemoryRecord(old);
       }
+      for (const ref of asArray(manifest.inheritedMemories)) await removeMemoryRecord(ref);
       for (const runId of manifest.runIds) await storage.remove(key.run(context.scope, runId));
       for (const itemId of manifest.worldAdditionalIds) await storage.remove(key.worldAdditional(context.scope, itemId));
       for (const startTurn of completeBatchStarts(pairs)) await storage.remove(key.work(context.scope, startTurn));
@@ -28691,11 +29670,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       loadEmbeddingRebuildState, refreshEmbeddingRebuildInventory, startEmbeddingRebuild, stopEmbeddingRebuild,
       retryFailedEmbeddingRebuild, cleanupQuarantinedVectors,
       resolveContext, buildPairs, sourceDigest, transcript, buildAriadneReferenceContext, buildItoLoreReferenceContext, rerankMemoryLoreForStage, executeStage, scan, scheduleScan, beforeRequest, afterRequest,
+      reconcileCanonicalBranchBeforeRecall, verifyBatchStillCurrent,
       buildQueryText, buildQueryBundle, splitMemorySections, buildMemoryRetrievalProjection, recall,
       debugExtractCurrentRequestHypaEvidence: extractCurrentRequestHypaEvidence,
       debugHypaOverlapForMemory: hypaOverlapForMemory,
       debugBuildAriadneHistoricalHypaPacket: buildAriadneHistoricalHypaPacket,
-      refreshSnapshot, exportCurrentScope, deleteCurrentScope, retryFailed,
+      refreshSnapshot, exportCurrentScope, inspectForRetrace, prepareSessionHandoff, adoptSessionHandoff, verifySessionHandoff, resolveTargetContextForHandoff, waitForTargetContextForHandoff, resolveStableScopeKey, deleteCurrentScope, retryFailed,
       listEmbeddingProviders: () => EmbeddingProviderRegistry.list(),
       getSnapshot: () => clone(state.snapshot),
       getSettings: () => clone(state.settings || DEFAULT_SETTINGS),
@@ -30079,7 +31059,7 @@ html,body{width:100%;height:100%;overflow:hidden}
 
   const addGuiPreset = () => {
     const name = uniquePresetName('새 프리셋');
-    Gui.state.providers[name] = sanitizePreset({ provider: 'openai', url: defaultUrlForProvider('openai'), model: '', temp: 0.35, max_tokens: DEFAULT_MAX_STAGE_TOKENS, timeout_ms: DEFAULT_STAGE_TIMEOUT_MS, request_format: 'chat_completions', reasoning_preset: 'auto', thinking_type: 'enabled' });
+    Gui.state.providers[name] = sanitizePreset({ provider: 'openai', url: defaultUrlForProvider('openai'), model: '', temp: 0.35, max_tokens: DEFAULT_MAX_STAGE_TOKENS, timeout_ms: DEFAULT_STAGE_TIMEOUT_MS, request_format: 'chat_completions', reasoning_preset: 'auto', thinking_type: 'enabled', prompt_cache: 'auto' });
     Gui.selectedPreset = name;
     markGuiDirty();
     renderSettingsGui();
@@ -30388,7 +31368,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       ]),
       guiEl('div', { class: 'sga-row2' }, [
         providerEditorField('요청 형식', 'request_format', { choices: providerSupportsResponses(provider) ? [['chat_completions','Chat Completions'],['responses','Responses API']] : [['chat_completions','Chat Completions (이 프로바이더의 지원 형식)']], note: providerSupportsResponses(provider) ? 'LIBRA 6.1 형식 라우팅을 사용합니다.' : '선택한 프로바이더는 Responses endpoint가 등록되지 않았습니다.' }),
-        checkboxNode(!!preset.stream, '스트리밍 응답 사용', next => { preset.stream = next; })
+        checkboxNode(!!preset.stream, '스트리밍 응답 사용', next => { preset.stream = next; }),
+        providerEditorField('프롬프트 캐시', 'prompt_cache', { choices: [['auto','자동 (GPT · Claude · Gemini)'],['off','사용 안 함']], note: '같은 provider/model이 여러 LIBRA 기억 단계에서 재사용될 때 native cache를 자동 적용합니다. 지원하지 않거나 이득이 없는 경우 fail-open으로 일반 요청을 사용합니다.' })
       ])
     ], 'generation'));
 
@@ -33099,6 +34080,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     lastProviderResponse: Runtime.lastProviderResponse,
     lastProviderError: Runtime.lastProviderError,
     lastBackendBridge: Runtime.lastBackendBridge,
+    promptCache: PromptCacheRuntime.last,
     ollamaPromptTokenRatios: Runtime.ollamaPromptTokenRatios,
     backendHosting: Runtime.settings?.backendHosting ? {
       ...Runtime.settings.backendHosting,
@@ -33266,7 +34248,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       guiEl('div', { class: 'sga-summary-panel' }, summaryBlocks),
       guiEl('div', { class: 'sga-grid' }, [
         guiEl('div', { class: 'sga-card' }, [guiEl('h3', { text: '마지막 실행 상태' }), guiEl('div', { class: 'sga-code', text: JSON.stringify({ lastBefore: Runtime.last, lastAuxiliarySkip: Runtime.lastAuxiliarySkip, lastProviderError: Runtime.lastProviderError, hookStatus: Runtime.hookStatus, secretStorage: Runtime.secretStorage, migration: Runtime.migration, lastSafeStage: Runtime.lastSafeStage }, null, 2) })]),
-        guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '마지막 Provider 호출' }), guiEl('div', { class: 'sga-code', text: JSON.stringify({ request: Runtime.lastProviderRequest, response: Runtime.lastProviderResponse, error: Runtime.lastProviderError, backendBridge: Runtime.lastBackendBridge }, null, 2) || '(아직 provider 호출 기록 없음)' })]),
+        guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '마지막 Provider 호출' }), guiEl('div', { class: 'sga-code', text: JSON.stringify({ request: Runtime.lastProviderRequest, response: Runtime.lastProviderResponse, error: Runtime.lastProviderError, backendBridge: Runtime.lastBackendBridge, promptCache: PromptCacheRuntime.last }, null, 2) || '(아직 provider 호출 기록 없음)' })]),
         guiEl('div', { class: 'sga-card' }, [guiEl('h3', { text: '최근 경고' }), guiEl('div', { class: 'sga-code', text: JSON.stringify(Runtime.warnings.slice(-20), null, 2) })]),
         guiEl('div', { class: 'sga-card wide' }, [
           guiEl('h3', { text: '정본 참조 예산' }),
@@ -33926,7 +34908,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('span', { text: '임베딩' }), guiEl('strong', { text: run.embedding?.status || 'pending' })
       ]),
       ...(run.stages || []).map((stage, index) => guiEl('details', { class: 'sga-card', open: index === 0 }, [
-        guiEl('summary', {}, [guiEl('strong', { text: `${index + 1}. ${stage.label || LibraMemoryCore.STAGE_LABELS[stage.stage] || stage.stage}` }), guiEl('span', { text: `${stage.status} · ${stage.provider || 'provider?'} / ${stage.model || 'model?'} · ${stage.durationMs || 0}ms` })]),
+        guiEl('summary', {}, [guiEl('strong', { text: `${index + 1}. ${stage.label || LibraMemoryCore.STAGE_LABELS[stage.stage] || stage.stage}` }), guiEl('span', { text: `${stage.status} · ${stage.provider || 'provider?'} / ${stage.model || 'model?'} · ${stage.durationMs || 0}ms${Number(stage.cache?.readTokens || 0) > 0 ? ` · 캐시 ${stage.cache.readTokens}T` : ''}` })]),
         stage.outputType === 'full_draft'
           ? guiEl('div', {}, [guiEl('h4', { text: 'Ariadne 초안 V0' }), guiEl('pre', { class: 'sga-live-result-code', text: stage.output || '' })])
           : guiEl('div', {}, [
@@ -33939,7 +34921,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           guiEl('summary', { text: 'Ariadne 참고 자료 사용 결과' }),
           guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(stage.referenceMeta, null, 2) })
         ]) : null,
-        guiEl('details', {}, [guiEl('summary', { text: '모델 원본 출력과 검증' }), guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ rawResponse: stage.rawResponse || '', validation: stage.validation || {}, usage: stage.usage || {}, changeSummary: stage.changeSummary || [] }, null, 2) })])
+        guiEl('details', {}, [guiEl('summary', { text: '모델 원본 출력과 검증' }), guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ rawResponse: stage.rawResponse || '', validation: stage.validation || {}, usage: stage.usage || {}, cache: stage.cache || {}, changeSummary: stage.changeSummary || [] }, null, 2) })])
       ].filter(Boolean))),
       run.errors?.length ? guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(run.errors, null, 2) }) : null
     ])));
@@ -34639,6 +35621,10 @@ html,body{width:100%;height:100%;overflow:hidden}
     async getCanonicalMemories() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().memories; },
     async getMemoryRuns() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().runs; },
     async getWorldAdditional() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().worldAdditional; },
+    async inspectForRetrace() { return await LibraMemoryCore.inspectForRetrace(); },
+    async prepareSessionHandoff(options = {}) { return await LibraMemoryCore.prepareSessionHandoff(options); },
+    async adoptSessionHandoff(options = {}) { return await LibraMemoryCore.adoptSessionHandoff(options); },
+    async verifySessionHandoff(options = {}) { return await LibraMemoryCore.verifySessionHandoff(options); },
     async listSelectableModuleLorebooks() { await refreshModuleLoreCatalog(true); return safeClone(Gui.moduleCatalog || []); },
     async listSelectableCharacterLorebooks() { await refreshCharacterLoreCatalog(true); return safeClone(Gui.characterLoreCatalog || []); },
     async listHypaRecords() { await refreshHypaV3Catalog(true); return safeClone(Gui.hypaCatalog || []); },
@@ -34757,6 +35743,44 @@ html,body{width:100%;height:100%;overflow:hidden}
     clearEmbeddingQueryCache() { return LibraProviderBridge.embeddingRegistry.clearQueryCache(); }
   });
 
+  const registerRetraceIpc = async () => {
+    const ipcApi = getLiveApi(['addPluginChannelListener', 'postPluginChannelMessage']);
+    if (typeof ipcApi?.addPluginChannelListener !== 'function' || typeof ipcApi?.postPluginChannelMessage !== 'function') {
+      Runtime.hookStatus.retraceIpc = false;
+      return false;
+    }
+    const handler = async (message, metadata = {}) => {
+      const request = message && typeof message === 'object' && !Array.isArray(message) ? message : {};
+      if (request.schema !== LIBRA_RETRACE_IPC_SCHEMA || request.kind !== 'request') return;
+      const sender = text(metadata?.sender || '').trim();
+      if (sender && sender !== RETRACE_PLUGIN_ID) return;
+      const requestId = text(request.requestId || '').trim();
+      const action = text(request.action || '').trim();
+      let ok = true;
+      let result = null;
+      let error = '';
+      try {
+        if (action === 'inspect') result = await LibraMemoryCore.inspectForRetrace();
+        else if (action === 'prepare_session_handoff') result = await LibraMemoryCore.prepareSessionHandoff(request.payload || {});
+        else if (action === 'adopt_session_handoff') result = await LibraMemoryCore.adoptSessionHandoff(request.payload || {});
+        else if (action === 'verify_session_handoff') result = await LibraMemoryCore.verifySessionHandoff(request.payload || {});
+        else throw new Error(`지원하지 않는 LIBRA IPC action입니다: ${action || '(empty)'}`);
+      } catch (caught) {
+        ok = false;
+        error = compact(caught?.message || caught, 1200);
+      }
+      await ipcApi.postPluginChannelMessage(RETRACE_PLUGIN_ID, LIBRA_RETRACE_IPC_RESPONSE_CHANNEL, {
+        schema: LIBRA_RETRACE_IPC_SCHEMA,
+        kind: 'response', requestId, action, ok,
+        ...(ok ? { result: safeClone(result) } : { error })
+      });
+    };
+    await ipcApi.addPluginChannelListener(LIBRA_RETRACE_IPC_REQUEST_CHANNEL, handler);
+    registered.retraceIpc = handler;
+    Runtime.hookStatus.retraceIpc = true;
+    return true;
+  };
+
   try {
     const registerBeforeRequestHook = async () => {
       if (typeof API.addRisuReplacer !== 'function') {
@@ -34828,6 +35852,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     Runtime.hookStatus.input = false;
     await registerBeforeRequestHook();
     await registerOutputListener();
+    await registerRetraceIpc().catch(error => { Runtime.hookStatus.retraceIpc = false; warn('LIBRA RE:TRACE IPC registration failed.', error); });
 
     const unload = async () => {
       try {
