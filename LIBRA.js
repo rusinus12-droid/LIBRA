@@ -2,6 +2,7 @@
 //@display-name LIBRA v1.0.4
 //@api 3.0
 //@version 1.0.4
+//@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA-World-Manager/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
 //@arg debug string true|false
