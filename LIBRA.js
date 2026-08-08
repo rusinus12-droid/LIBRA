@@ -1,7 +1,7 @@
 //@name libra
-//@display-name LIBRA v1.0.7
+//@display-name LIBRA v1.0.8
 //@api 3.0
-//@version 1.0.7
+//@version 1.0.8
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,8 +63,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
- * LIBRA v1.0.7
+ * LIBRA v1.0.8
  *
+ * v1.0.8 fixes the canonical-memory GUI crash on partial memories by removing an out-of-scope LibraMemoryCore asArray helper reference from buildLibraMemoriesPanel; partial ito failures now render safely with a local Array.isArray guard.
  * v1.0.7 makes World Additional scarce and lifecycle-bound: World ito may request it only for concrete reusable canon gaps, generation is deduplicated/capped, recall injects at most one strongly relevant candidate with cooldown/retry limits, actual post-injection manifestation becomes an “적용 완료” tombstone, and applied/stale candidates are automatically removed after bounded turn windows.
  * v1.0.6 makes RE:TRACE discovery explicit and cheap: the IPC listener is registered before slower hooks, a zero-storage ping/capabilities action is exposed, and RE:TRACE inspection loads canonical memories/world-additional records in parallel without rereading every memory to derive active run IDs.
  *
@@ -157,7 +158,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.7';
+  const PLUGIN_VERSION = '1.0.8';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -35286,6 +35287,9 @@ html,body{width:100%;height:100%;overflow:hidden}
     if (!memories.length) return guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '정본 메모리가 없습니다.' }), guiEl('div', { class: 'sga-note', text: '설치 이후 새 대화에서 완성되는 5턴은 자동 분석할 수 있습니다. 이미 누적된 기존 세션의 과거 대화는 홈의 ‘수동 콜드스타트’를 눌렀을 때만 구축합니다.' })]);
     return guiEl('div', { class: 'sga-list-items' }, memories.slice().reverse().map(memory => {
       const embeddingDisplay = libraEmbeddingDisplayForMemory(memory);
+      const failedItoStages = Array.isArray(memory?.pipeline?.failedItoStages)
+        ? memory.pipeline.failedItoStages
+        : [];
       return guiEl('details', { class: 'sga-card wide' }, [
       guiEl('summary', {}, [
         guiEl('strong', { text: `TURN ${memory.turnRange.start}~${memory.turnRange.end}` }),
@@ -35294,7 +35298,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       guiEl('div', { class: 'sga-summary-table', style: { marginTop: '12px' } }, [
         guiEl('span', { text: '메모리 ID' }), guiEl('strong', { text: memory.memoryId }),
         guiEl('span', { text: '정본 상태' }), guiEl('strong', { text: memory.status }),
-        guiEl('span', { text: '파이프라인' }), guiEl('strong', { text: memory.pipeline?.status === 'partial' ? `부분 정본 · 실패 ito: ${asArray(memory.pipeline?.failedItoStages).map(item => LibraMemoryCore.STAGE_LABELS[item?.stage] || item?.stage).filter(Boolean).join(', ') || '기록됨'}` : '완료' }),
+        guiEl('span', { text: '파이프라인' }), guiEl('strong', { text: memory.pipeline?.status === 'partial' ? `부분 정본 · 실패 ito: ${failedItoStages.map(item => LibraMemoryCore.STAGE_LABELS[item?.stage] || item?.stage).filter(Boolean).join(', ') || '기록됨'}` : '완료' }),
         guiEl('span', { text: '원문 digest' }), guiEl('strong', { text: memory.sourceDigest }),
         guiEl('span', { text: '생성 시각' }), guiEl('strong', { text: libraFormatTime(memory.updatedAt) }),
         guiEl('span', { text: '임베딩' }), guiEl('strong', { text: embeddingDisplay.text }),
