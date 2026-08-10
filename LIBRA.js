@@ -1,7 +1,7 @@
 //@name libra
-//@display-name LIBRA v1.0.8
+//@display-name LIBRA v1.0.26
 //@api 3.0
-//@version 1.0.8
+//@version 1.0.26
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,8 +63,56 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
- * LIBRA v1.0.8
+ * LIBRA v1.0.26
+ * v1.0.26 makes native chat-copy adoption immediate and observable: startup/snapshot reads now trigger adoption, source discovery refreshes the authoritative getCharacterFromIndex() chat list, transcript-prefix matching backs up missing copy-title metadata, and debug export records every adoption check/result.
  *
+ * LIBRA v1.0.25
+ * v1.0.25 adopts native RisuAI chat copies into an independent LIBRA scope: it detects explicit/branch/copy-title lineage, clones only transcript-valid canonical memories plus vectors and eligible World Additional state, preserves inherited predecessor memories, and never overwrites a non-empty target scope.
+ *
+ * LIBRA v1.0.24
+ * v1.0.24 stops asynchronous context/scope-registry resolution from writing after unload and converts that cancellation into a normal skipped scan.
+ *
+ * LIBRA v1.0.23
+ * v1.0.23 makes embedding replacement forward-safe: persist the new memory/manifest first and retire the previous vector only after durable metadata points at the replacement.
+ *
+ * LIBRA v1.0.22
+ * v1.0.22 extends unload cancellation across initial work checkpoints and embedding-retry persistence, reclaiming provisional vectors instead of updating retired state.
+ *
+ * LIBRA v1.0.21
+ * v1.0.21 prevents an already-running, unloaded runtime from advancing stage checkpoints or committing an old manifest over a replacement instance.
+ *
+ * LIBRA v1.0.20
+ * v1.0.20 constrains handoff transfer IDs before they enter package, receipt, predecessor, or chunked-storage keys.
+ *
+ * LIBRA v1.0.19
+ * v1.0.19 removes already-written owned chunks when a later chunk write fails, without relying on an uncommitted manifest.
+ *
+ * LIBRA v1.0.18
+ * v1.0.18 validates chunk manifests against their owning base key before reads/deletes and excludes chunk artifacts from handoff-package expiry scans.
+ *
+ * LIBRA v1.0.17
+ * v1.0.17 coalesces concurrent settings-GUI rebuilds into one active render plus at most one follow-up and contains detached async render failures.
+ *
+ * LIBRA v1.0.16
+ * v1.0.16 binds debounced output scans to the chat that scheduled them and skips stale or disposed runtime work before queue/storage access.
+ *
+ * LIBRA v1.0.15
+ * v1.0.15 retires every hook before unload I/O, unregisters RE:TRACE IPC when supported, and makes stale hot-reload callbacks fail closed.
+ *
+ * LIBRA v1.0.14
+ * v1.0.14 requires exact package identity/digest and explicit receipt counts for durable RE:TRACE handoff retries.
+ *
+ * LIBRA v1.0.13
+ * v1.0.13 preserves expanded GUI page limits across background refreshes, stops embedding workers before complete owner-scoped deletion, and verifies prepared handoff source records plus package identity before adoption.
+ *
+ * LIBRA v1.0.12
+ * v1.0.12 verifies the durable handoff receipt by owner-storage readback before retiring its prepared package.
+ *
+ * v1.0.11 prevents stale cross-chat snapshot commits, keeps public reads request-local, bounds GUI snapshot hydration to visible pages, renders explicit refreshes once, and makes lazy detail failures retryable.
+ *
+ * v1.0.10 authenticates RE:TRACE mutation IPC and verifies canonical plus World Additional session handoff persistence end to end.
+ *
+ * v1.0.9 removes GUI storage/render amplification: snapshot records use bounded parallel reads, GUI-only views avoid repeated deep clones, mobile/reopen paths render once, and large memory/run/lore collections use paged summaries with lazy detail hydration.
  * v1.0.8 fixes the canonical-memory GUI crash on partial memories by removing an out-of-scope LibraMemoryCore asArray helper reference from buildLibraMemoriesPanel; partial ito failures now render safely with a local Array.isArray guard.
  * v1.0.7 makes World Additional scarce and lifecycle-bound: World ito may request it only for concrete reusable canon gaps, generation is deduplicated/capped, recall injects at most one strongly relevant candidate with cooldown/retry limits, actual post-injection manifestation becomes an “적용 완료” tombstone, and applied/stale candidates are automatically removed after bounded turn windows.
  * v1.0.6 makes RE:TRACE discovery explicit and cheap: the IPC listener is registered before slower hooks, a zero-storage ping/capabilities action is exposed, and RE:TRACE inspection loads canonical memories/world-additional records in parallel without rereading every memory to derive active run IDs.
@@ -158,7 +206,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.8';
+  const PLUGIN_VERSION = '1.0.26';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -168,6 +216,7 @@
   const LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA = 'libra.session_handoff.package.v1';
   const LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA = 'libra.session_handoff.receipt.v1';
   const LIBRA_SESSION_HANDOFF_MARKER_SCHEMA = 'libra.session_handoff.marker.v1';
+  const LIBRA_SNAPSHOT_PAGE_LIMITS = Object.freeze({ memories: 20, runs: 10, worldAdditional: 20 });
   const LIBRA_SESSION_HANDOFF_TTL_MS = 30 * 60 * 1000;
   const INJECTION_HEADER = '[LIBRA LONG-TERM MEMORY]';
   const LEGACY_INJECTION_HEADERS = Object.freeze([]);
@@ -177,6 +226,7 @@
   const LEGACY_STORAGE_PRESETS_KEY = 'libra:v1:unused-legacy-presets';
   const LEGACY_STORAGE_SETTINGS_KEY = 'libra:v1:unused-legacy-settings';
   const STORAGE_PROVIDER_PRESETS_KEY = 'libra:v1:provider-presets';
+  const STORAGE_PROVIDER_CONFIG_KEY = 'libra:v1:provider-settings';
   const STORAGE_AGENT_SLOTS_KEY = 'libra:v1:agent-slots';
   const STORAGE_POST_PROCESSORS_KEY = 'libra:v1:unused-post-processors';
   const STORAGE_PROMPT_OVERRIDES_KEY = 'libra:v1:prompt-overrides';
@@ -185,12 +235,10 @@
   const STORAGE_REFERENCE_BUDGET_MIGRATION_KEY = 'libra:v1:reference-budget-migration';
   const STORAGE_WRITER_DESIGNS_KEY = 'libra:v1:unused-writer-designs';
   const LOCAL_PROVIDER_SECRETS_KEY = 'libra:v1:provider-secrets';
+  const LOCAL_PROVIDER_CONFIG_SECRETS_KEY = 'libra:v1:provider-config-secrets';
   const LOCAL_BACKEND_HOSTING_TOKEN_KEY = 'libra:v1:backend-hosting-token';
   const SETTINGS_UI_ID = 'libra-v1-settings';
-  const INPUT_ASSIST_CONTINUE_BUTTON_ID = 'serial-gradation-agents-for-rp-continue';
-  const INPUT_ASSIST_CONTINUE_PANEL_ID = 'serial-gradation-agents-for-rp-continue-status';
-  const INPUT_ASSIST_CONTINUE_CANCEL_BUTTON_ID = 'serial-gradation-agents-for-rp-continue-cancel';
-  const INPUT_ASSIST_CONTINUE_SEND_GRACE_MS = 2000;
+  const PIPELINE_WORK_PANEL_ID = 'serial-gradation-agents-for-rp-pipeline-status';
   const INPUT_ASSIST_RUNTIME_RESPONSE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   const INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS = 2400;
   const INPUT_ASSIST_LORE_CONTEXT_MAX_CHARS = 3200;
@@ -298,7 +346,9 @@
   const AGENT_CBS_LITERAL_PREFIX = '\u0000SGA_RAG_CBS_LITERAL_';
   const AGENT_CBS_LITERAL_SUFFIX = '_END\u0000';
   const RISU_ENGINE_STAGE = 'risu_response_engine';
-  const OUTPUT_MODES = Object.freeze(['draft_guided', 'risu_engine']);
+  // The response-engine branch is not part of the long-term-memory request path.
+  // Keep the only connected mode selectable until that branch has its own host hook.
+  const OUTPUT_MODES = Object.freeze(['draft_guided']);
   const EXPORT_KIND = 'serial-gradation-agents-for-rp.configuration';
   const FLOW_EXPORT_KIND = 'serial-gradation-agents-for-rp.execution-flow';
   const EXPORT_VERSION = 3;
@@ -573,8 +623,7 @@
     plot: Object.freeze({ label: '전개와 목적 먼저', description: '장면의 방향·갈등·속도가 중요한 장면', order: Object.freeze(['plot_ito', 'character_ito', 'world_ito']) })
   });
   const SIMPLE_OUTPUT_DEFS = Object.freeze({
-    draft_guided: Object.freeze({ label: '일반 모드', description: 'LIBRA 초안을 RisuAI 메인 모델이 자연스럽게 마무리합니다.', meta: '대부분의 사용자에게 추천' }),
-    risu_engine: Object.freeze({ label: '확장 모드', description: 'LIBRA가 RisuAI식 프롬프트 구성까지 한 번 더 처리합니다.', meta: '더 느리고 설정 영향이 큼' })
+    draft_guided: Object.freeze({ label: '일반 모드', description: 'LIBRA 초안을 RisuAI 메인 모델이 자연스럽게 마무리합니다.', meta: '현재 연결된 장기기억 실행 경로' })
   });
   const NSFW_MODES = Object.freeze(['off', 'soft', 'direct', 'explicit']);
   const DEFAULT_NSFW_MODE = 'off';
@@ -1539,7 +1588,17 @@
     'deepseek-chat', 'deepseek-reasoner'
   ]);
 
-  const registered = { input: null, before: null, after: null, output: null, setting: null, button: null, continueButton: null };
+  const registered = {
+    input: null,
+    before: null,
+    after: null,
+    output: null,
+    retraceIpc: null,
+    retraceIpcApi: null,
+    retraceIpcRegistration: null,
+    setting: null,
+    button: null
+  };
   const Runtime = {
     runs: 0,
     last: null,
@@ -1571,17 +1630,6 @@
     lastInputAssistTranslation: null,
     lastInputAssistContext: null,
     lastMainResponse: null,
-    inputAssistSend: {
-      busy: false,
-      phase: 'idle',
-      requestId: 0,
-      cancelRequested: false,
-      cancelled: false,
-      lastAt: 0,
-      ok: null,
-      reason: '',
-      generated: ''
-    },
     inputAssistConfirmation: {
       open: false,
       requestId: 0,
@@ -1612,7 +1660,7 @@
     forceWriterRefresh: false,
     userIntentOoc: { targetStage: 'ariadne', messages: [], messagesByStage: {}, startedByStage: {}, pendingByStage: {}, summariesByStage: {}, revisionsByStage: {}, busy: false, lastError: '', statusText: '', statusState: 'idle', requestId: 0 },
     requestReuse: { hits: 0, misses: 0, stores: 0, evictions: 0, hostRetryBypasses: 0, lastFingerprint: '', lastReuseAt: 0 },
-    hookStatus: { input: false, beforeRequest: false, afterRequest: false, output: false, retraceIpc: false, replacerPermission: 'unknown', unload: false, setting: false, button: false, inputAssistSendButton: false }
+    hookStatus: { input: false, beforeRequest: false, afterRequest: false, output: false, retraceIpc: false, replacerPermission: 'unknown', unload: false, setting: false, button: false }
   };
 
   const log = (...args) => {
@@ -1751,8 +1799,12 @@
     if (cached && Date.now() - cached.at < ARGUMENT_CACHE_TTL_MS) return cached.hasValue ? cached.value : fallback;
     let value;
     try {
-      if (typeof API.getArgument === 'function') value = await API.getArgument(key);
-      else if (typeof API.getArg === 'function') value = await API.getArg(key);
+      const argumentApi = getLiveApi(['getArgument']);
+      if (typeof argumentApi?.getArgument === 'function') value = await argumentApi.getArgument(key);
+      else {
+        const legacyArgumentApi = getLiveApi(['getArg']);
+        if (typeof legacyArgumentApi?.getArg === 'function') value = await legacyArgumentApi.getArg(key);
+      }
     } catch (_) { value = undefined; }
     const hasValue = value !== undefined && value !== null && value !== '';
     ArgumentCache.set(key, { at: Date.now(), hasValue, value: hasValue ? value : undefined });
@@ -1761,6 +1813,24 @@
 
   const RisuCompat = (() => {
     let localStorePromise = null;
+    const hostCandidates = () => {
+      const values = [];
+      const add = value => {
+        if (value && (typeof value === 'object' || typeof value === 'function') && !values.includes(value)) values.push(value);
+      };
+      try { if (typeof risuai !== 'undefined') add(risuai); } catch (_) {}
+      try { if (typeof risuApi !== 'undefined') add(risuApi); } catch (_) {}
+      try { if (typeof risuAPI !== 'undefined') add(risuAPI); } catch (_) {}
+      try { if (typeof Risuai !== 'undefined') add(Risuai); } catch (_) {}
+      try { if (typeof RisuAI !== 'undefined') add(RisuAI); } catch (_) {}
+      try {
+        add(globalThis?.risuai); add(globalThis?.risuApi); add(globalThis?.risuAPI);
+        add(globalThis?.Risuai); add(globalThis?.RisuAI); add(globalThis?.__pluginApis__);
+      } catch (_) {}
+      add(API);
+      return values;
+    };
+    const storageApi = () => hostCandidates().find(candidate => candidate?.pluginStorage) || API;
     const nativeFetch = async (url, init = {}, timeoutMs = 120000) => {
       let requestUrl = url;
       let requestInit = { ...init, requestTimeoutMs: timeoutMs };
@@ -1807,8 +1877,9 @@
           requestInit.signal = controller.signal;
           timer = setTimeout(() => controller.abort(), timeoutMs);
         }
-        if (typeof API.nativeFetch === 'function') return await API.nativeFetch(requestUrl, requestInit);
-        if (typeof API.risuFetch === 'function') return await API.risuFetch(requestUrl, requestInit);
+        const fetchApi = hostCandidates().find(candidate => typeof candidate?.nativeFetch === 'function' || typeof candidate?.risuFetch === 'function');
+        if (typeof fetchApi?.nativeFetch === 'function') return await fetchApi.nativeFetch(requestUrl, requestInit);
+        if (typeof fetchApi?.risuFetch === 'function') return await fetchApi.risuFetch(requestUrl, requestInit);
         throw new Error('RisuAI nativeFetch/risuFetch API is unavailable; browser fetch fallback is disabled for API v3 storage/fetch compliance.');
       } finally {
         if (timer) clearTimeout(timer);
@@ -1816,14 +1887,16 @@
     };
     const getItem = async (key) => {
       try {
-        if (typeof API.pluginStorage?.getItem === 'function') return await API.pluginStorage.getItem(key);
-      } catch (_) {}
+        const liveApi = storageApi();
+        if (typeof liveApi?.pluginStorage?.getItem === 'function') return await liveApi.pluginStorage.getItem(key);
+      } catch (error) { throw new Error(`pluginStorage read failed: ${key}: ${compact(error?.message || error, 300)}`); }
       return null;
     };
     const setItem = async (key, value) => {
       try {
-        if (typeof API.pluginStorage?.setItem === 'function') {
-          await API.pluginStorage.setItem(key, value);
+        const liveApi = storageApi();
+        if (typeof liveApi?.pluginStorage?.setItem === 'function') {
+          await liveApi.pluginStorage.setItem(key, value);
           return true;
         }
       } catch (_) {}
@@ -1831,8 +1904,9 @@
     };
     const removeItem = async (key) => {
       try {
-        if (typeof API.pluginStorage?.removeItem === 'function') {
-          await API.pluginStorage.removeItem(key);
+        const liveApi = storageApi();
+        if (typeof liveApi?.pluginStorage?.removeItem === 'function') {
+          await liveApi.pluginStorage.removeItem(key);
           return true;
         }
       } catch (_) {}
@@ -1841,17 +1915,21 @@
     const getLocalStore = async () => {
       if (!localStorePromise) {
         localStorePromise = (async () => {
-          try {
-            if (typeof API.getLocalPluginStorage === 'function') {
-              const store = await API.getLocalPluginStorage();
-              if (store?.getItem && store?.setItem) return { kind: 'localPluginStorage', store, structured: true };
-            }
-          } catch (_) {}
-          try {
-            if (API.safeLocalStorage?.getItem && API.safeLocalStorage?.setItem) {
-              return { kind: 'safeLocalStorage', store: API.safeLocalStorage, structured: false };
-            }
-          } catch (_) {}
+          for (const liveApi of hostCandidates()) {
+            try {
+              if (typeof liveApi?.getLocalPluginStorage === 'function') {
+                const store = await liveApi.getLocalPluginStorage();
+                if (store?.getItem && store?.setItem) return { kind: 'localPluginStorage', store, structured: true };
+              }
+            } catch (_) {}
+          }
+          for (const liveApi of hostCandidates()) {
+            try {
+              if (liveApi?.safeLocalStorage?.getItem && liveApi?.safeLocalStorage?.setItem) {
+                return { kind: 'safeLocalStorage', store: liveApi.safeLocalStorage, structured: false };
+              }
+            } catch (_) {}
+          }
           return { kind: 'unavailable', store: null, structured: false };
         })();
       }
@@ -1865,7 +1943,7 @@
         const value = await holder.store.getItem(key);
         if (holder.structured || value == null || typeof value !== 'string') return value;
         return tryJsonParse(value, value);
-      } catch (_) { return null; }
+      } catch (error) { throw new Error(`local plugin storage read failed: ${key}: ${compact(error?.message || error, 300)}`); }
     };
     const localSetItem = async (key, value) => {
       const holder = await getLocalStore();
@@ -2001,8 +2079,8 @@
     const cleanEndpoint = `/${String(endpoint || '/api/chat').replace(/^\/+/, '')}`;
     if (!raw) return raw;
     if (raw.toLowerCase().endsWith(cleanEndpoint.toLowerCase())) return raw;
-    if (/\/api\/(?:chat|generate|embed|embeddings|tags|show)(?:\?|$)/i.test(raw)) {
-      return raw.replace(/\/api\/(?:chat|generate|embed|embeddings|tags|show)(?:\?.*)?$/i, cleanEndpoint);
+    if (/\/api\/(?:chat|generate|embed|embeddings|tags|show|version)(?:\?|$)/i.test(raw)) {
+      return raw.replace(/\/api\/(?:chat|generate|embed|embeddings|tags|show|version)(?:\?.*)?$/i, cleanEndpoint);
     }
     if (/\/v\d+(?:\/(?:chat\/completions|responses|completions|embeddings))?(?:\?.*)?$/i.test(raw)) {
       return raw.replace(/\/v\d+(?:\/(?:chat\/completions|responses|completions|embeddings))?(?:\?.*)?$/i, cleanEndpoint);
@@ -3974,7 +4052,6 @@ ${text(paired.leadingAssistant.content || '')}
     const currentInput = String(currentInputValue || recent?.latestUser || '').trim();
     const previousTurn = String(
       recent?.terminalVisibleScene
-      || recent?.inputAssistTerminalVisibleScene
       || recent?.sceneAnchor
       || recent?.previousTurnText
       || ''
@@ -12534,80 +12611,6 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
-  const classifyInputAssistContinuationCue = value => {
-    const raw = text(value || '');
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      return {
-        active: true,
-        kind: 'empty',
-        preserveSilence: false,
-        contextInput: '[LIBRA continuation cue: blank input]',
-        displayInput: '(blank message)'
-      };
-    }
-    const normalized = trimmed
-      .replace(/^\*+\s*/, '')
-      .replace(/\s*\*+$/, '')
-      .replace(/[.!?…。！？”"']+$/g, '')
-      .trim()
-      .toLocaleLowerCase();
-    if (/^(?:the\s+user\s+)?says?\s+nothing$/.test(normalized)) {
-      return {
-        active: true,
-        kind: 'silent',
-        preserveSilence: true,
-        contextInput: trimmed,
-        displayInput: trimmed
-      };
-    }
-    const explicitContinuationPhrases = new Set([
-      '계속',
-      '계속해',
-      '계속해줘',
-      '계속해주세요',
-      '이어가',
-      '이어가줘',
-      '이어가주세요',
-      '진행해',
-      '진행해줘',
-      '진행해주세요',
-      '상황을 이어가세요',
-      '상황을 계속 이어가주세요',
-      '내용을 이어가세요',
-      '내용을 계속 이어가주세요',
-      '장면을 이어가세요',
-      '장면을 계속 이어가주세요'
-    ]);
-    if (explicitContinuationPhrases.has(normalized)) {
-      return {
-        active: true,
-        kind: 'continue_scene',
-        preserveSilence: false,
-        contextInput: trimmed,
-        displayInput: trimmed
-      };
-    }
-    if (/^(?:계속|계속해|계속해줘|계속해주세요|계속하세요|이어가|이어가줘|이어가세요|진행해|진행해줘|진행해주세요|진행하세요|다음)$/u.test(normalized)
-      || /^(?:상황|장면)(?:을|를)?\s*(?:자연스럽게\s*)?(?:계속\s*)?(?:이어\s*(?:가|나가)|계속\s*진행)(?:\s*주|어\s*주)?(?:세요|십시오|줘|라)?$/u.test(normalized)
-      || /^(?:continue|continue\s+the\s+(?:situation|scene)|keep\s+the\s+(?:situation|scene)\s+going)$/i.test(normalized)) {
-      return {
-        active: true,
-        kind: 'continue_scene',
-        preserveSilence: false,
-        contextInput: trimmed,
-        displayInput: trimmed
-      };
-    }
-    return {
-      active: false,
-      kind: '',
-      preserveSilence: false,
-      contextInput: trimmed,
-      displayInput: trimmed
-    };
-  };
-
   const classifyExistingStoredUserTurn = (content, rawMessages = []) => {
     const cleanInput = text(content || '').trim();
     if (!cleanInput) return { bypass: false, kind: '', userIndex: -1, assistantAfter: false, messageCount: 0 };
@@ -12744,74 +12747,38 @@ function mergeAgentCbsWarnings(...warningLists) {
     return messages.length ? messages : [{ role: 'user', content: cleanInput }];
   };
 
-  const parseInputAssistContinuityValidation = (value) => {
-    const raw = text(value || '').trim()
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
-    let parsed = tryJsonParse(raw, null);
-    if (!parsed) {
-      let start = raw.indexOf('{');
-      while (start >= 0) {
-        const end = findJsonObjectEnd(raw, start);
-        if (end >= start) {
-          const candidate = tryJsonParse(raw.slice(start, end + 1), null);
-          if (candidate && typeof candidate === 'object' && typeof candidate.ok === 'boolean') {
-            parsed = candidate;
-            break;
-          }
-        }
-        start = raw.indexOf('{', start + 1);
-      }
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {
-        ok: false,
-        reason: 'continuity_validator_unparseable',
-        violations: ['The continuity validator did not return a valid JSON object.']
-      };
-    }
-    const violations = normalizeStringArray(parsed.violations, 10, 320);
-    const requiredChecks = [
-      'starts_after_terminal_beat',
-      'completed_beats_not_replayed',
-      'ended_contacts_not_revived',
-      'ongoing_actions_preserved',
-      'positions_and_roles_preserved',
-      'unresolved_choices_preserved'
-    ];
-    const checks = parsed.checks && typeof parsed.checks === 'object' && !Array.isArray(parsed.checks)
-      ? parsed.checks
-      : {};
-    const failedChecks = requiredChecks.filter(key => checks[key] !== true);
-    if (failedChecks.length) {
-      violations.push(`Mandatory continuity checks failed or were omitted: ${failedChecks.join(', ')}`);
-    }
-    return {
-      ok: parsed.ok === true && failedChecks.length === 0,
-      reason: compact(
-        parsed.reason || (failedChecks.length ? `continuity_checks_failed:${failedChecks.join(',')}` : parsed.ok === true ? '' : 'continuity_validator_rejected'),
-        500
-      ),
-      checks: Object.fromEntries(requiredChecks.map(key => [key, checks[key] === true])),
-      terminalEvidence: normalizeStringArray(parsed.terminal_evidence, 8, 360),
-      candidateEvidence: normalizeStringArray(parsed.candidate_evidence, 8, 360),
-      violations
-    };
-  };
-
   const runInputAssistForContent = async (content, settings, options = {}) => {
     const original = text(content || '');
     const requestedMode = normalizeChoice(settings.inputAssistMode || 'off', INPUT_ASSIST_MODES, 'off');
-    const continuationCue = classifyInputAssistContinuationCue(original);
     if (requestedMode === 'off') return original;
+    if (!original.trim()) return original;
+    const normalizedDirective = original.trim()
+      .replace(/^\*+\s*/, '')
+      .replace(/\s*\*+$/, '')
+      .replace(/[.!?…。！？”"']+$/g, '')
+      .trim()
+      .toLocaleLowerCase();
+    const reconstructionBypass = /^(?:(?:the\s+user\s+)?says?\s+nothing|계속|계속해(?:줘|주세요)?|계속하세요|이어가(?:줘|주세요|세요)?|진행해(?:줘|주세요)?|진행하세요|다음|continue(?:\s+the\s+(?:situation|scene))?|keep\s+the\s+(?:situation|scene)\s+going)$/iu.test(normalizedDirective)
+      || /^(?:상황|장면|내용)(?:을|를)?\s*(?:자연스럽게\s*)?(?:계속\s*)?(?:이어\s*(?:가|나가)|계속\s*진행)(?:\s*주|어\s*주)?(?:세요|십시오|줘|라)?$/u.test(normalizedDirective);
+    if (reconstructionBypass) {
+      Runtime.lastInputAssist = {
+        at: Date.now(),
+        ok: true,
+        skipped: true,
+        bypassed: true,
+        reason: 'input_assist_bypassed_non_reconstructable_directive',
+        requestedMode,
+        effectiveMode: '',
+        scope: settings.inputAssistScope,
+        original,
+        rewritten: original,
+        trace: null
+      };
+      return original;
+    }
     if (/data:image\/|<svg|base64,/i.test(original) && original.length > 2500) return original;
     const existingTurn = await detectExistingStoredUserTurnForInputAssist(original, settings);
-    const allowStoredContinuationCue = options.allowExistingContinuationCue === true
-      && continuationCue.active
-      && existingTurn.bypass
-      && existingTurn.kind === 'rollback';
-    if (existingTurn.bypass && !allowStoredContinuationCue) {
+    if (existingTurn.bypass) {
       const reason = `input_assist_bypassed_existing_user_${existingTurn.kind}`;
       const trace = {
         stage: INPUT_ASSIST_STAGE_ID,
@@ -12881,7 +12848,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     }
     const effectiveMode = selectEffectiveInputAssistMode(requestedMode);
     const scoped = scopedSettingsForStage(settings, INPUT_ASSIST_STAGE_ID);
-    const messages = await inputAssistContextMessages(continuationCue.contextInput || original, settings, options.requestMessages || []);
+    const messages = await inputAssistContextMessages(original, settings, options.requestMessages || []);
     const recent = buildRecentChat(messages, scoped);
     recent.inputAssistOriginalInput = original;
     recent.inputAssistTerminalOnly = true;
@@ -12910,25 +12877,15 @@ function mergeAgentCbsWarnings(...warningLists) {
     const previousResponseEvidence = terminalVisibleScene;
     const previousTurnAnchorAvailable = !!previousTurnAnchor;
     const terminalLockRequired = !!terminalVisibleScene;
-    const sourceFidelityRules = continuationCue.active
-      ? [
-          'CONTINUATION MODE: There is no source action to expand. Write the closest usable next input after the terminal passage.',
-          'Use the terminal passage’s final unresolved action, dialogue, attention, or pressure. Do not invent a new plot, scene, time jump, location, cast, or relationship development.',
-          'Do not replay an event already completed anywhere in the terminal passage. Begin after its last visible beat.',
-          'Do not return a vague command such as “continue the situation.” Return a concrete input that lets the response model perform the next beat.',
-          continuationCue.preserveSilence
-            ? 'Preserve the user’s silence. Use only observable stillness or the nearest consequence already in motion; do not invent user dialogue or a user decision.'
-            : 'You may formulate one modest next stimulus implied by the ending, but do not decide an irreversible choice, success, consent, knowledge, or feeling for the user.'
-        ]
-      : [
-          'RECONSTRUCTION MODE: The current input supplies the user’s intended next action or request. Rewrite it so it occurs naturally after the terminal passage.',
-          'Keep the original actor, target, addressee, action, object, stance, boundary, named entities, and direction unchanged.',
-          'Keep grammatical commitment exact: completed stays completed, ongoing stays ongoing, attempted stays attempted, intended stays intended, and hypothetical stays hypothetical.',
-          'Never turn an explicitly completed action into planning, imagining, drafting, withholding, cancelling, or choosing not to perform it.',
-          'A completed action performed by the user character is not an unconfirmed external outcome. Preserve that action as completed while leaving only its reception, consequence, success beyond the action itself, and NPC response unresolved.',
-          'Do not replace the user’s action with a different action and do not write the NPC response, success, aftermath, or a later scene.',
-          'Only an explicit time, location, cast, or state change in the current input may move away from the terminal passage.'
-        ];
+    const sourceFidelityRules = [
+      'RECONSTRUCTION MODE: The current input supplies the user’s intended next action or request. Rewrite it so it occurs naturally after the terminal passage.',
+      'Keep the original actor, target, addressee, action, object, stance, boundary, named entities, and direction unchanged.',
+      'Keep grammatical commitment exact: completed stays completed, ongoing stays ongoing, attempted stays attempted, intended stays intended, and hypothetical stays hypothetical.',
+      'Never turn an explicitly completed action into planning, imagining, drafting, withholding, cancelling, or choosing not to perform it.',
+      'A completed action performed by the user character is not an unconfirmed external outcome. Preserve that action as completed while leaving only its reception, consequence, success beyond the action itself, and NPC response unresolved.',
+      'Do not replace the user’s action with a different action and do not write the NPC response, success, aftermath, or a later scene.',
+      'Only an explicit time, location, cast, or state change in the current input may move away from the terminal passage.'
+    ];
     const systemPrompt = [
       'You are an RP Input Writing Assistant.',
       resolveModelBehaviorAdapterForStage(scoped, INPUT_ASSIST_STAGE_ID, 'input').prompt,
@@ -12946,18 +12903,14 @@ function mergeAgentCbsWarnings(...warningLists) {
       '[TERMINAL PASSAGE — START AFTER ITS LAST VISIBLE BEAT]',
       terminalVisibleScene || '(No preceding assistant passage was available.)',
       '',
-      continuationCue.active
-        ? `[CONTINUATION REQUEST]\nType: ${continuationCue.kind}\n${continuationCue.preserveSilence ? 'The user remains silent.' : 'Create only the nearest next input implied by the ending.'}`
-        : `[CURRENT USER INPUT — PRESERVE ITS INTENT]\n${original}`,
+      `[CURRENT USER INPUT — PRESERVE ITS INTENT]\n${original}`,
       '',
       recent.risuContext ? `[CONSISTENCY REFERENCES — NOT LIVE-SCENE EVIDENCE]\n${compact(recent.risuContext, INPUT_ASSIST_LORE_CONTEXT_MAX_CHARS)}\n` : '',
-      continuationCue.active
-        ? `Write the nearest next input now in ${modeLabel} mode with target length ${targetChoice.label}.`
-        : [
-            '[FINAL SEMANTIC LOCK - RECONSTRUCT THIS INPUT, DO NOT REVISE ITS DECISION]',
-            original,
-            `Rewrite it as the immediate next beat in ${modeLabel} mode with target length ${targetChoice.label}. Preserve actor, target, action, polarity, modality, and completion state exactly.`
-          ].join('\n')
+      [
+        '[FINAL SEMANTIC LOCK - RECONSTRUCT THIS INPUT, DO NOT REVISE ITS DECISION]',
+        original,
+        `Rewrite it as the immediate next beat in ${modeLabel} mode with target length ${targetChoice.label}. Preserve actor, target, action, polarity, modality, and completion state exactly.`
+      ].join('\n')
     ].filter(Boolean).join('\n');
     const startedAt = Date.now();
     const inputAssistMaxTokens = targetChoice.chars
@@ -12967,25 +12920,19 @@ function mergeAgentCbsWarnings(...warningLists) {
     const effectiveUserPrompt = userPrompt;
     const result = await callLLMWithPreset(scoped, INPUT_ASSIST_STAGE_ID, systemPrompt, userPrompt, {
       maxTokens: inputAssistMaxTokens,
-      temp: continuationCue.active ? 0.45 : 0.35,
+      temp: 0.35,
       forceNoThinking: true
     });
     const rewritten = result.ok ? cleanInputAssistResult(result.content) : '';
     const completionStatus = inputAssistCompletionStatus(rewritten, result, targetChoice);
     const initialCompletionStatus = { ...completionStatus };
     const retried = false;
-    const continuationStillVague = continuationCue.active
-      && !!rewritten
-      && classifyInputAssistContinuationCue(rewritten).active;
     const reconstructionChanged = !!rewritten && !sameRagChatContent(rewritten, original);
-    const continuationCreated = !continuationCue.active || (!!rewritten && !continuationStillVague);
-    const ok = completionStatus.ok && reconstructionChanged && continuationCreated;
+    const ok = completionStatus.ok && reconstructionChanged;
     const reason = ok
       ? ''
       : !completionStatus.ok
         ? `input_assist_incomplete_output:${completionStatus.reasons.join(',')}`
-      : continuationStillVague
-          ? 'input_assist_continuation_not_created'
       : result.ok && rewritten
         ? 'input_assist_reconstruction_unchanged'
         : (result.reason || 'input_assist_empty_result');
@@ -13018,9 +12965,6 @@ function mergeAgentCbsWarnings(...warningLists) {
         previousTurnAnchorAvailable,
         previousTurnAnchorChars: previousTurnAnchor.length,
         terminalLockRequired,
-        continuationCue: continuationCue.active === true,
-        continuationCueKind: continuationCue.kind,
-        continuationCreated,
         terminalVisibleScene,
         previousResponseEvidence,
         references: risuContextMeta.references,
@@ -13048,9 +12992,6 @@ function mergeAgentCbsWarnings(...warningLists) {
       previousTurnAnchorAvailable,
       previousTurnAnchorChars: previousTurnAnchor.length,
       terminalLockRequired,
-      continuationCue: continuationCue.active === true,
-      continuationCueKind: continuationCue.kind,
-      continuationCreated,
       terminalVisibleScene,
       previousResponseEvidence,
       references: risuContextMeta.references,
@@ -13163,131 +13104,44 @@ function mergeAgentCbsWarnings(...warningLists) {
     return translated;
   };
 
-  let InputAssistContinuePanelTimer = null;
-  let InputAssistContinuePanelEpoch = 0;
-  let InputAssistContinueCancelBinding = null;
+  let PipelineWorkPanelTimer = null;
 
-  const unbindInputAssistContinueCancelButton = async () => {
-    const binding = InputAssistContinueCancelBinding;
-    InputAssistContinueCancelBinding = null;
-    if (!binding?.button || !binding?.listenerId || typeof binding.button.removeEventListener !== 'function') return false;
-    try {
-      await binding.button.removeEventListener('click', binding.listenerId);
-      return true;
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const inputAssistContinueClickInsideButton = async (button, event = {}) => {
-    if (!button || typeof button.getBoundingClientRect !== 'function') return false;
-    const x = Number(event?.clientX);
-    const y = Number(event?.clientY);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
-    try {
-      const rect = await button.getBoundingClientRect();
-      const left = Number(rect?.left);
-      const right = Number(rect?.right);
-      const top = Number(rect?.top);
-      const bottom = Number(rect?.bottom);
-      if (![left, right, top, bottom].every(Number.isFinite)) return false;
-      return right > left && bottom > top && x >= left && x <= right && y >= top && y <= bottom;
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const bindInputAssistContinueCancelButton = async (requestId, panelEpoch) => {
-    const domApi = getLiveApi(['getRootDocument']);
-    if (typeof domApi?.getRootDocument !== 'function') return false;
-    const permissionApi = getLiveApi(['requestPluginPermission']);
-    if (typeof permissionApi?.requestPluginPermission === 'function') {
-      try {
-        const granted = await permissionApi.requestPluginPermission('mainDom');
-        if (granted === false) return false;
-      } catch (_) {}
-    }
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (panelEpoch !== InputAssistContinuePanelEpoch || Runtime.inputAssistSend?.requestId !== requestId) return false;
-      try {
-        const root = await domApi.getRootDocument();
-        const button = await root?.getElementById?.(INPUT_ASSIST_CONTINUE_CANCEL_BUTTON_ID);
-        if (button && typeof button.addEventListener === 'function') {
-          await unbindInputAssistContinueCancelButton();
-          const armedAt = Date.now() + 300;
-          const listenerId = await button.addEventListener('click', async event => {
-            // RisuAI SafeElement routes click listeners through the root document.
-            // Reject the originating chat-menu click and every click outside this
-            // exact, currently rendered cancel button.
-            if (Date.now() < armedAt) return;
-            if (panelEpoch !== InputAssistContinuePanelEpoch) return;
-            if (Runtime.inputAssistSend?.requestId !== requestId || Runtime.inputAssistSend?.busy !== true) return;
-            if (!(await inputAssistContinueClickInsideButton(button, event))) return;
-            await cancelExplicitInputAssistContinue();
-          });
-          if (panelEpoch !== InputAssistContinuePanelEpoch || Runtime.inputAssistSend?.requestId !== requestId) {
-            try { await button.removeEventListener('click', listenerId); } catch (_) {}
-            return false;
-          }
-          InputAssistContinueCancelBinding = { button, listenerId, requestId, panelEpoch };
-          return true;
-        }
-      } catch (_) {}
-      await new Promise(resolve => setTimeout(resolve, 40));
-    }
-    if (panelEpoch === InputAssistContinuePanelEpoch && Runtime.inputAssistSend?.requestId === requestId) {
-      warn('input_assist_continue_cancel_button_bind_failed');
-    }
-    return false;
-  };
-
-  const setInputAssistContinuePanel = async (message = '', state = 'working', autoClearMs = 0, cancelable = false) => {
+  const setPipelineWorkPanel = async (message = '', state = 'working', autoClearMs = 0) => {
     const panelApi = getLiveApi(['setChatPanel']);
-    const panelEpoch = ++InputAssistContinuePanelEpoch;
-    await unbindInputAssistContinueCancelButton();
     if (typeof panelApi?.setChatPanel !== 'function') return false;
-    if (InputAssistContinuePanelTimer) {
-      clearTimeout(InputAssistContinuePanelTimer);
-      InputAssistContinuePanelTimer = null;
+    if (PipelineWorkPanelTimer) {
+      clearTimeout(PipelineWorkPanelTimer);
+      PipelineWorkPanelTimer = null;
     }
     try {
       if (!message) {
-        await panelApi.setChatPanel(null, { id: INPUT_ASSIST_CONTINUE_PANEL_ID });
+        await panelApi.setChatPanel(null, { id: PIPELINE_WORK_PANEL_ID });
         return true;
       }
       const color = state === 'error'
         ? '#ff8fa3'
         : state === 'done'
           ? '#76e6a5'
-          : state === 'cancelled'
-            ? '#c8b5ff'
-            : '#b7c5ff';
+          : '#b7c5ff';
       const safeMessage = text(message)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-      const cancelButton = cancelable
-        ? `<button id="${INPUT_ASSIST_CONTINUE_CANCEL_BUTTON_ID}" type="button" aria-label="LIBRA 전송 취소" style="flex:0 0 auto;margin-left:auto;padding:7px 13px;border:1px solid #ff8fa3;border-radius:8px;background:rgba(107,31,55,.55);color:#ffd5dd;font:inherit;font-weight:700;line-height:1;cursor:pointer;">전송 취소</button>`
-        : '';
       await panelApi.setChatPanel(
-        `<div style="display:flex;align-items:center;gap:14px;width:100%;padding:10px 12px;border:1px solid ${color};border-radius:10px;background:rgba(10,16,30,.82);color:${color};font-size:13px;box-sizing:border-box;"><div style="min-width:0;flex:1 1 auto;"><strong>LIBRA</strong> · ${safeMessage}</div>${cancelButton}</div>`,
-        { id: INPUT_ASSIST_CONTINUE_PANEL_ID, className: 'libra-input-assist-status' }
+        `<div style="display:flex;align-items:center;gap:14px;width:100%;padding:10px 12px;border:1px solid ${color};border-radius:10px;background:rgba(10,16,30,.82);color:${color};font-size:13px;box-sizing:border-box;"><div style="min-width:0;flex:1 1 auto;"><strong>LIBRA</strong> · ${safeMessage}</div></div>`,
+        { id: PIPELINE_WORK_PANEL_ID, className: 'libra-pipeline-status' }
       );
-      if (cancelable) {
-        const requestId = Number(Runtime.inputAssistSend?.requestId || 0);
-        void bindInputAssistContinueCancelButton(requestId, panelEpoch);
-      }
       if (autoClearMs > 0) {
-        InputAssistContinuePanelTimer = setTimeout(() => {
-          InputAssistContinuePanelTimer = null;
-          void setInputAssistContinuePanel('');
+        PipelineWorkPanelTimer = setTimeout(() => {
+          PipelineWorkPanelTimer = null;
+          void setPipelineWorkPanel('');
         }, autoClearMs);
       }
       return true;
     } catch (error) {
-      warn('input_assist_continue_panel_failed', error);
+      warn('pipeline_work_panel_failed', error);
       return false;
     }
   };
@@ -13331,11 +13185,10 @@ function mergeAgentCbsWarnings(...warningLists) {
         : Array.isArray(current.stagePlan) ? current.stagePlan.slice() : [],
       currentStage: options.currentStage === undefined ? (current.currentStage || '') : text(options.currentStage || '')
     };
-    await setInputAssistContinuePanel(
+    await setPipelineWorkPanel(
       message,
       options.panelState || (options.ok === false ? 'error' : options.ok === true ? 'done' : 'working'),
-      Number(options.autoClearMs) || 0,
-      false
+      Number(options.autoClearMs) || 0
     );
     return requestId;
   };
@@ -13386,620 +13239,6 @@ function mergeAgentCbsWarnings(...warningLists) {
       currentStage: ''
     });
     return true;
-  };
-
-  const inputAssistContinueCancelled = requestId => (
-    Runtime.inputAssistSend?.requestId === requestId
-    && Runtime.inputAssistSend?.cancelRequested === true
-  );
-
-  const inputAssistContinueCancellationError = () => {
-    const error = new Error('사용자가 이어쓰기 입력 전송을 취소했습니다.');
-    error.code = 'input_assist_send_cancelled';
-    return error;
-  };
-
-  const cancelExplicitInputAssistContinue = async () => {
-    const current = Runtime.inputAssistSend || {};
-    if (!current.busy) return false;
-    if (current.cancelRequested) return true;
-    if (current.phase === 'sending') {
-      await setInputAssistContinuePanel('이미 RisuAI 전송이 시작되어 이 요청은 취소할 수 없습니다.', 'error', 5000);
-      return false;
-    }
-    Runtime.inputAssistSend = {
-      ...current,
-      phase: 'cancelling',
-      cancelRequested: true,
-      cancelled: false,
-      reason: 'user_cancelled'
-    };
-    await setInputAssistContinuePanel(
-      current.phase === 'generating'
-        ? '전송 취소 요청을 받았습니다. 입력 생성이 끝나도 RisuAI로 보내지 않습니다…'
-        : '전송을 취소하고 있습니다…',
-      'cancelled'
-    );
-    return true;
-  };
-
-  const notifyInputAssistContinueError = async message => {
-    const clean = compact(message || '상황 이어가기 입력을 만들지 못했습니다.', 1000);
-    await setInputAssistContinuePanel(clean, 'error', 8000);
-    const alertApi = getLiveApi(['alertError']);
-    if (typeof alertApi?.alertError === 'function') {
-      try { await alertApi.alertError(clean); } catch (_) {}
-    }
-  };
-
-  const runExplicitInputAssistContinue = async () => {
-    if (Runtime.inputAssistSend?.busy) {
-      await notifyInputAssistContinueError('이미 상황 이어가기 입력을 작성하고 있습니다.');
-      return false;
-    }
-    const requestId = (Number(Runtime.inputAssistSend?.requestId) || 0) + 1;
-    Runtime.inputAssistSend = {
-      busy: true,
-      phase: 'generating',
-      requestId,
-      cancelRequested: false,
-      cancelled: false,
-      lastAt: Date.now(),
-      ok: null,
-      reason: '',
-      generated: ''
-    };
-    await setInputAssistContinuePanel('직전 장면을 바탕으로 이어질 입력을 작성하고 있습니다…', 'working', 0, true);
-    try {
-      const settings = await loadSettings();
-      if (settings.inputAssistMode === 'off') {
-        throw new Error('쉬운 설정에서 인풋 작성 도우미 모드를 먼저 선택해 주세요.');
-      }
-      if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      const sendApi = getLiveApi(['sendChat']);
-      if (typeof sendApi?.sendChat !== 'function') {
-        throw new Error('현재 RisuAI에서 플러그인 sendChat API를 사용할 수 없습니다.');
-      }
-      const permissionApi = getLiveApi(['requestPluginPermission']);
-      if (typeof permissionApi?.requestPluginPermission === 'function') {
-        const granted = await permissionApi.requestPluginPermission('sendChat');
-        if (granted === false) throw new Error('LIBRA의 채팅 전송 권한이 거부되었습니다.');
-      }
-      if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      let generated = await runInputAssistForContent('', settings, {
-        source: 'explicit_continue_button'
-      });
-      if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      const valid = Runtime.lastInputAssist?.ok === true
-        && !!text(generated).trim()
-        && !classifyInputAssistContinuationCue(generated).active;
-      if (!valid) {
-        throw new Error(Runtime.lastInputAssist?.reason || '인풋 도우미가 유효한 이어쓰기 입력을 반환하지 않았습니다.');
-      }
-      generated = await prepareInputAssistExpandedForDelivery(generated, settings);
-      if (inputAssistConfirmationEnabled(settings)) {
-        Runtime.inputAssistSend = {
-          ...Runtime.inputAssistSend,
-          phase: 'confirming',
-          generated: text(generated).trim()
-        };
-        await setInputAssistContinuePanel('입력 작성 완료 · 확인창에서 보낼 메시지를 선택하세요.', 'working', 0, false);
-        const reviewed = await showInputAssistConfirmation({
-          original: '',
-          expanded: generated,
-          source: 'explicit_continue_button',
-          canUseOriginal: false,
-          onRegenerate: async () => {
-            const next = await runInputAssistForContent('', settings, {
-              source: 'explicit_continue_regenerate'
-            });
-            return await prepareInputAssistExpandedForDelivery(next, settings);
-          },
-          onTranslate: async (value, targetLanguage) => (
-            await translateInputAssistReviewText(value, settings, targetLanguage)
-          )
-        });
-        if (reviewed.action === 'cancelled' || !text(reviewed.content).trim()) {
-          throw inputAssistContinueCancellationError();
-        }
-        generated = text(reviewed.content).trim();
-      }
-      Runtime.inputAssistSend = {
-        ...Runtime.inputAssistSend,
-        phase: 'ready',
-        generated: text(generated).trim()
-      };
-      await setInputAssistContinuePanel('입력 작성 완료 · 잠시 후 RisuAI로 전송합니다…', 'working', 0, true);
-      await new Promise(resolve => setTimeout(resolve, INPUT_ASSIST_CONTINUE_SEND_GRACE_MS));
-      if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      Runtime.inputAssistSend = {
-        ...Runtime.inputAssistSend,
-        phase: 'sending',
-        cancelRequested: false
-      };
-      await setInputAssistContinuePanel('RisuAI로 전송하고 있습니다…', 'working');
-      const sendStartedAt = Date.now();
-      const sent = await sendApi.sendChat(text(generated).trim());
-      if (sent === false) throw new Error('RisuAI가 LIBRA의 채팅 전송 요청을 허용하지 않았습니다.');
-      Runtime.inputAssistSend = {
-        busy: false,
-        phase: 'sent',
-        requestId,
-        cancelRequested: false,
-        cancelled: false,
-        lastAt: Date.now(),
-        ok: true,
-        reason: '',
-        generated: text(generated).trim()
-      };
-      const pipelineOwnsPanel = Runtime.pipelineWorkStatus?.source === 'explicit_continue'
-        && Number(Runtime.pipelineWorkStatus?.startedAt || 0) >= sendStartedAt - 1000;
-      if (!pipelineOwnsPanel) {
-        await setInputAssistContinuePanel('이어쓰기 입력을 전송했습니다.', 'done', 3500);
-      }
-      return true;
-    } catch (error) {
-      if (error?.code === 'input_assist_send_cancelled' || inputAssistContinueCancelled(requestId)) {
-        Runtime.inputAssistSend = {
-          ...Runtime.inputAssistSend,
-          busy: false,
-          phase: 'cancelled',
-          requestId,
-          cancelRequested: false,
-          cancelled: true,
-          lastAt: Date.now(),
-          ok: false,
-          reason: 'user_cancelled'
-        };
-        await setInputAssistContinuePanel('이어쓰기 입력 전송을 취소했습니다.', 'cancelled', 3500);
-        return false;
-      }
-      const reason = compact(error?.message || error, 1000);
-      Runtime.inputAssistSend = {
-        busy: false,
-        phase: 'error',
-        requestId,
-        cancelRequested: false,
-        cancelled: false,
-        lastAt: Date.now(),
-        ok: false,
-        reason,
-        generated: ''
-      };
-      warn('explicit_input_assist_continue_failed', error);
-      await notifyInputAssistContinueError(reason);
-      return false;
-    }
-  };
-
-  const BEFORE_REQUEST_INPUT_HIJACK_TTL_MS = 120000;
-  const BEFORE_REQUEST_INPUT_HIJACK_CACHE_MAX = 12;
-  const BeforeRequestInputHijackCache = new Map();
-
-  const beforeRequestInputHijackFingerprint = (messages, type) => {
-    const hasher = createTextHasher()
-      .update('libra-before-request-input-hijack-v1')
-      .update(normalizeRequestType(type));
-    for (const message of (Array.isArray(messages) ? messages : [])) {
-      hasher
-        .update(currentTurnRole(message))
-        .update(rawCurrentTurnBody(message));
-    }
-    return hasher.digest();
-  };
-
-  const pruneBeforeRequestInputHijackCache = () => {
-    const now = Date.now();
-    for (const [key, entry] of BeforeRequestInputHijackCache.entries()) {
-      if (!entry || Number(entry.expiresAt || 0) <= now) BeforeRequestInputHijackCache.delete(key);
-    }
-    while (BeforeRequestInputHijackCache.size > BEFORE_REQUEST_INPUT_HIJACK_CACHE_MAX) {
-      const oldest = BeforeRequestInputHijackCache.keys().next().value;
-      if (oldest == null) break;
-      BeforeRequestInputHijackCache.delete(oldest);
-    }
-  };
-
-  const isNativeContinueResponseRequest = messages => (Array.isArray(messages) ? messages : []).some(message =>
-    /\[\s*Continue the last response\s*\]/i.test(rawCurrentTurnBody(message))
-  );
-
-  const continuationCueFromRequestBody = value => {
-    const body = text(value || '').trim();
-    if (!body) return null;
-    const wrapped = currentInputFrom(body);
-    if (wrapped) {
-      const cue = classifyInputAssistContinuationCue(wrapped);
-      if (cue.active) return { original: wrapped, cue, source: 'current_input_wrapper' };
-    }
-    const direct = classifyInputAssistContinuationCue(body);
-    if (direct.active) return { original: body, cue: direct, source: 'direct_body' };
-    const silentMatch = body.match(/\*+\s*(?:(?:the\s+user\s+)?says?\s+nothing)\s*\*+/i);
-    if (silentMatch?.[0]) {
-      const original = silentMatch[0];
-      const cue = classifyInputAssistContinuationCue(original);
-      if (cue.active) return { original, cue, source: 'embedded_silent_cue' };
-    }
-    const dewrapped = body
-      .replace(/<[^>]{1,160}>/g, '\n')
-      .replace(/^[^\n:]{1,80}:\s*/gm, '')
-      .split(/\n+/)
-      .map(line => line.trim())
-      .filter(Boolean);
-    for (let i = dewrapped.length - 1; i >= 0; i -= 1) {
-      const cue = classifyInputAssistContinuationCue(dewrapped[i]);
-      if (cue.active) return { original: dewrapped[i], cue, source: 'dewrapped_line' };
-    }
-    return null;
-  };
-
-  const detectRequestInputHijackCandidate = messages => {
-    const source = Array.isArray(messages) ? messages : [];
-    let latestUserIndex = -1;
-    let provenanceBacked = false;
-    for (let i = source.length - 1; i >= 0; i -= 1) {
-      if (currentTurnRole(source[i]) !== 'user') continue;
-      if (!hasSgaChatProvenance(source[i])) continue;
-      latestUserIndex = i;
-      provenanceBacked = true;
-      break;
-    }
-    if (latestUserIndex < 0) {
-      for (let i = source.length - 1; i >= 0; i -= 1) {
-        if (currentTurnRole(source[i]) !== 'user') continue;
-        latestUserIndex = i;
-        break;
-      }
-    }
-    if (latestUserIndex < 0) return null;
-    const assistantAfter = source.slice(latestUserIndex + 1).some(message => {
-      if (currentTurnRole(message) !== 'assistant') return false;
-      return provenanceBacked ? hasSgaChatProvenance(message) : true;
-    });
-    if (assistantAfter) return null;
-    const detected = continuationCueFromRequestBody(rawCurrentTurnBody(source[latestUserIndex]));
-    if (!detected) return null;
-    return {
-      kind: 'request_user_continuation_cue',
-      original: detected.original,
-      anchorText: '',
-      cue: detected.cue,
-      requestIndex: latestUserIndex,
-      requestSource: detected.source,
-      provenanceBacked,
-      requestFingerprint: storedChatMessageFingerprint(source[latestUserIndex])
-    };
-  };
-
-  const storedChatMessageFingerprint = message => createTextHasher()
-    .update(currentTurnRole(message))
-    .update(contentToText(message?.data ?? message?.content ?? ''))
-    .update(message?.time ?? message?.timestamp ?? '')
-    .digest();
-
-  const finiteRisuIndex = value => {
-    if (value === null || value === undefined || value === '') return null;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  };
-
-  const detectBeforeRequestInputHijackCandidate = async (messages, type, settings) => {
-    if (!isMainNarrativeRequest(type) || settings.inputAssistMode === 'off') return null;
-    if (isNativeContinueResponseRequest(messages)) return null;
-    const requestCandidate = detectRequestInputHijackCandidate(messages);
-    const chatApi = getLiveApi(['getCurrentCharacterIndex', 'getCurrentChatIndex', 'getChatFromIndex']);
-    const canReadChat = typeof chatApi?.getCurrentCharacterIndex === 'function'
-      && typeof chatApi?.getCurrentChatIndex === 'function'
-      && typeof chatApi?.getChatFromIndex === 'function';
-    const charIndexRaw = canReadChat
-      ? await safeApi('blankHijack.getCurrentCharacterIndex', () => chatApi.getCurrentCharacterIndex(), settings.debugLog)
-      : null;
-    const chatIndexRaw = canReadChat
-      ? await safeApi('blankHijack.getCurrentChatIndex', () => chatApi.getCurrentChatIndex(), settings.debugLog)
-      : null;
-    const charIndex = finiteRisuIndex(charIndexRaw);
-    const chatIndex = finiteRisuIndex(chatIndexRaw);
-    const chat = charIndex !== null && chatIndex !== null
-      ? await safeApi('blankHijack.getChatFromIndex', () => chatApi.getChatFromIndex(charIndex, chatIndex), settings.debugLog)
-      : null;
-    const storedMessages = Array.isArray(chat?.message) ? chat.message : [];
-    if (!storedMessages.length) return requestCandidate;
-    const lastIndex = storedMessages.length - 1;
-    const lastMessage = storedMessages[lastIndex];
-    const lastRole = currentTurnRole(lastMessage);
-    const lastText = contentToText(lastMessage?.data ?? lastMessage?.content ?? '').trim();
-    const lastFingerprint = storedChatMessageFingerprint(lastMessage);
-    if (lastRole === 'user') {
-      const cue = classifyInputAssistContinuationCue(lastText);
-      if (cue.active) {
-        return {
-          kind: 'stored_user_continuation_cue',
-          original: lastText,
-          anchorText: '',
-          cue,
-          charIndex,
-          chatIndex,
-          lastIndex,
-          lastFingerprint
-        };
-      }
-    }
-    if (requestCandidate) {
-      return {
-        ...requestCandidate,
-        charIndex,
-        chatIndex,
-        lastIndex,
-        lastFingerprint
-      };
-    }
-    if (lastRole === 'assistant') {
-      const injectedChatId = `libra-input-${Date.now().toString(36)}-${lastFingerprint.slice(0, 12)}`;
-      return {
-        kind: 'blank_without_user_message',
-        original: '',
-        anchorText: lastText,
-        injectedChatId,
-        cue: classifyInputAssistContinuationCue(''),
-        charIndex,
-        chatIndex,
-        lastIndex,
-        lastFingerprint
-      };
-    }
-    return null;
-  };
-
-  const replaceContinuationCueInContent = (content, original, rewritten) => {
-    const replaceText = value => {
-      const body = text(value || '');
-      const wrapped = currentInputFrom(body);
-      if (wrapped && classifyInputAssistContinuationCue(wrapped).active) return body.replace(wrapped, rewritten);
-      if (original && body.includes(original)) return body.replace(original, rewritten);
-      if (classifyInputAssistContinuationCue(body).active) return rewritten;
-      return body;
-    };
-    if (typeof content === 'string') return replaceText(content);
-    if (Array.isArray(content)) {
-      const next = content.map(part => {
-        if (!part || typeof part !== 'object') return part;
-        if (part.type === 'text' || part.type === 'input_text') {
-          const replaced = replaceText(part.text || '');
-          return replaced === part.text ? part : { ...part, text: replaced };
-        }
-        return part;
-      });
-      return next;
-    }
-    return rewritten;
-  };
-
-  const applyInputAssistHijackToRequest = (messages, original, rewritten, options = {}) => {
-    const source = Array.isArray(messages) ? messages : [];
-    const next = source.slice();
-    let targetIndex = -1;
-    for (let i = source.length - 1; i >= 0; i -= 1) {
-      if (currentTurnRole(source[i]) !== 'user') continue;
-      const body = rawCurrentTurnBody(source[i]).trim();
-      const wrapped = currentInputFrom(body);
-      if (
-        (original && (sameRagChatContent(body, original) || sameRagChatContent(wrapped, original)))
-        || classifyInputAssistContinuationCue(wrapped || body).active
-      ) {
-        targetIndex = i;
-        break;
-      }
-    }
-    if (targetIndex >= 0) {
-      const message = source[targetIndex] || {};
-      next[targetIndex] = {
-        ...message,
-        content: replaceContinuationCueInContent(message.content ?? message.data ?? '', original, rewritten)
-      };
-      if ('data' in next[targetIndex] && !('content' in message)) {
-        next[targetIndex].data = next[targetIndex].content;
-        delete next[targetIndex].content;
-      }
-      return { messages: next, changed: true, mode: 'replace_user', targetIndex };
-    }
-    let insertIndex = -1;
-    const anchorText = text(options.anchorText || '').trim();
-    if (options.kind === 'blank_without_user_message' && anchorText) {
-      for (let i = source.length - 1; i >= 0; i -= 1) {
-        if (currentTurnRole(source[i]) !== 'assistant') continue;
-        if (!sameRagChatContent(rawCurrentTurnBody(source[i]), anchorText)) continue;
-        insertIndex = i + 1;
-        break;
-      }
-    }
-    if (insertIndex < 0) {
-      const terminalPrefillIndex = findSgaTerminalAssistantPrefillIndex(source);
-      insertIndex = terminalPrefillIndex >= 0 ? terminalPrefillIndex : source.length;
-    }
-    const inserted = { role: 'user', content: rewritten };
-    if (text(options.injectedChatId || '').trim()) inserted.memo = text(options.injectedChatId).trim();
-    next.splice(insertIndex, 0, inserted);
-    return { messages: next, changed: true, mode: 'insert_user', targetIndex: insertIndex };
-  };
-
-  const syncInputAssistHijackToVisibleChat = async (candidate, rewritten, settings) => {
-    const chatApi = getLiveApi(['getCurrentCharacterIndex', 'getCurrentChatIndex', 'getChatFromIndex', 'setChatToIndex']);
-    if (!candidate || typeof chatApi?.setChatToIndex !== 'function') return { ok: false, reason: 'setChatToIndex_unavailable' };
-    if (candidate.charIndex === null || candidate.charIndex === undefined || candidate.chatIndex === null || candidate.chatIndex === undefined) {
-      return { ok: false, reason: 'chat_index_unavailable' };
-    }
-    const currentCharIndex = finiteRisuIndex(await safeApi('blankHijack.syncCurrentCharacterIndex', () => chatApi.getCurrentCharacterIndex(), settings.debugLog));
-    const currentChatIndex = finiteRisuIndex(await safeApi('blankHijack.syncCurrentChatIndex', () => chatApi.getCurrentChatIndex(), settings.debugLog));
-    if (currentCharIndex !== candidate.charIndex || currentChatIndex !== candidate.chatIndex) {
-      return { ok: false, reason: 'active_chat_changed' };
-    }
-    const chat = await safeApi('blankHijack.syncGetChat', () => chatApi.getChatFromIndex(candidate.charIndex, candidate.chatIndex), settings.debugLog);
-    const storedMessages = Array.isArray(chat?.message) ? chat.message : [];
-    const currentLast = storedMessages[storedMessages.length - 1];
-    if (!currentLast || (candidate.lastFingerprint && storedChatMessageFingerprint(currentLast) !== candidate.lastFingerprint)) {
-      return { ok: false, reason: 'chat_tail_changed' };
-    }
-    const nextChat = { ...chat, message: storedMessages.slice() };
-    if (candidate.kind === 'stored_user_continuation_cue' || candidate.kind === 'request_user_continuation_cue') {
-      let replacementIndex = Number.isInteger(candidate.lastIndex) ? candidate.lastIndex : -1;
-      if (
-        replacementIndex < 0
-        || currentTurnRole(nextChat.message[replacementIndex]) !== 'user'
-        || !classifyInputAssistContinuationCue(contentToText(nextChat.message[replacementIndex]?.data ?? nextChat.message[replacementIndex]?.content ?? '')).active
-      ) {
-        replacementIndex = -1;
-        for (let i = nextChat.message.length - 1; i >= 0; i -= 1) {
-          const message = nextChat.message[i];
-          if (currentTurnRole(message) !== 'user') continue;
-          if (classifyInputAssistContinuationCue(contentToText(message?.data ?? message?.content ?? '')).active) {
-            replacementIndex = i;
-          }
-          break;
-        }
-      }
-      const current = nextChat.message[replacementIndex];
-      if (!current || currentTurnRole(current) !== 'user') return { ok: false, reason: 'placeholder_missing' };
-      const currentText = contentToText(current?.data ?? current?.content ?? '').trim();
-      if (!classifyInputAssistContinuationCue(currentText).active) return { ok: false, reason: 'placeholder_replaced_elsewhere' };
-      const replacement = { ...current };
-      if ('data' in replacement || !('content' in replacement)) replacement.data = rewritten;
-      else replacement.content = rewritten;
-      nextChat.message[replacementIndex] = replacement;
-    } else {
-      nextChat.message.push({
-        role: 'user',
-        data: rewritten,
-        time: Date.now(),
-        chatId: candidate.injectedChatId || undefined
-      });
-    }
-    const saved = await safeApi(
-      'blankHijack.setChatToIndex',
-      () => chatApi.setChatToIndex(candidate.charIndex, candidate.chatIndex, nextChat),
-      settings.debugLog
-    );
-    const replacingCue = candidate.kind === 'stored_user_continuation_cue' || candidate.kind === 'request_user_continuation_cue';
-    return { ok: saved !== null, reason: saved === null ? 'chat_save_failed' : '', mode: replacingCue ? 'replace_placeholder' : 'append_user' };
-  };
-
-  const maybeHijackBeforeRequestInput = async (messages, type, settings) => {
-    const unchanged = { messages, hijacked: false, cached: false, reason: '' };
-    if (!isMainNarrativeRequest(type) || settings.inputAssistMode === 'off') {
-      Runtime.lastInputAssistHijack = {
-        at: Date.now(),
-        ok: true,
-        skipped: true,
-        reason: !isMainNarrativeRequest(type) ? `non_model_request:${normalizeRequestType(type) || 'missing'}` : 'input_assist_off'
-      };
-      return { ...unchanged, reason: Runtime.lastInputAssistHijack.reason };
-    }
-    if (isNativeContinueResponseRequest(messages)) {
-      Runtime.lastInputAssistHijack = {
-        at: Date.now(),
-        ok: true,
-        skipped: true,
-        reason: 'native_continue_response'
-      };
-      return { ...unchanged, reason: 'native_continue_response' };
-    }
-    pruneBeforeRequestInputHijackCache();
-    const fingerprint = beforeRequestInputHijackFingerprint(messages, type);
-    const cached = BeforeRequestInputHijackCache.get(fingerprint);
-    if (cached?.rewritten) {
-      const applied = applyInputAssistHijackToRequest(messages, cached.original || '', cached.rewritten, {
-        kind: cached.kind,
-        anchorText: cached.anchorText || '',
-        injectedChatId: cached.injectedChatId || ''
-      });
-      Runtime.lastInputAssistHijack = {
-        at: Date.now(),
-        ok: true,
-        cached: true,
-        kind: cached.kind,
-        requestSource: cached.requestSource || '',
-        provenanceBacked: cached.provenanceBacked === true,
-        requestMode: applied.mode,
-        chatSync: cached.chatSync || null,
-        fingerprint
-      };
-      return { messages: applied.messages, hijacked: true, cached: true, reason: '', fingerprint };
-    }
-    const candidate = await detectBeforeRequestInputHijackCandidate(messages, type, settings);
-    if (!candidate) {
-      Runtime.lastInputAssistHijack = {
-        at: Date.now(),
-        ok: true,
-        skipped: true,
-        reason: 'no_blank_input_candidate'
-      };
-      return { ...unchanged, reason: 'no_blank_input_candidate' };
-    }
-    const rewritten = await runInputAssistForContent(candidate.original, settings, {
-      allowExistingContinuationCue: true,
-      source: 'before_request_blank_hijack',
-      requestMessages: messages
-    });
-    const valid = Runtime.lastInputAssist?.ok === true
-      && !!text(rewritten).trim()
-      && !classifyInputAssistContinuationCue(rewritten).active;
-    if (!valid) {
-      Runtime.lastInputAssistHijack = {
-        at: Date.now(),
-        ok: false,
-        cached: false,
-        kind: candidate.kind,
-        requestSource: candidate.requestSource || '',
-        provenanceBacked: candidate.provenanceBacked === true,
-        reason: Runtime.lastInputAssist?.reason || 'input_assist_hijack_rewrite_failed',
-        fingerprint
-      };
-      return { ...unchanged, reason: Runtime.lastInputAssistHijack.reason };
-    }
-    const applied = applyInputAssistHijackToRequest(messages, candidate.original, rewritten, {
-      kind: candidate.kind,
-      anchorText: candidate.anchorText || '',
-      injectedChatId: candidate.injectedChatId || ''
-    });
-    const chatSync = await syncInputAssistHijackToVisibleChat(candidate, rewritten, settings);
-    const entry = {
-      original: candidate.original,
-      anchorText: candidate.anchorText || '',
-      injectedChatId: candidate.injectedChatId || '',
-      rewritten,
-      kind: candidate.kind,
-      requestSource: candidate.requestSource || '',
-      provenanceBacked: candidate.provenanceBacked === true,
-      chatSync,
-      storedAt: Date.now(),
-      expiresAt: Date.now() + BEFORE_REQUEST_INPUT_HIJACK_TTL_MS
-    };
-    BeforeRequestInputHijackCache.set(fingerprint, entry);
-    pruneBeforeRequestInputHijackCache();
-    Runtime.lastInputAssistHijack = {
-      at: Date.now(),
-      ok: true,
-      cached: false,
-      kind: candidate.kind,
-      requestSource: candidate.requestSource || '',
-      provenanceBacked: candidate.provenanceBacked === true,
-      requestMode: applied.mode,
-      chatSync,
-      fingerprint
-    };
-    Runtime.lastInputAssist = {
-      ...(Runtime.lastInputAssist || {}),
-      lateHijack: true,
-      lateHijackKind: candidate.kind,
-      requestRewriteMode: applied.mode,
-      chatSync
-    };
-    if (Runtime.lastInputAssist?.trace?.parsed) {
-      Runtime.lastInputAssist.trace.parsed.lateHijack = true;
-      Runtime.lastInputAssist.trace.parsed.lateHijackKind = candidate.kind;
-      Runtime.lastInputAssist.trace.parsed.requestRewriteMode = applied.mode;
-      Runtime.lastInputAssist.trace.parsed.chatSync = chatSync;
-    }
-    return { messages: applied.messages, hijacked: true, cached: false, reason: '', fingerprint };
   };
 
   const testProviderPreset = async (preset) => {
@@ -15113,19 +14352,16 @@ Begin directly with the in-world response and finish the complete same-turn draf
     recent?.continuityLedger?.boundary?.active
       ? '- A scene boundary is explicit. The previous turn is a completed historical predecessor, not the current physical tableau. Carry forward only confirmed consequences and participants that the current input actually bridges.'
       : '',
-    recent?.inputAssistGeneratedContinuation
-      ? '- The current input proposes a continuation from the latest endpoint. Treat it as a next-beat proposal only: it cannot rewrite the already established positions, contacts, completed actions, or unresolved final choice.'
-      : '',
     '- Discard any analysis that describes a different location, time, cast, action, target, or task unless the current input explicitly bridges to it.',
     '- Keep actor -> action -> target attribution exact. Never repair ambiguity by silently swapping participants.',
     '',
     analysisSourceBlock('Current Submitted User Input - primary downstream instruction', submittedCurrentInput(recent)),
     '',
     analysisSourceBlock('Latest Visible Scene Ending - repeat at retained prompt tail', recent?.sceneAnchor || recent?.previousTurnAssistant || ''),
-    !recent?.previousTurnText && (recent?.previousResponseEvidence || recent?.inputAssistPreviousResponseEvidence)
+    !recent?.previousTurnText && recent?.previousResponseEvidence
       ? analysisSourceBlock(
           'Immediate Previous Visible Response - repeat at retained prompt tail',
-          compactMiddle(recent?.inputAssistPreviousResponseEvidence || recent?.previousResponseEvidence || '', 2600)
+          compactMiddle(recent?.previousResponseEvidence || '', 2600)
         )
       : ''
   ].filter(Boolean).join('\n');
@@ -15362,7 +14598,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
 
   const fullDraftPromptVars = (stageName, recent, previous, settings) => {
     const previousJson = previous ? compactMiddle(JSON.stringify(previous, null, 2), settings.maxPreviousStageChars) : '';
-    const terminalScene = recent?.terminalVisibleScene || recent?.inputAssistTerminalVisibleScene || recent?.sceneAnchor || '';
+    const terminalScene = recent?.terminalVisibleScene || recent?.sceneAnchor || '';
     const referencePacketBlock = referencePacketBlockForPrompt(recent);
     return {
       stage: stageName,
@@ -15401,7 +14637,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
     const shadowDraftBridge = stageName === 'ariadne' ? shadowActDraftStyleBridgePrompt(settings) : '';
     const authorNoteAuthority = stageName === 'ariadne' ? buildShadowAuthorNoteAuthorityBlock(recent) : '';
     const sameTurnLock = itoSameTurnRevisionLock(stageName);
-    const terminalScene = recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || '';
+    const terminalScene = recent.terminalVisibleScene || recent.sceneAnchor || '';
     const sceneAnchor = terminalScene
       ? `TERMINAL SCENE PASSAGE FROM IMMEDIATELY PREVIOUS ASSISTANT RESPONSE:\n${compactMiddle(terminalScene, INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS)}`
       : 'TERMINAL SCENE PASSAGE:\n(none available; infer cautiously from the current input and exact canon)';
@@ -15453,7 +14689,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
     const systemContext = compact(recent.systemContext || '', 4000) || '(별도 시스템/개발자 메시지 없음)';
     const recentChat = compactMiddle(recent.earlierTurnsText || '', 2200) || '(그보다 앞선 완료 RP 턴 없음)';
     const terminalScene = compactMiddle(
-      recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || '',
+      recent.terminalVisibleScene || recent.sceneAnchor || '',
       INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS
     ) || '(직전 AI 응답 종결부 없음)';
     const lorebookContext = referencePacketBlockForPrompt(recent) || '(활성 로어북/캐릭터/페르소나 참조 없음 또는 접근 불가)';
@@ -15489,9 +14725,6 @@ Begin directly with the in-world response and finish the complete same-turn draf
       '',
       '[EXACT TERMINAL SCENE STATE — retain at prompt tail]',
       terminalScene,
-      recent.inputAssistGeneratedContinuation
-        ? 'The current input is a proposed next beat. Start after this terminal state; do not replay a completed exchange, restore ended contact, relocate a participant without a bridge, or resolve the open response on the user’s behalf.'
-        : '',
       '',
       shadowDraftLengthBeatContract(settings, 'write'),
       '',
@@ -15696,7 +14929,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
   };
 
   const itoAnalysisPrompt = (stageName, recent, previous, settings, ledger) => {
-    const terminalScene = recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || '';
+    const terminalScene = recent.terminalVisibleScene || recent.sceneAnchor || '';
     const sceneAnchor = terminalScene
       ? `TERMINAL SCENE PASSAGE FROM IMMEDIATELY PREVIOUS ASSISTANT RESPONSE:\n${compactMiddle(terminalScene, INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS)}`
       : 'TERMINAL SCENE PASSAGE:\n(none available; infer cautiously from the current input and exact canon)';
@@ -15835,7 +15068,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
       '',
       analysisSourceBlock(
         'Terminal Passage From Immediately Previous Assistant Response - strongest live-scene evidence, maximum 2,400 characters',
-        recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || ''
+        recent.terminalVisibleScene || recent.sceneAnchor || ''
       ),
       '',
       analysisSourceBlock(`Older Completed Conversation - read-only historical evidence, not the live scene or rewrite target`, recent.earlierTurnsText || ''),
@@ -16175,7 +15408,6 @@ Begin directly with the in-world response and finish the complete same-turn draf
       || extractNamedAnalysisSource(prompts.user, ['current user input', 'current submitted user input']);
     const terminalScene = text(
       recent?.terminalVisibleScene
-      || recent?.inputAssistTerminalVisibleScene
       || recent?.sceneAnchor
       || extractNamedAnalysisSource(prompts.user, ['terminal passage', 'latest visible scene ending'])
       || ''
@@ -16870,7 +16102,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       '',
       '[LATEST TERMINAL SCENE STATE]',
       compactMiddle(
-        recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || '',
+        recent.terminalVisibleScene || recent.sceneAnchor || '',
         terminalSceneBudget
       ),
       '',
@@ -17827,8 +17059,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     };
     const terminalEvidence = [
       'TERMINAL SCENE STATE:',
-      recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || 'Use the literal latest visible ending already present in the request and do not revive an older scene.',
-      recent.inputAssistPreviousResponseEvidence || recent.previousResponseEvidence || ''
+      recent.terminalVisibleScene || recent.sceneAnchor || 'Use the literal latest visible ending already present in the request and do not revive an older scene.',
+      recent.previousResponseEvidence || ''
     ].join('\n');
     const auxiliary = fitFinalOverlayAuxiliary([
       {
@@ -18127,7 +17359,6 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     ) messages.pop();
     const terminalScene = text(
       recent?.terminalVisibleScene
-      || recent?.inputAssistTerminalVisibleScene
       || recent?.sceneAnchor
       || ''
     ).trim();
@@ -18834,30 +18065,6 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     }
   };
 
-  const attachInputAssistContinuityState = (recent, settings) => {
-    const last = Runtime.lastInputAssist;
-    const matchesLatestRewrite = last?.ok === true && sameRagChatContent(last.rewritten, recent?.latestUser);
-    const generatedContinuation = settings.inputAssistMode !== 'off'
-      && matchesLatestRewrite
-      && last?.continuationCue === true
-      ;
-    if (matchesLatestRewrite && String(last.original || '').trim()) {
-      recent.inputAssistOriginalInput = String(last.original).trim();
-    }
-    recent.inputAssistGeneratedContinuation = generatedContinuation;
-    if (generatedContinuation) {
-      recent.inputAssistTerminalVisibleScene = compactMiddle(
-        last.terminalVisibleScene || recent.terminalVisibleScene || recent.sceneAnchor || '',
-        INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS
-      );
-      recent.inputAssistPreviousResponseEvidence = compactMiddle(
-        last.previousResponseEvidence || recent.previousResponseEvidence || '',
-        9000
-      );
-    }
-    return recent;
-  };
-
   const runPipeline = async (memoryJob = {}) => {
     return await runLibraMemoryPipeline(memoryJob);
   };
@@ -18919,10 +18126,11 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         }
     };
     const RisuCompat = (() => {
+        let localStorePromise = null;
         const candidates = () => {
             const values = [];
             const add = value => {
-                if (value && typeof value === 'object' && !values.includes(value))
+                if (value && (typeof value === 'object' || typeof value === 'function') && !values.includes(value))
                     values.push(value);
             };
             try {
@@ -18931,15 +18139,35 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             }
             catch (_) { }
             try {
+                if (typeof risuApi !== 'undefined')
+                    add(risuApi);
+            }
+            catch (_) { }
+            try {
+                if (typeof risuAPI !== 'undefined')
+                    add(risuAPI);
+            }
+            catch (_) { }
+            try {
                 if (typeof Risuai !== 'undefined')
                     add(Risuai);
             }
             catch (_) { }
             try {
-                add(globalThis?.risuai);
-                add(globalThis?.Risuai);
+                if (typeof RisuAI !== 'undefined')
+                    add(RisuAI);
             }
             catch (_) { }
+            try {
+                add(globalThis?.risuai);
+                add(globalThis?.risuApi);
+                add(globalThis?.risuAPI);
+                add(globalThis?.Risuai);
+                add(globalThis?.RisuAI);
+                add(globalThis?.__pluginApis__);
+            }
+            catch (_) { }
+            add(API);
             return values;
         };
         const api = () => candidates()[0] || null;
@@ -19042,10 +18270,47 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 return null;
             }
         };
-        const cleanupChunks = async (runtime, manifest) => {
-            if (!manifest?.chunks)
-                return;
+        const validChunkManifest = (manifest, key) => {
+            const ownerKey = String(key || '');
+            const length = Number(manifest?.length);
+            const chunks = Array.isArray(manifest?.chunks) ? manifest.chunks.map(value => String(value || '')) : [];
+            if (manifest?.[CHUNK_SENTINEL] !== true
+                || Number(manifest?.schemaVersion) !== 1
+                || String(manifest?.key || '') !== ownerKey
+                || !Number.isSafeInteger(length)
+                || length <= CHUNK_SIZE
+                || chunks.length !== Math.ceil(length / CHUNK_SIZE)
+                || chunks.length < 1
+                || new Set(chunks).size !== chunks.length)
+                return false;
+            const prefix = `${ownerKey}::chunk:v1:`;
+            const firstSuffix = `:${String(0).padStart(4, '0')}`;
+            const first = chunks[0];
+            if (!first.startsWith(prefix) || !first.endsWith(firstSuffix))
+                return false;
+            const stamp = first.slice(prefix.length, -firstSuffix.length);
+            if (!stamp)
+                return false;
+            return chunks.every((chunkKey, index) => (
+                chunkKey === `${prefix}${stamp}:${String(index).padStart(4, '0')}`
+            ));
+        };
+        const cleanupChunks = async (runtime, manifest, key) => {
+            if (!validChunkManifest(manifest, key))
+                return false;
             for (const chunkKey of manifest.chunks) {
+                try {
+                    await removeRawItem(runtime, chunkKey);
+                }
+                catch (_) { }
+            }
+            return true;
+        };
+        const cleanupOwnedChunkKeys = async (runtime, key, chunks) => {
+            const prefix = `${String(key || '')}::chunk:v1:`;
+            for (const chunkKey of chunks) {
+                if (!String(chunkKey || '').startsWith(prefix))
+                    continue;
                 try {
                     await removeRawItem(runtime, chunkKey);
                 }
@@ -19062,17 +18327,22 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     const manifest = parseChunkManifest(raw);
                     if (!manifest)
                         return raw;
+                    if (!validChunkManifest(manifest, key))
+                        throw new LIBRAError(`pluginStorage chunk manifest is invalid: ${String(key || '')}`, 'STORAGE_CHUNK_MANIFEST_INVALID');
                     const parts = [];
                     for (const chunkKey of manifest.chunks) {
                         const part = await runtime.pluginStorage.getItem(chunkKey);
                         if (typeof part !== 'string')
-                            return null;
+                            throw new LIBRAError(`pluginStorage chunk is missing: ${String(chunkKey || '')}`, 'STORAGE_CHUNK_MISSING');
                         parts.push(part);
                     }
-                    return parts.join('');
+                    const joined = parts.join('');
+                    if (Number.isFinite(Number(manifest.length)) && joined.length !== Number(manifest.length))
+                        throw new LIBRAError(`pluginStorage chunk length mismatch: ${String(key || '')}`, 'STORAGE_CHUNK_CORRUPT');
+                    return joined;
                 }
-                catch (_) {
-                    return null;
+                catch (error) {
+                    throw new LIBRAError(`pluginStorage read failed: ${String(key || '')}`, 'STORAGE_READ_FAILED', error);
                 }
             },
             async setItem(key, value) {
@@ -19087,7 +18357,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                         const written = await runtime.pluginStorage.setItem(key, text);
                         if (written === false)
                             return false;
-                        await cleanupChunks(runtime, previousManifest);
+                        await cleanupChunks(runtime, previousManifest, key);
                         return true;
                     }
                     const stamp = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -19096,7 +18366,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                         const chunkKey = `${key}::chunk:v1:${stamp}:${String(index).padStart(4, '0')}`;
                         const written = await runtime.pluginStorage.setItem(chunkKey, text.slice(offset, offset + CHUNK_SIZE));
                         if (written === false) {
-                            await cleanupChunks(runtime, { chunks });
+                            await cleanupOwnedChunkKeys(runtime, key, chunks);
                             return false;
                         }
                         chunks.push(chunkKey);
@@ -19111,10 +18381,10 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     };
                     const committed = await runtime.pluginStorage.setItem(key, JSON.stringify(manifest));
                     if (committed === false) {
-                        await cleanupChunks(runtime, manifest);
+                        await cleanupChunks(runtime, manifest, key);
                         return false;
                     }
-                    await cleanupChunks(runtime, previousManifest);
+                    await cleanupChunks(runtime, previousManifest, key);
                     return true;
                 }
                 catch (_) {
@@ -19129,8 +18399,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     const values = await runtime.pluginStorage.keys();
                     return Array.isArray(values) ? values.map(value => String(value || '')).filter(Boolean) : [];
                 }
-                catch (_) {
-                    return [];
+                catch (error) {
+                    throw new LIBRAError('pluginStorage key enumeration failed', 'STORAGE_KEYS_FAILED', error);
                 }
             },
             async removeItem(key) {
@@ -19139,14 +18409,59 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     return false;
                 try {
                     const raw = await runtime.pluginStorage.getItem?.(key);
-                    await cleanupChunks(runtime, parseChunkManifest(raw));
+                    await cleanupChunks(runtime, parseChunkManifest(raw), key);
                     return await removeRawItem(runtime, key);
                 }
-                catch (_) {
-                    return false;
+                catch (error) {
+                    throw new LIBRAError(`pluginStorage remove failed: ${String(key || '')}`, 'STORAGE_REMOVE_FAILED', error);
                 }
             }
         });
+        const getLocalStore = async () => {
+            if (!localStorePromise) {
+                localStorePromise = (async () => {
+                    for (const runtime of candidates()) {
+                        try {
+                            if (typeof runtime?.getLocalPluginStorage === 'function') {
+                                const store = await runtime.getLocalPluginStorage();
+                                if (store?.getItem && store?.setItem) return { kind: 'localPluginStorage', store, structured: true };
+                            }
+                        }
+                        catch (_) { }
+                    }
+                    for (const runtime of candidates()) {
+                        try {
+                            if (runtime?.safeLocalStorage?.getItem && runtime?.safeLocalStorage?.setItem) {
+                                return { kind: 'safeLocalStorage', store: runtime.safeLocalStorage, structured: false };
+                            }
+                        }
+                        catch (_) { }
+                    }
+                    return { kind: 'unavailable', store: null, structured: false };
+                })();
+            }
+            return await localStorePromise;
+        };
+        const localGetItem = async key => {
+            const holder = await getLocalStore();
+            if (!holder.store?.getItem) return null;
+            const value = await holder.store.getItem(key);
+            if (holder.structured || value == null || typeof value !== 'string') return value;
+            try { return JSON.parse(value); }
+            catch (_) { return value; }
+        };
+        const localSetItem = async (key, value) => {
+            const holder = await getLocalStore();
+            if (!holder.store?.setItem) return false;
+            await holder.store.setItem(key, holder.structured ? value : JSON.stringify(value));
+            return true;
+        };
+        const localRemoveItem = async key => {
+            const holder = await getLocalStore();
+            if (!holder.store?.removeItem) return false;
+            await holder.store.removeItem(key);
+            return true;
+        };
         const replacerWrappers = new Map();
         const requestOptionalPermission = async (name) => {
             const runtime = host('requestPluginPermission');
@@ -19200,6 +18515,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             has,
             request,
             pluginStorage,
+            localGetItem,
+            localSetItem,
+            localRemoveItem,
             getArgument: name => callHost('getArgument', undefined, name),
             getCharacter: () => callHost('getCharacter', null),
             getCurrentCharacterIndex: () => callHost('getCurrentCharacterIndex', -1),
@@ -22958,12 +22276,14 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             const source = (Array.isArray(texts) ? texts : [texts]).map(value => String(value || ''));
             if (!source.length)
                 return [];
+            const url = ollamaApiUrl(config.embed.url, '/api/embed');
             const headers = { 'Content-Type': 'application/json' };
-            if (config.embed.key)
+            if (config.embed.key && !isProbablyLocalNetworkUrl(url))
                 headers.Authorization = `Bearer ${String(config.embed.key).replace(/^Bearer\s+/i, '').trim()}`;
             const fetchInputs = async (inputs = []) => {
-                const body = { model: config.embed.model, input: inputs, truncate: true };
-                const data = await this._fetch(ollamaApiUrl(config.embed.url, '/api/embed'), headers, body, config.embed.timeout);
+                const dimensions = Math.max(0, Number(config.embed.dimensions || 0) || 0);
+                const body = { model: config.embed.model, input: inputs, truncate: false, ...(dimensions ? { dimensions } : {}) };
+                const data = await this._fetch(url, headers, body, config.embed.timeout);
                 const embeddings = Array.isArray(data?.embeddings) ? data.embeddings : [];
                 if (embeddings.length)
                     return inputs.map((_, index) => Array.isArray(embeddings[index]) ? embeddings[index] : null);
@@ -23049,7 +22369,58 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     }
     const EmbeddingProviderRegistry = (() => {
         const PREPROCESS_VERSION = 'libra.embedding.preprocess.v3';
+        const OLLAMA_PREPROCESS_VERSION = 'libra.embedding.ollama.preprocess.v2';
         const SCHEMA = 'libra.embedding_result.v1';
+        // Model-family policies mirror Flashback's Ollama v0.10.12 contract. The
+        // catalog supplies safe defaults; the live Ollama server remains authoritative.
+        const OLLAMA_LOCAL_EMBEDDING_MODELS = Object.freeze([
+            Object.freeze({ id: 'qwen3-embedding', model: 'qwen3-embedding:0.6b', suggestedModels: Object.freeze(['qwen3-embedding:0.6b', 'qwen3-embedding:4b', 'qwen3-embedding:8b']), queryPrefix: 'Instruct: Given a conversation memory query, retrieve relevant passages that answer the query\nQuery: ', documentPrefix: '', safeInputTokens: 28672, dimensions: 'qwen3' }),
+            Object.freeze({ id: 'embeddinggemma', model: 'embeddinggemma', queryPrefix: 'task: search result | query: ', documentPrefix: 'title: none | text: ', safeInputTokens: 1792, dimensions: 'embeddinggemma' }),
+            Object.freeze({ id: 'nomic-embed-text-v2-moe', model: 'nomic-embed-text-v2-moe', queryPrefix: 'search_query: ', documentPrefix: 'search_document: ', safeInputTokens: 448, dimensions: 'nomic-v2' }),
+            Object.freeze({ id: 'nomic-embed-text', model: 'nomic-embed-text', queryPrefix: 'search_query: ', documentPrefix: 'search_document: ', safeInputTokens: 1792, dimensions: 'nomic-v1' }),
+            Object.freeze({ id: 'mxbai-embed-large', model: 'mxbai-embed-large', queryPrefix: 'Represent this sentence for searching relevant passages: ', documentPrefix: '', safeInputTokens: 448 }),
+            Object.freeze({ id: 'bge-m3', model: 'bge-m3', queryPrefix: '', documentPrefix: '', safeInputTokens: 7168 }),
+            Object.freeze({ id: 'snowflake-arctic-embed2', model: 'snowflake-arctic-embed2', queryPrefix: 'query: ', documentPrefix: '', safeInputTokens: 7168 }),
+            Object.freeze({ id: 'snowflake-arctic-embed', model: 'snowflake-arctic-embed', queryPrefix: 'Represent this sentence for searching relevant passages: ', documentPrefix: '', safeInputTokens: 448 }),
+            Object.freeze({ id: 'all-minilm', model: 'all-minilm', queryPrefix: '', documentPrefix: '', safeInputTokens: 448 }),
+            Object.freeze({ id: 'paraphrase-multilingual', model: 'paraphrase-multilingual', queryPrefix: '', documentPrefix: '', safeInputTokens: 448 }),
+            Object.freeze({ id: 'granite-embedding', model: 'granite-embedding:278m', suggestedModels: Object.freeze(['granite-embedding:30m', 'granite-embedding:278m']), queryPrefix: '', documentPrefix: '', safeInputTokens: 448 }),
+            Object.freeze({ id: 'bge-large', model: 'bge-large', queryPrefix: 'Represent this sentence for searching relevant passages: ', documentPrefix: '', safeInputTokens: 448 })
+        ]);
+        const OLLAMA_MODEL_METADATA_TTL_MS = 5 * 60 * 1000;
+        const ollamaModelMetadataCache = new Map();
+        let ollamaDiscovery = Object.freeze({ at: 0, endpointIdentity: '', version: '', models: [], checked: 0, unavailable: 0 });
+        let ollamaDiscoveryInFlight = null;
+        const ollamaModelBaseName = (model = '') => {
+            const raw = String(model || '').trim().toLowerCase().replace(/@sha256:[a-f0-9]+$/i, '');
+            if (!raw)
+                return '';
+            const withoutTag = raw.replace(/:[^/]+$/, '');
+            return withoutTag.split('/').filter(Boolean).pop() || withoutTag;
+        };
+        const ollamaModelPolicy = (model = '') => {
+            const base = ollamaModelBaseName(model);
+            if (!base)
+                return null;
+            const policy = OLLAMA_LOCAL_EMBEDDING_MODELS.find(item => base === item.id || base.startsWith(`${item.id}-`));
+            if (!policy)
+                return null;
+            const raw = String(model || '').trim().toLowerCase();
+            let safeInputTokens = policy.safeInputTokens;
+            if (policy.id === 'snowflake-arctic-embed' && /:(?:137m|m-long)(?:-|$)/i.test(raw))
+                safeInputTokens = 1792;
+            let maxDimensions = 0;
+            if (policy.dimensions === 'qwen3') {
+                if (/:0\.6b(?:-|$)/i.test(raw))
+                    maxDimensions = 1024;
+                else if (/:4b(?:-|$)/i.test(raw))
+                    maxDimensions = 2560;
+                else
+                    maxDimensions = 4096;
+            }
+            return Object.freeze({ ...policy, safeInputTokens, maxDimensions });
+        };
+        const ollamaSuggestedModelNames = () => [...new Set(OLLAMA_LOCAL_EMBEDDING_MODELS.flatMap(item => item.suggestedModels || [item.model]))];
         const aliases = Object.freeze({
             'gemini-embedding': 'gemini',
             'vertex-embedding': 'vertex',
@@ -23077,7 +22448,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             bedrock: { label: 'AWS Bedrock / Titan', url: '', models: ['amazon.titan-embed-text-v2:0'], key: true, batchSize: 1 },
             dashscope: { label: 'Alibaba DashScope', url: 'https://dashscope-intl.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding', models: ['text-embedding-v4', 'text-embedding-v3'], key: true, batchSize: 8, purpose: true },
             openai_compat: { label: 'OpenAI-compatible API', url: '', models: [], key: false, batchSize: 8 },
-            ollama: { label: 'Ollama', url: 'http://127.0.0.1:11434', models: ['nomic-embed-text', 'embeddinggemma', 'mxbai-embed-large'], key: false, batchSize: 8 },
+            ollama: { label: 'Ollama', url: 'http://127.0.0.1:11434', models: ['nomic-embed-text', ...ollamaSuggestedModelNames().filter(model => model !== 'nomic-embed-text')], key: false, batchSize: 8, purpose: true },
             lmstudio: { label: 'LM Studio', url: 'http://localhost:1234/v1/embeddings', models: ['text-embedding-nomic-embed-text-v1.5'], key: false, batchSize: 8 },
             localai: { label: 'LocalAI', url: 'http://localhost:8080/v1/embeddings', models: ['nomic-embed-text'], key: false, batchSize: 8 },
             tei: { label: 'Hugging Face TEI', url: 'http://localhost:8080/embed', models: ['nomic-embed-text'], key: false, batchSize: 8 },
@@ -23116,9 +22487,28 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             return 128;
         };
         const VOYAGE_FLEXIBLE_DIMENSIONS = Object.freeze([256, 512, 1024, 2048]);
+        const providerDimensionPolicy = (providerValue, modelValue = '') => {
+            const provider = normalizeProvider(providerValue);
+            const model = String(modelValue || '').trim().toLowerCase();
+            if (provider === 'ollama') {
+                const policy = ollamaModelPolicy(model);
+                if (policy?.dimensions === 'qwen3')
+                    return { min: 32, max: policy.maxDimensions || 4096, label: model || policy.model };
+                if (policy?.dimensions === 'embeddinggemma')
+                    return { allowed: [128, 256, 512, 768], label: model || policy.model };
+                if (policy?.dimensions === 'nomic-v1')
+                    return { allowed: [64, 128, 256, 512, 768], label: model || policy.model };
+                if (policy?.dimensions === 'nomic-v2')
+                    return { allowed: [256, 512, 768], label: model || policy.model };
+            }
+            return null;
+        };
         const allowedDimensionsFor = (providerValue, modelValue = '') => {
             const provider = normalizeProvider(providerValue);
             const model = String(modelValue || '').trim().toLowerCase();
+            const providerPolicy = providerDimensionPolicy(provider, model);
+            if (Array.isArray(providerPolicy?.allowed))
+                return [...providerPolicy.allowed];
             if (provider === 'voyage_context' && /^voyage-context-4(?:$|[-:])/i.test(model))
                 return [...VOYAGE_FLEXIBLE_DIMENSIONS];
             if (provider === 'voyageai' && /^voyage-4(?:$|-)/i.test(model))
@@ -23131,9 +22521,24 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 return 0;
             const parsed = parseInteger(raw, 0, 1, 65536);
             const allowed = allowedDimensionsFor(provider, model);
-            if (allowed.length && !allowed.includes(parsed))
+            if (provider !== 'ollama' && allowed.length && !allowed.includes(parsed))
                 return 0;
             return parsed;
+        };
+        const validateProviderDimensions = cfg => {
+            const dimensions = Math.max(0, Number(cfg?.dimensions || 0) || 0);
+            if (!dimensions)
+                return true;
+            const policy = providerDimensionPolicy(cfg?.provider, cfg?.model);
+            if (!policy)
+                return true;
+            if (Array.isArray(policy.allowed) && !policy.allowed.includes(dimensions)) {
+                throw new LIBRAError(`${policy.label} supports dimensions: ${policy.allowed.join(', ')}. Requested: ${dimensions}.`, 'DIMENSION_MISMATCH');
+            }
+            if ((policy.min != null && dimensions < policy.min) || (policy.max != null && dimensions > policy.max)) {
+                throw new LIBRAError(`${policy.label} supports dimensions ${policy.min}-${policy.max}. Requested: ${dimensions}.`, 'DIMENSION_MISMATCH');
+            }
+            return true;
         };
         const normalizeConfig = raw => {
             const source = raw?.embed && typeof raw.embed === 'object' ? raw.embed : (raw || {});
@@ -23174,7 +22579,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 customErrorPath: String(source.customErrorPath || 'error.message').trim(),
                 customMethod: String(source.customMethod || 'POST').trim().toUpperCase() === 'GET' ? 'GET' : 'POST',
                 fallback: source.fallback && typeof source.fallback === 'object' ? safeClone(source.fallback) : null,
-                preprocessingVersion: String(source.preprocessingVersion || PREPROCESS_VERSION)
+                preprocessingVersion: provider === 'ollama'
+                    ? OLLAMA_PREPROCESS_VERSION
+                    : String(source.preprocessingVersion || PREPROCESS_VERSION)
             });
         };
         const TASK_POLICY_VERSION = 'libra.embedding.task.v2';
@@ -23206,13 +22613,24 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 return role === 'query' ? 'retrieval.query' : 'retrieval.passage';
             return configured;
         };
+        const effectiveEmbeddingPrefix = (cfg, purpose = 'document') => {
+            const explicit = String((purpose === 'query' ? cfg?.queryPrefix : cfg?.documentPrefix) || '');
+            if (explicit)
+                return /\s$/.test(explicit) ? explicit : `${explicit} `;
+            if (cfg?.provider === 'ollama') {
+                const policy = ollamaModelPolicy(cfg.model);
+                if (policy)
+                    return purpose === 'query' ? policy.queryPrefix : policy.documentPrefix;
+            }
+            return '';
+        };
         const profileFor = raw => {
             const cfg = normalizeConfig(raw);
             const basis = {
                 schema: 'libra.embedding_profile.v1', provider: cfg.provider, model: cfg.model,
                 dimensions: cfg.dimensions || 'auto', inputMode: cfg.inputMode,
                 queryTask: resolveProviderTask(cfg, 'query'), documentTask: resolveProviderTask(cfg, 'document'),
-                queryPrefix: cfg.queryPrefix, documentPrefix: cfg.documentPrefix,
+                queryPrefix: effectiveEmbeddingPrefix(cfg, 'query'), documentPrefix: effectiveEmbeddingPrefix(cfg, 'document'),
                 normalizeVectors: cfg.normalizeVectors, preprocessingVersion: cfg.preprocessingVersion,
                 taskPolicyVersion: TASK_POLICY_VERSION
             };
@@ -23220,6 +22638,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         };
         const validateConfig = raw => {
             const cfg = normalizeConfig(raw);
+            validateProviderDimensions(cfg);
             const definition = definitions[cfg.provider];
             const missing = [];
             if (!cfg.model && cfg.provider !== 'tei' && cfg.provider !== 'custom_http')
@@ -23240,9 +22659,94 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 return `${base}${suffix.slice(3)}`;
             return `${base}${suffix}`;
         };
+        const ollamaApiUrl = (rawConfig = {}, resource = 'embed') => {
+            const target = ['embed', 'tags', 'show', 'version'].includes(String(resource || '').toLowerCase())
+                ? String(resource).toLowerCase()
+                : 'embed';
+            const cfg = rawConfig?.provider === 'ollama' ? rawConfig : normalizeConfig({ ...rawConfig, provider: 'ollama' });
+            const exact = target === 'embed' ? String(cfg.endpoint || '').trim() : '';
+            if (exact)
+                return exact;
+            const configured = String((target !== 'embed' && cfg.endpoint) || cfg.url || definitions.ollama.url || '').trim();
+            if (!configured)
+                return '';
+            try {
+                const parsed = new URL(configured);
+                const path = parsed.pathname.replace(/\/+$/, '');
+                if (/\/api\/(?:embed|embeddings|tags|show|version)$/i.test(path))
+                    parsed.pathname = path.replace(/\/api\/(?:embed|embeddings|tags|show|version)$/i, `/api/${target}`);
+                else if (/\/api$/i.test(path))
+                    parsed.pathname = `${path}/${target}`;
+                else
+                    parsed.pathname = `${path}/api/${target}`.replace(/\/{2,}/g, '/');
+                parsed.hash = '';
+                return parsed.toString();
+            }
+            catch (_) {
+                const parts = configured.match(/^([^?#]*)([?#][\s\S]*)?$/);
+                const base = String(parts?.[1] || configured).replace(/\/+$/, '');
+                const tail = String(parts?.[2] || '');
+                if (/\/api\/(?:embed|embeddings|tags|show|version)$/i.test(base))
+                    return `${base.replace(/\/api\/(?:embed|embeddings|tags|show|version)$/i, `/api/${target}`)}${tail}`;
+                if (/\/api$/i.test(base))
+                    return `${base}/${target}${tail}`;
+                return `${base}/api/${target}${tail}`;
+            }
+        };
+        const ollamaRequestHeaders = (url, key = '') => {
+            const headers = { 'Content-Type': 'application/json' };
+            const cleanKey = String(key || '').replace(/^Bearer\s+/i, '').trim();
+            if (cleanKey && !isProbablyLocalNetworkUrl(url))
+                headers.Authorization = `Bearer ${cleanKey}`;
+            return headers;
+        };
+        const ollamaEndpointIdentity = cfg => stableHash(ollamaApiUrl(cfg, 'embed'));
+        const ollamaModelMetadataCacheKey = (cfg, modelOverride = '') => stableHash(`${ollamaApiUrl(cfg, 'embed')}\n${String(modelOverride || cfg?.model || '').trim().toLowerCase()}`);
+        const positiveMetadataNumber = value => {
+            const number = Number(value || 0);
+            return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+        };
+        const ollamaModelMetadataFromPayload = (payload = {}, fallback = {}) => {
+            const modelInfo = payload?.model_info && typeof payload.model_info === 'object' ? payload.model_info : {};
+            const suffixValues = suffix => Object.entries(modelInfo)
+                .filter(([key]) => String(key).toLowerCase().endsWith(suffix))
+                .map(([, value]) => positiveMetadataNumber(value))
+                .filter(Boolean);
+            const contextValues = suffixValues('.context_length');
+            const embeddingValues = suffixValues('.embedding_length');
+            const details = payload?.details && typeof payload.details === 'object' ? payload.details : {};
+            const capabilities = (Array.isArray(payload?.capabilities) ? payload.capabilities : (Array.isArray(fallback?.capabilities) ? fallback.capabilities : []))
+                .map(value => String(value || '').trim().toLowerCase())
+                .filter(Boolean);
+            return Object.freeze({
+                name: String(payload?.model || payload?.name || fallback?.model || fallback?.name || '').trim(),
+                capabilities: Object.freeze([...new Set(capabilities)]),
+                contextLength: positiveMetadataNumber(details.context_length || fallback?.details?.context_length) || (contextValues.length ? Math.min(...contextValues) : 0),
+                embeddingLength: positiveMetadataNumber(details.embedding_length || fallback?.details?.embedding_length) || (embeddingValues.length ? Math.max(...embeddingValues) : 0),
+                parameterSize: String(details.parameter_size || fallback?.details?.parameter_size || '').trim(),
+                quantizationLevel: String(details.quantization_level || fallback?.details?.quantization_level || '').trim(),
+                size: Math.max(0, Number(payload?.size || fallback?.size || 0) || 0),
+                digest: String(payload?.digest || fallback?.digest || '').slice(0, 160),
+                verified: capabilities.length > 0
+            });
+        };
+        const cacheOllamaModelMetadata = (cfg, metadata) => {
+            const name = String(metadata?.name || cfg?.model || '').trim();
+            if (!name)
+                return metadata || null;
+            const value = Object.freeze({ ...(metadata || {}), name, at: Date.now() });
+            ollamaModelMetadataCache.set(ollamaModelMetadataCacheKey(cfg, name), value);
+            return value;
+        };
+        const cachedOllamaModelMetadata = (cfg, modelOverride = '') => {
+            const value = ollamaModelMetadataCache.get(ollamaModelMetadataCacheKey(cfg, modelOverride));
+            if (!value || Date.now() - Number(value.at || 0) > OLLAMA_MODEL_METADATA_TTL_MS)
+                return null;
+            return value;
+        };
         const taskFor = (cfg, purpose) => resolveProviderTask(cfg, purpose);
         const prepareTexts = (cfg, texts, purpose) => {
-            const prefix = purpose === 'query' ? cfg.queryPrefix : cfg.documentPrefix;
+            const prefix = effectiveEmbeddingPrefix(cfg, purpose);
             return texts.map(text => `${prefix || ''}${String(text || '').trim()}`);
         };
         const getPath = (source, path) => {
@@ -23311,6 +22815,76 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             const cjkChars = (body.match(/[一-龥ぁ-んァ-ン]/g) || []).length;
             const punctuation = (body.match(/[^\sA-Za-z0-9_가-힣一-龥ぁ-んァ-ン]/g) || []).length;
             return Math.max(1, Math.ceil(asciiWords.length * 1.25 + (hangulChars + cjkChars) / 1.7 + punctuation / 4));
+        };
+        const providerSafeInputTokenLimit = (providerValue, rawConfig = {}) => {
+            const provider = normalizeProvider(providerValue);
+            if (provider !== 'ollama')
+                return 0;
+            const cfg = rawConfig?.provider === 'ollama' ? rawConfig : normalizeConfig({ ...rawConfig, provider: 'ollama' });
+            const metadata = cachedOllamaModelMetadata(cfg);
+            if (metadata?.contextLength > 0)
+                return Math.max(64, Math.floor(metadata.contextLength * 0.875));
+            return Math.max(0, Number(ollamaModelPolicy(cfg.model)?.safeInputTokens || 0) || 0);
+        };
+        const splitEmbeddingInputByTokenBudget = (value = '', maxTokens = 0) => {
+            const source = String(value || '').trim();
+            const limit = Math.max(0, Number(maxTokens || 0) || 0);
+            if (!source || !limit || estimateEmbeddingTokens(source) <= limit)
+                return source ? [source] : [];
+            const out = [];
+            let cursor = 0;
+            while (cursor < source.length) {
+                let low = cursor + 1;
+                let high = source.length;
+                let best = low;
+                while (low <= high) {
+                    const mid = Math.floor((low + high) / 2);
+                    if (estimateEmbeddingTokens(source.slice(cursor, mid)) <= limit) {
+                        best = mid;
+                        low = mid + 1;
+                    }
+                    else {
+                        high = mid - 1;
+                    }
+                }
+                if (best <= cursor)
+                    best = Math.min(source.length, cursor + 1);
+                let cut = best;
+                if (best < source.length) {
+                    const floor = Math.max(cursor + 1, cursor + Math.floor((best - cursor) * 0.65));
+                    for (let index = best; index >= floor; index -= 1) {
+                        const previous = source[index - 1] || '';
+                        if (previous === '\n' || /[.!?。！？…;；]/u.test(previous) || /\s/u.test(previous)) {
+                            cut = index;
+                            break;
+                        }
+                    }
+                }
+                const piece = source.slice(cursor, cut).trim();
+                if (piece)
+                    out.push(piece);
+                cursor = Math.max(cut, cursor + 1);
+            }
+            return out.length ? out : [source];
+        };
+        const combineEmbeddingPartVectors = (parts = []) => {
+            const rows = (Array.isArray(parts) ? parts : []).filter(part => Array.isArray(part?.vector) && part.vector.length);
+            if (!rows.length)
+                return [];
+            if (rows.length === 1)
+                return rows[0].vector.slice();
+            const dimensions = rows[0].vector.length;
+            if (rows.some(row => row.vector.length !== dimensions))
+                throw new LIBRAError('Split embedding parts returned inconsistent dimensions.', 'DIMENSION_MISMATCH');
+            const sum = new Array(dimensions).fill(0);
+            let totalWeight = 0;
+            for (const row of rows) {
+                const weight = Math.max(1, Number(row.weight || 0) || 1);
+                totalWeight += weight;
+                for (let index = 0; index < dimensions; index += 1)
+                    sum[index] += Number(row.vector[index] || 0) * weight;
+            }
+            return normalizeVector(sum.map(value => value / Math.max(1, totalWeight)));
         };
         const retryAfterMsFromResponse = response => {
             try {
@@ -23443,6 +23017,105 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 }
             }
         };
+        const inspectOllamaModel = async (rawConfig = {}, options = {}) => {
+            const cfg = normalizeConfig({ ...(rawConfig || {}), provider: 'ollama' });
+            const model = String(options.model || cfg.model || '').trim();
+            if (!model)
+                throw new LIBRAError('Ollama embedding model is empty.', 'INVALID_MODEL');
+            const modelConfig = normalizeConfig({ ...cfg, provider: 'ollama', model });
+            const cached = options.force === true ? null : cachedOllamaModelMetadata(modelConfig, model);
+            if (cached)
+                return cached;
+            const url = ollamaApiUrl(modelConfig, 'show');
+            if (!url)
+                throw new LIBRAError('Ollama model inspection endpoint is empty.', 'NETWORK_ERROR');
+            const data = await requestJson(url, {
+                method: 'POST',
+                headers: ollamaRequestHeaders(url, Object.prototype.hasOwnProperty.call(options, 'key') ? options.key : modelConfig.key),
+                body: JSON.stringify({ model })
+            }, modelConfig, options.signal);
+            const metadata = ollamaModelMetadataFromPayload(data, { model });
+            if (!metadata.verified)
+                throw new LIBRAError(`Ollama did not report capabilities for model "${model}"; embedding compatibility cannot be verified.`, 'INVALID_RESPONSE');
+            if (!metadata.capabilities.includes('embedding'))
+                throw new LIBRAError(`Ollama model "${model}" is installed but does not report the embedding capability.`, 'INVALID_MODEL');
+            if (modelConfig.dimensions > 0 && metadata.embeddingLength > 0 && modelConfig.dimensions > metadata.embeddingLength) {
+                throw new LIBRAError(`Ollama model "${model}" reports ${metadata.embeddingLength} embedding dimensions, but ${modelConfig.dimensions} were requested.`, 'DIMENSION_MISMATCH');
+            }
+            return cacheOllamaModelMetadata(modelConfig, metadata);
+        };
+        const discoverOllamaModels = async (rawConfig = {}, options = {}) => {
+            const cfg = normalizeConfig({ ...(rawConfig || {}), provider: 'ollama' });
+            const endpointIdentity = ollamaEndpointIdentity(cfg);
+            if (options.force !== true
+                && ollamaDiscovery.endpointIdentity === endpointIdentity
+                && Date.now() - Number(ollamaDiscovery.at || 0) <= OLLAMA_MODEL_METADATA_TTL_MS)
+                return ollamaDiscovery;
+            if (ollamaDiscoveryInFlight?.key === endpointIdentity)
+                return await ollamaDiscoveryInFlight.promise;
+            const promise = (async () => {
+                const key = Object.prototype.hasOwnProperty.call(options, 'key') ? options.key : cfg.key;
+                const versionUrl = ollamaApiUrl(cfg, 'version');
+                const tagsUrl = ollamaApiUrl(cfg, 'tags');
+                if (!tagsUrl)
+                    throw new LIBRAError('Ollama model discovery endpoint is empty.', 'NETWORK_ERROR');
+                let version = '';
+                if (versionUrl) {
+                    try {
+                        const versionPayload = await requestJson(versionUrl, { method: 'GET', headers: ollamaRequestHeaders(versionUrl, key) }, cfg, options.signal);
+                        version = String(versionPayload?.version || '').trim().slice(0, 80);
+                    }
+                    catch (_) {
+                        // /api/version is informative; /api/tags is the discovery authority.
+                    }
+                }
+                const tagsPayload = await requestJson(tagsUrl, { method: 'GET', headers: ollamaRequestHeaders(tagsUrl, key) }, cfg, options.signal);
+                const installed = Array.isArray(tagsPayload?.models) ? tagsPayload.models : [];
+                const models = [];
+                let unavailable = 0;
+                for (const row of installed) {
+                    const name = String(row?.model || row?.name || '').trim();
+                    if (!name)
+                        continue;
+                    const listedCapabilities = Array.isArray(row?.capabilities)
+                        ? row.capabilities.map(value => String(value || '').trim().toLowerCase()).filter(Boolean)
+                        : [];
+                    let metadata = null;
+                    if (listedCapabilities.length) {
+                        metadata = ollamaModelMetadataFromPayload(row, { model: name });
+                    }
+                    else {
+                        try {
+                            metadata = await inspectOllamaModel({ ...cfg, model: name }, { force: options.force === true, key, signal: options.signal });
+                        }
+                        catch (error) {
+                            if (classifyError(error) !== 'INVALID_MODEL')
+                                unavailable += 1;
+                            continue;
+                        }
+                    }
+                    if (!metadata?.capabilities?.includes('embedding'))
+                        continue;
+                    models.push(cacheOllamaModelMetadata({ ...cfg, model: name }, { ...metadata, name }));
+                }
+                models.sort((left, right) => left.name.localeCompare(right.name));
+                ollamaDiscovery = Object.freeze({
+                    at: Date.now(), endpointIdentity, version,
+                    models: Object.freeze(models.slice()),
+                    checked: installed.length,
+                    unavailable
+                });
+                return ollamaDiscovery;
+            })();
+            ollamaDiscoveryInFlight = { key: endpointIdentity, promise };
+            try {
+                return await promise;
+            }
+            finally {
+                if (ollamaDiscoveryInFlight?.promise === promise)
+                    ollamaDiscoveryInFlight = null;
+            }
+        };
         const openAIResponse = data => (Array.isArray(data?.data) ? [...data.data].sort((a, b) => Number(a?.index || 0) - Number(b?.index || 0)).map(item => item?.embedding) : []);
         const normalizeResponse = (provider, data, cfg, requestMeta = {}) => {
             let vectors = [];
@@ -23556,10 +23229,11 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 body = { model: cfg.model, input: { texts }, parameters: { text_type: task || (purpose === 'query' ? 'query' : 'document'), ...(cfg.dimensions ? { dimension: cfg.dimensions } : {}) } };
             }
             else if (cfg.provider === 'ollama') {
-                url = joinEndpoint(cfg.url, '/api/embed');
-                if (/\/api\/(?:embed|embeddings)$/i.test(cfg.url))
-                    url = cfg.url;
-                body = { model: cfg.model, input: texts, ...(cfg.dimensions ? { dimensions: cfg.dimensions } : {}) };
+                url = ollamaApiUrl(cfg, 'embed');
+                Object.assign(headers, ollamaRequestHeaders(url, cfg.key));
+                if (isProbablyLocalNetworkUrl(url))
+                    delete headers.Authorization;
+                body = { model: cfg.model, input: texts, truncate: false, ...(cfg.dimensions ? { dimensions: cfg.dimensions } : {}) };
             }
             else if (cfg.provider === 'tei') {
                 url = joinEndpoint(cfg.url, '/embed');
@@ -23671,11 +23345,31 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 throw new LIBRAError(`Embedding settings incomplete: ${validated.missing.join(', ')}`, 'EMBEDDING_CONFIG_INVALID');
             const cfg = validated.config;
             const purpose = String(options.purpose || options.taskType || 'document').toLowerCase() === 'query' ? 'query' : 'document';
-            const texts = prepareTexts(cfg, Array.isArray(sourceTexts) ? sourceTexts : [sourceTexts], purpose);
-            const contextGroupKeys = Array.isArray(options.contextGroupKeys) && options.contextGroupKeys.length === texts.length
+            const preparedTexts = prepareTexts(cfg, Array.isArray(sourceTexts) ? sourceTexts : [sourceTexts], purpose);
+            const sourceContextGroupKeys = Array.isArray(options.contextGroupKeys) && options.contextGroupKeys.length === preparedTexts.length
                 ? options.contextGroupKeys.map(value => String(value || ''))
-                : new Array(texts.length).fill('');
-            const vectors = new Array(texts.length);
+                : new Array(preparedTexts.length).fill('');
+            const safeInputTokenLimit = providerSafeInputTokenLimit(cfg.provider, cfg);
+            const expanded = [];
+            let splitInputCount = 0;
+            preparedTexts.forEach((text, originalIndex) => {
+                const splitParts = safeInputTokenLimit > 0
+                    ? splitEmbeddingInputByTokenBudget(text, safeInputTokenLimit)
+                    : [text];
+                const parts = splitParts.length ? splitParts : [text];
+                if (parts.length > 1)
+                    splitInputCount += 1;
+                parts.forEach((partText, partIndex) => expanded.push({
+                    text: partText,
+                    originalIndex,
+                    partIndex,
+                    weight: Math.max(1, estimateEmbeddingTokens(partText)),
+                    contextGroupKey: sourceContextGroupKeys[originalIndex]
+                }));
+            });
+            const texts = expanded.map(item => item.text);
+            const contextGroupKeys = expanded.map(item => item.contextGroupKey);
+            const partVectors = new Array(texts.length);
             let requestCount = 0;
             let inputTokens = 0;
             const batches = buildEmbeddingBatches(cfg, texts, contextGroupKeys, purpose);
@@ -23694,15 +23388,19 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     const normalized = normalizeVector(numeric);
                     if (cfg.dimensions && numeric.length !== cfg.dimensions)
                         throw new LIBRAError(`Embedding dimension mismatch: expected ${cfg.dimensions}, received ${numeric.length}`, 'DIMENSION_MISMATCH');
-                    vectors[batchMeta.indices[index]] = cfg.normalizeVectors ? normalized : numeric;
+                    partVectors[batchMeta.indices[index]] = cfg.normalizeVectors ? normalized : numeric;
                 });
             }
-            if (vectors.some(vector => !Array.isArray(vector) || !vector.length))
+            if (partVectors.some(vector => !Array.isArray(vector) || !vector.length))
                 throw new LIBRAError('Embedding response is missing one or more vectors.', 'INVALID_RESPONSE');
+            const vectors = preparedTexts.map((_, originalIndex) => combineEmbeddingPartVectors(expanded
+                .map((item, index) => ({ ...item, vector: partVectors[index] }))
+                .filter(item => item.originalIndex === originalIndex)
+                .sort((left, right) => left.partIndex - right.partIndex)));
             const dimensions = vectors[0]?.length || 0;
             if (vectors.some(vector => vector.length !== dimensions))
                 throw new LIBRAError('Embedding response dimensions differ within the same request.', 'DIMENSION_MISMATCH');
-            const groupedContext = cfg.provider === 'voyage_context' && contextGroupKeys.some(Boolean);
+            const groupedContext = cfg.provider === 'voyage_context' && sourceContextGroupKeys.some(Boolean);
             return {
                 schema: SCHEMA,
                 vectors,
@@ -23714,6 +23412,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     requestCount,
                     batchCount: requestCount,
                     effectiveBatchSize: cfg.batchSize,
+                    expandedInputCount: expanded.length,
+                    splitInputCount,
+                    safeInputTokenLimit,
                     profileId: profileFor({ embed: { ...cfg, dimensions: cfg.dimensions || dimensions } }).profileId,
                     requestFingerprint: requestFingerprintFor(cfg),
                     contextual: cfg.provider === 'voyage_context',
@@ -23830,8 +23531,20 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         const testConnection = async (raw) => {
             const startedAt = Date.now();
             try {
-                const result = await embedTexts(raw, ['LIBRA embedding connection test'], { purpose: 'document', bypassCache: true });
-                return { ok: true, provider: result.provider, model: result.model, dimensions: result.dimensions, durationMs: Date.now() - startedAt, errorType: '' };
+                const cfg = normalizeConfig(raw);
+                const modelMetadata = cfg.provider === 'ollama'
+                    ? await inspectOllamaModel(cfg, { force: true })
+                    : null;
+                const result = await embedTexts(cfg, ['LIBRA embedding connection test.'], { purpose: cfg.provider === 'ollama' ? 'query' : 'document', bypassCache: true });
+                let documentTest = null;
+                if (cfg.provider === 'ollama') {
+                    const documentStartedAt = Date.now();
+                    const documentResult = await embedTexts(cfg, ['LIBRA document embedding connection test A.', 'LIBRA document embedding connection test B.'], { purpose: 'document', bypassCache: true });
+                    documentTest = { ok: true, dimensions: documentResult.dimensions, elapsedMs: Date.now() - documentStartedAt, batchSize: 2 };
+                }
+                const vector = result.vectors?.[0] || [];
+                const norm = Array.isArray(vector) ? Math.sqrt(vector.reduce((sum, value) => sum + Number(value || 0) ** 2, 0)) : 0;
+                return { ok: true, provider: result.provider, model: result.model, dimensions: result.dimensions, norm, durationMs: Date.now() - startedAt, errorType: '', documentTest, modelMetadata };
             }
             catch (error) {
                 return { ok: false, provider: normalizeConfig(raw).provider, model: normalizeConfig(raw).model, dimensions: 0, durationMs: Date.now() - startedAt, errorType: classifyError(error), error: String(error?.message || error || 'unknown error').slice(0, 300) };
@@ -23843,7 +23556,41 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             return Object.freeze({ provider: key, label: def.label, defaultUrl: def.url, models: [...def.models], requiresKey: def.key, supportsBatch: def.batchSize > 1, supportsPurpose: def.purpose === true, custom: def.custom === true, defaultDimensions: 'auto', allowedDimensions: allowedDimensionsFor(key, def.models[0] || '') });
         };
         const list = () => Object.keys(definitions).map(getCapabilities);
-        return Object.freeze({ SCHEMA, PREPROCESS_VERSION, normalizeProvider, normalizeConfig, normalizeDimensions, allowedDimensionsFor, validateConfig, profileFor, requestFingerprintFor, embedTexts, testConnection, clearQueryCache, getQueryCacheStats: () => ({ ...queryCacheStats, size: queryCache.size, inFlight: queryInFlight.size }), resolveDimensions: async (raw) => (await embedTexts(raw, ['dimension probe'], { purpose: 'document', bypassCache: true })).dimensions, classifyError, getCapabilities, list, getPath, compileCustomTemplate });
+        return Object.freeze({
+            SCHEMA,
+            PREPROCESS_VERSION,
+            OLLAMA_PREPROCESS_VERSION,
+            normalizeProvider,
+            normalizeConfig,
+            normalizeDimensions,
+            allowedDimensionsFor,
+            validateProviderDimensions,
+            validateConfig,
+            profileFor,
+            requestFingerprintFor,
+            embedTexts,
+            testConnection,
+            clearQueryCache,
+            getQueryCacheStats: () => ({ ...queryCacheStats, size: queryCache.size, inFlight: queryInFlight.size }),
+            resolveDimensions: async (raw) => (await embedTexts(raw, ['dimension probe'], { purpose: 'document', bypassCache: true })).dimensions,
+            classifyError,
+            getCapabilities,
+            list,
+            getPath,
+            compileCustomTemplate,
+            ollamaModelPolicy,
+            ollamaSuggestedModelNames,
+            ollamaApiUrl,
+            ollamaRequestHeaders,
+            ollamaModelMetadataFromPayload,
+            effectiveEmbeddingPrefix,
+            providerSafeInputTokenLimit,
+            splitEmbeddingInputByTokenBudget,
+            combineEmbeddingPartVectors,
+            inspectOllamaModel,
+            discoverOllamaModels,
+            getOllamaDiscovery: () => safeClone(ollamaDiscovery)
+        });
     })();
     const AutoProvider = (() => {
         const registeredCompatible = new RegisteredOpenAICompatibleProvider();
@@ -25107,7 +24854,21 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             const normalizedEmbed = EmbeddingProviderRegistry.normalizeConfig(embed);
             const provider = normalizedEmbed.provider;
             const model = normalizedEmbed.model;
-            const missing = describeMissing(embed);
+            let missing = [];
+            try {
+                missing = describeMissing(embed);
+            }
+            catch (error) {
+                return {
+                    ok: false,
+                    provider,
+                    model,
+                    dimensions: 0,
+                    durationMs: 0,
+                    errorType: EmbeddingProviderRegistry.classifyError(error),
+                    error: String(error?.message || error || 'invalid embedding settings').slice(0, 300)
+                };
+            }
             if (missing.length) {
                 return {
                     ok: false,
@@ -25131,13 +24892,19 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             try {
                 // A connection test must make a real provider call. It intentionally
                 // bypasses LIBRA's embedding cache and the sparse-search fallback.
-                const adapterResult = await EmbeddingProviderRegistry.embedTexts(embed, [TEST_TEXT], { purpose: 'document' });
-                const vector = adapterResult?.vectors?.[0] || null;
-                const dimensions = Array.isArray(vector) ? vector.length : 0;
-                const finite = dimensions > 0 && vector.every(value => Number.isFinite(Number(value)));
-                const norm = finite
-                    ? Math.sqrt(vector.reduce((sum, value) => sum + (Number(value) * Number(value)), 0))
-                    : 0;
+                const ollamaConnection = provider === 'ollama'
+                    ? await EmbeddingProviderRegistry.testConnection(embed)
+                    : null;
+                if (ollamaConnection && !ollamaConnection.ok) {
+                    throw new LIBRAError(ollamaConnection.error || 'Ollama embedding connection test failed.', ollamaConnection.errorType || 'UNKNOWN');
+                }
+                const adapterResult = ollamaConnection || await EmbeddingProviderRegistry.embedTexts(embed, [TEST_TEXT], { purpose: 'document' });
+                const vector = ollamaConnection ? null : (adapterResult?.vectors?.[0] || null);
+                const dimensions = ollamaConnection ? Number(adapterResult.dimensions || 0) : (Array.isArray(vector) ? vector.length : 0);
+                const finite = ollamaConnection ? dimensions > 0 : (dimensions > 0 && vector.every(value => Number.isFinite(Number(value))));
+                const norm = ollamaConnection
+                    ? Number(adapterResult.norm || 0)
+                    : (finite ? Math.sqrt(vector.reduce((sum, value) => sum + (Number(value) * Number(value)), 0)) : 0);
                 if (!finite)
                     throw new LIBRAError('프로바이더가 유효한 임베딩 벡터를 반환하지 않았습니다.', 'EMBEDDING_TEST_INVALID_VECTOR');
                 if (!(norm > 0))
@@ -25154,7 +24921,16 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     });
                 }
                 catch (_) { }
-                return { ok: true, provider, model: adapterResult?.model || model, durationMs, dimensions, norm, errorType: '' };
+                return {
+                    ok: true,
+                    provider,
+                    model: adapterResult?.model || model,
+                    durationMs,
+                    dimensions,
+                    norm,
+                    errorType: '',
+                    ...(ollamaConnection ? { modelMetadata: ollamaConnection.modelMetadata || null, documentTest: ollamaConnection.documentTest || null } : {})
+                };
             }
             catch (error) {
                 const durationMs = Math.max(0, Math.round(now() - startedAt));
@@ -25176,13 +24952,97 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         return { run, TEST_TEXT };
     })();
     const DEFAULT_AUX_MAX_COMPLETION_TOKENS = 16000;
-    const PROVIDER_SETTINGS_KEY = 'libra:v1:provider-settings';
+    const PROVIDER_SETTINGS_KEY = STORAGE_PROVIDER_CONFIG_KEY;
+    const PROVIDER_SECRETS_KEY = LOCAL_PROVIDER_CONFIG_SECRETS_KEY;
+    const isProviderSecretKey = key => /(^|[-_.])(api[-_]?key|key|token|secret|password|authorization|credential|bearer)(s)?($|[-_.])/i.test(String(key || ''))
+        || /^(?:apiKey|accessToken|refreshToken|authToken|privateKey|clientSecret)$/i.test(String(key || ''));
+    const splitProviderConfigSecrets = value => {
+        if (Array.isArray(value)) {
+            const metadata = [];
+            const secrets = {};
+            value.forEach((item, index) => {
+                const split = splitProviderConfigSecrets(item);
+                metadata[index] = split.metadata;
+                if (split.hasSecrets)
+                    secrets[index] = split.secrets;
+            });
+            return { metadata, secrets, hasSecrets: Object.keys(secrets).length > 0 };
+        }
+        if (!value || typeof value !== 'object')
+            return { metadata: value, secrets: undefined, hasSecrets: false };
+        const metadata = {};
+        const secrets = {};
+        for (const [key, child] of Object.entries(value)) {
+            if (isProviderSecretKey(key)) {
+                if (child !== undefined && child !== null && child !== '')
+                    secrets[key] = safeClone(child);
+                continue;
+            }
+            const split = splitProviderConfigSecrets(child);
+            metadata[key] = split.metadata;
+            if (split.hasSecrets)
+                secrets[key] = split.secrets;
+        }
+        return { metadata, secrets, hasSecrets: Object.keys(secrets).length > 0 };
+    };
+    const mergeProviderConfigSecrets = (metadata, secrets) => {
+        if (Array.isArray(metadata)) {
+            return metadata.map((item, index) => mergeProviderConfigSecrets(item, secrets?.[index]));
+        }
+        if ((!metadata || typeof metadata !== 'object') && (!secrets || typeof secrets !== 'object'))
+            return secrets === undefined ? metadata : safeClone(secrets);
+        const out = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? safeClone(metadata) : {};
+        for (const [key, value] of Object.entries(secrets && typeof secrets === 'object' ? secrets : {})) {
+            const current = out[key];
+            out[key] = value && typeof value === 'object' && !Array.isArray(value)
+                ? mergeProviderConfigSecrets(current && typeof current === 'object' ? current : {}, value)
+                : safeClone(value);
+        }
+        return out;
+    };
+    const parseProviderConfigValue = value => {
+        if (value && typeof value === 'object') return safeClone(value);
+        try {
+            const parsed = JSON.parse(String(value || '{}'));
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        }
+        catch (error) {
+            throw new LIBRAError('LIBRA provider settings JSON is invalid', 'CONFIG_PARSE_FAILED', error);
+        }
+    };
     const readProviderSettings = async () => {
         const current = await RisuCompat.pluginStorage.getItem(PROVIDER_SETTINGS_KEY);
-        return current !== null && current !== undefined && current !== '' ? current : null;
+        if (current === null || current === undefined || current === '') {
+            const storedSecrets = await RisuCompat.localGetItem(PROVIDER_SECRETS_KEY);
+            return storedSecrets && typeof storedSecrets === 'object'
+                ? mergeProviderConfigSecrets({}, storedSecrets)
+                : null;
+        }
+        const parsed = parseProviderConfigValue(current);
+        const split = splitProviderConfigSecrets(parsed);
+        const storedSecrets = await RisuCompat.localGetItem(PROVIDER_SECRETS_KEY);
+        const mergedSecrets = mergeProviderConfigSecrets(split.secrets || {}, storedSecrets || {});
+        if (split.hasSecrets) {
+            const secretWritten = await RisuCompat.localSetItem(PROVIDER_SECRETS_KEY, mergedSecrets);
+            if (secretWritten === false)
+                throw new LIBRAError('Secure local provider-secret storage is unavailable', 'CONFIG_SECRET_STORAGE_UNAVAILABLE');
+            const sanitized = await RisuCompat.pluginStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(split.metadata));
+            if (sanitized === false)
+                throw new LIBRAError('LIBRA provider settings secret migration failed', 'CONFIG_WRITE_FAILED');
+        }
+        return mergeProviderConfigSecrets(split.metadata, mergedSecrets);
     };
     const writeProviderSettings = async (value) => {
-        const written = await RisuCompat.pluginStorage.setItem(PROVIDER_SETTINGS_KEY, value);
+        const split = splitProviderConfigSecrets(parseProviderConfigValue(value));
+        const existingSecrets = split.hasSecrets ? null : await RisuCompat.localGetItem(PROVIDER_SECRETS_KEY);
+        const secretWritten = split.hasSecrets
+            ? await RisuCompat.localSetItem(PROVIDER_SECRETS_KEY, split.secrets)
+            : existingSecrets && typeof existingSecrets === 'object'
+                ? await RisuCompat.localRemoveItem(PROVIDER_SECRETS_KEY)
+                : true;
+        if (secretWritten === false)
+            throw new LIBRAError('Secure local provider-secret storage is unavailable', 'CONFIG_SECRET_STORAGE_UNAVAILABLE');
+        const written = await RisuCompat.pluginStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(split.metadata));
         if (written === false)
             throw new LIBRAError('LIBRA provider settings write failed', 'CONFIG_WRITE_FAILED');
         return true;
@@ -25534,7 +25394,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
   };
 
   return Object.freeze({
-    sourceVersion: 'GRADIA LLM provider core + Flashback v0.10.2-derived LIBRA embedding adapter',
+    sourceVersion: 'GRADIA LLM provider core + Flashback v0.10.12-derived LIBRA embedding adapter',
     storage: RisuCompat.pluginStorage,
     settingsKey: PROVIDER_SETTINGS_KEY,
     getConfig,
@@ -25595,7 +25455,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
   const LibraMemoryCore = (() => {
-    const VERSION = '1.0.7';
+    const VERSION = PLUGIN_VERSION;
     const BATCH_SIZE = 5;
     const PREFIX = 'libra:v1';
     const SETTINGS_KEY = `${PREFIX}:memory-settings`;
@@ -25757,6 +25617,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       embeddingRebuildStopRequested: false,
       queues: new Map(),
       timers: new Map(),
+      deletingScopes: new Set(),
       recallCatalogCache: new Map(),
       snapshot: {
         scope: null,
@@ -25765,15 +25626,23 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         memories: [],
         runs: [],
         worldAdditional: [],
+        totals: { memories: 0, runs: 0, worldAdditional: 0 },
         refreshedAt: 0,
         error: ''
       },
+      snapshotRefreshSerial: 0,
+      scheduledScanSerial: 0,
+      guiSnapshotLimits: { ...LIBRA_SNAPSHOT_PAGE_LIMITS },
       outputListenerRegistered: false,
       outputListener: null,
       disposed: false,
       lastRecall: null,
       lastScan: null,
-      currentRun: null
+      currentRun: null,
+      nativeCopyChecks: new Map(),
+      nativeCopyInFlight: new Map(),
+      lastNativeCopy: null,
+      lastNativeCopyCheck: null
     };
 
     Runtime.libraMemory = state;
@@ -25802,7 +25671,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (raw === null || raw === undefined || raw === '') return clone(fallback);
         if (typeof raw === 'object') return clone(raw);
         try { return JSON.parse(String(raw)); }
-        catch (_) { return clone(fallback); }
+        catch (error) { throw new Error(`pluginStorage JSON parse failed: ${key}: ${compact(error?.message || error, 300)}`); }
       },
       async setJson(key, value) {
         const ok = await LibraProviderBridge.storage.setItem(key, JSON.stringify(value));
@@ -25924,7 +25793,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       queryPrefix: string(config?.queryPrefix || ''),
       documentPrefix: string(config?.documentPrefix || ''),
       normalizeVectors: config?.normalizeVectors !== false,
-      preprocessing: EmbeddingProviderRegistry.PREPROCESS_VERSION,
+      preprocessing: EmbeddingProviderRegistry.normalizeProvider(config?.provider) === 'ollama'
+        ? EmbeddingProviderRegistry.OLLAMA_PREPROCESS_VERSION
+        : EmbeddingProviderRegistry.PREPROCESS_VERSION,
       retrievalProjection: RETRIEVAL_PROJECTION_VERSION
     });
 
@@ -26147,8 +26018,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const scopeRegistryIdentity = (characterId, chatId) => `${string(characterId || '')}::${string(chatId || '')}`;
     const resolveStableScopeKey = async (characterId, chatId, identity = '') => {
+      if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
       const registryKey = key.scopeRegistry();
       const registry = asObject(await storage.getJson(registryKey, {}));
+      if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
       const registryId = scopeRegistryIdentity(characterId, chatId);
       const registered = string(registry?.[registryId]?.scopeKey || '');
       if (registered) return registered;
@@ -26163,6 +26036,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!manifest || string(manifest.characterId) !== string(characterId) || string(manifest.chatId) !== string(chatId)) continue;
         const existingScope = string(manifest.scopeKey || storageKey.slice(`${PREFIX}:scope:`.length, -manifestSuffix.length));
         if (existingScope) {
+          if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
           registry[registryId] = { scopeKey: existingScope, characterId: string(characterId), chatId: string(chatId), adoptedAt: nowIso(), source: 'existing_manifest' };
           await storage.setJson(registryKey, registry);
           return existingScope;
@@ -26171,6 +26045,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
       const legacyIdentity = string(identity || `${characterId}:${chatId}`);
       const createdScope = `${stableDraftHash(`${legacyIdentity}|${characterId}|${chatId}`)}_${legacyIdentity.replace(/[^\w:-]+/g, '_').slice(0, 80)}`;
+      if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
       registry[registryId] = { scopeKey: createdScope, characterId: string(characterId), chatId: string(chatId), adoptedAt: nowIso(), source: 'created' };
       await storage.setJson(registryKey, registry);
       return createdScope;
@@ -26178,6 +26053,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const contextId = (value, fallback) => string(value?.id || value?.chatId || value?.chaId || value?.characterId || value?.uuid || value?.name || fallback);
     const resolveContext = async () => {
+      if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
       const characterInfo = await loadCurrentCharacterForRisuContext(false);
       const character = characterInfo.character;
       const chatInfo = await loadCurrentChatForRisuContext(character, false);
@@ -26186,6 +26062,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const identity = chatInfo.identity || await loadCurrentChatIdentity(false) || `${contextId(character, 'character')}:${contextId(chat, 'chat')}`;
       const characterId = contextId(character, 'character');
       const chatId = contextId(chat, identity || 'chat');
+      if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
       const scopeKey = await resolveStableScopeKey(characterId, chatId, identity);
       return { character, chat, identity, scope: { characterId, chatId, scopeKey } };
     };
@@ -26228,6 +26105,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const buildPairs = chat => {
       const pairs = [];
       let pendingUser = null;
+      const appendSegment = (target, chatId, body, index) => ({
+        ...target,
+        chatId: [target?.chatId, chatId].filter(Boolean).join('|'),
+        chatIds: [...asArray(target?.chatIds), chatId].filter(Boolean),
+        text: [target?.text, body].filter(Boolean).join('\n\n'),
+        index: Number.isInteger(target?.index) ? target.index : index,
+        endIndex: index
+      });
       rawChatMessages(chat).forEach((raw, index) => {
         const role = messageRole(raw);
         if (!role) return;
@@ -26235,14 +26120,20 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!body) return;
         const chatId = messageId(raw, index);
         if (role === 'user') {
-          pendingUser = { chatId, text: body, index };
+          pendingUser = pendingUser
+            ? appendSegment(pendingUser, chatId, body, index)
+            : { chatId, chatIds: [chatId], text: body, index, endIndex: index };
           return;
         }
-        if (!pendingUser) return;
+        if (!pendingUser) {
+          const previous = pairs.at(-1);
+          if (previous?.assistant) previous.assistant = appendSegment(previous.assistant, chatId, body, index);
+          return;
+        }
         pairs.push({
           turn: pairs.length + 1,
           user: pendingUser,
-          assistant: { chatId, text: body, index }
+          assistant: { chatId, chatIds: [chatId], text: body, index, endIndex: index }
         });
         pendingUser = null;
       });
@@ -26287,7 +26178,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const loadManifest = async (scope, observedTurn = 0) => {
       const loaded = await storage.getJson(key.manifest(scope), null);
-      const manifest = loaded?.schema === MANIFEST_SCHEMA ? loaded : defaultManifest(scope, observedTurn);
+      if (loaded && loaded.schema !== MANIFEST_SCHEMA) {
+        throw new Error(`지원하지 않는 LIBRA manifest schema입니다: ${string(loaded.schema || '(missing)')}`);
+      }
+      const manifest = loaded || defaultManifest(scope, observedTurn);
       manifest.frontiers = { ...defaultManifest(scope, observedTurn).frontiers, ...asObject(manifest.frontiers), observedTurn };
       manifest.memories = asObject(manifest.memories);
       manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => ref && typeof ref === 'object');
@@ -26313,6 +26207,515 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       || Number(a.turnRange?.end || 0) - Number(b.turnRange?.end || 0)
       || Number(a.revision || 0) - Number(b.revision || 0)
     ));
+
+    const NATIVE_CHAT_COPY_SCHEMA = 'libra.native_chat_copy.v1';
+    const NATIVE_CHAT_COPY_POSITIVE_TTL_MS = 5 * 60 * 1000;
+    const NATIVE_CHAT_COPY_NEGATIVE_TTL_MS = 15 * 1000;
+
+    const nativeCopyExplicitSourceChatId = chat => {
+      const candidates = [
+        chat?.copiedFromChatId, chat?.copyFromChatId, chat?.copySourceChatId,
+        chat?.clonedFromChatId, chat?.importedFromChatId, chat?.sourceChatId,
+        chat?.originChatId, chat?.originalChatId, chat?.original_chat_id,
+        chat?.parentChatId, chat?.rootChatId, chat?.parent?.chatId,
+        chat?.meta?.sourceChatId, chat?.metadata?.sourceChatId
+      ];
+      for (const candidate of candidates) {
+        const value = string(candidate || '');
+        if (value) return value;
+      }
+      return '';
+    };
+
+    const nativeCopyBridgeMarkerState = (chat, currentChatId = '') => {
+      const marker = chat?.memorySessionBridge && typeof chat.memorySessionBridge === 'object'
+        ? chat.memorySessionBridge
+        : null;
+      if (!marker) return { present: false, valid: false, stale: false };
+      const sourceChatId = string(marker.sourceChatId || '');
+      const targetChatId = string(marker.targetChatId || '');
+      const transferId = string(marker.transferId || '');
+      const activeChatId = string(currentChatId || chat?.id || chat?.chatId || '');
+      const valid = !!sourceChatId && !!targetChatId && !!transferId
+        && !!activeChatId && targetChatId === activeChatId && sourceChatId !== activeChatId;
+      return { present: true, valid, stale: !valid, sourceChatId, targetChatId, transferId };
+    };
+
+    const nativeCopyBranchSourceChatId = chat => {
+      for (const message of rawChatMessages(chat).slice(-8)) {
+        const item = message?.msg && typeof message.msg === 'object' ? message.msg : message;
+        const body = contentToText(item?.data ?? item?.content ?? item?.text ?? item?.message ?? '');
+        const match = body.match(/\{\{specialcomment::branchedfrom::([^:}]+)::/i);
+        if (match?.[1]) return string(match[1]);
+      }
+      return '';
+    };
+
+    const nativeCopyTitleInfo = value => {
+      const raw = string(value || '');
+      let parent = raw;
+      let marked = false;
+      const suffix = /\s*(?:\((?:copy|branch|복사(?:본)?)(?:\s+\d+)?\)|(?:copy|branch|복사(?:본)?)(?:\s+\d+)?)\s*$/i;
+      const match = parent.match(suffix);
+      if (match && Number(match.index) > 0) {
+        marked = true;
+        parent = parent.slice(0, match.index).trim();
+      }
+      let base = parent;
+      for (let guard = 0; guard < 8; guard += 1) {
+        const nested = base.match(suffix);
+        if (!nested || Number(nested.index) <= 0) break;
+        base = base.slice(0, nested.index).trim();
+      }
+      return { raw, parent, base: base.toLowerCase(), marked };
+    };
+
+    const nativeCopyPairSignature = pair => digest([
+      string(pair?.user?.text || ''),
+      string(pair?.assistant?.text || '')
+    ]);
+
+    const nativeCopySharedPrefixPairs = (leftChat, rightChat) => {
+      const left = buildPairs(leftChat).map(nativeCopyPairSignature);
+      const right = buildPairs(rightChat).map(nativeCopyPairSignature);
+      const limit = Math.min(left.length, right.length);
+      let common = 0;
+      while (common < limit && left[common] === right[common]) common += 1;
+      return { common, leftCount: left.length, rightCount: right.length, prefixCompatible: common === limit && limit > 0 };
+    };
+
+    const nativeCopyManifestHasData = manifest => !!manifest && (
+      listCurrentMemoryRefs(manifest).length > 0
+      || listInheritedMemoryRefs(manifest).length > 0
+      || asArray(manifest.worldAdditionalIds).length > 0
+    );
+
+    const findStoredScopeForChat = async (characterId, chatId) => {
+      const wantedCharacter = string(characterId || '');
+      const wantedChat = string(chatId || '');
+      if (!wantedCharacter || !wantedChat) return null;
+      const registry = asObject(await storage.getJson(key.scopeRegistry(), {}));
+      const registryId = scopeRegistryIdentity(wantedCharacter, wantedChat);
+      const registeredScopeKey = string(registry?.[registryId]?.scopeKey || '');
+      if (registeredScopeKey) {
+        const scope = { characterId: wantedCharacter, chatId: wantedChat, scopeKey: registeredScopeKey };
+        const manifest = await storage.getJson(key.manifest(scope), null);
+        if (manifest?.schema === MANIFEST_SCHEMA
+          && string(manifest.characterId) === wantedCharacter
+          && string(manifest.chatId) === wantedChat) return { scope, manifest, source: 'scope_registry' };
+      }
+      for (const storageKey of await storage.keys()) {
+        if (!storageKey.startsWith(`${PREFIX}:scope:`) || !storageKey.endsWith(':manifest') || storageKey.includes('::chunk:')) continue;
+        const manifest = await storage.getJson(storageKey, null);
+        if (!manifest || manifest.schema !== MANIFEST_SCHEMA) continue;
+        if (string(manifest.characterId) !== wantedCharacter || string(manifest.chatId) !== wantedChat) continue;
+        const scopeKey = string(manifest.scopeKey || storageKey.slice(`${PREFIX}:scope:`.length, -':manifest'.length));
+        if (!scopeKey) continue;
+        return { scope: { characterId: wantedCharacter, chatId: wantedChat, scopeKey }, manifest, source: 'manifest_scan' };
+      }
+      return null;
+    };
+
+    const nativeCopySuppressedForScope = async scope => {
+      const registry = asObject(await storage.getJson(key.scopeRegistry(), {}));
+      const entry = asObject(registry?.[scopeRegistryIdentity(scope.characterId, scope.chatId)]);
+      return entry.nativeCopySuppressed === true;
+    };
+
+    const markNativeCopySuppressed = async (scope, reason = 'manual_scope_delete') => {
+      const registryKey = key.scopeRegistry();
+      const registry = asObject(await storage.getJson(registryKey, {}));
+      const registryId = scopeRegistryIdentity(scope.characterId, scope.chatId);
+      registry[registryId] = {
+        ...asObject(registry[registryId]),
+        scopeKey: string(scope.scopeKey), characterId: string(scope.characterId), chatId: string(scope.chatId),
+        nativeCopySuppressed: true, nativeCopySuppressedAt: nowIso(), nativeCopySuppressedReason: string(reason)
+      };
+      await storage.setJson(registryKey, registry);
+    };
+
+    const nativeCopyChatListSnapshot = async context => {
+      const fallbackCharacter = context?.character || null;
+      const fallbackChat = context?.chat || null;
+      const targetChatId = string(context?.scope?.chatId || contextId(fallbackChat, ''));
+      let character = fallbackCharacter;
+      let targetChat = fallbackChat;
+      let source = 'resolve_context';
+      let characterIndex = -1;
+      let chatIndex = -1;
+      let refreshError = '';
+      try {
+        const liveApi = getLiveApi(['getCurrentCharacterIndex', 'getCurrentChatIndex', 'getCharacterFromIndex', 'getChatFromIndex']);
+        if (typeof liveApi?.getCurrentCharacterIndex === 'function'
+          && typeof liveApi?.getCurrentChatIndex === 'function'
+          && typeof liveApi?.getCharacterFromIndex === 'function'
+          && typeof liveApi?.getChatFromIndex === 'function') {
+          const [characterIndexRaw, chatIndexRaw] = await Promise.all([
+            liveApi.getCurrentCharacterIndex(),
+            liveApi.getCurrentChatIndex()
+          ]);
+          characterIndex = Number(characterIndexRaw);
+          chatIndex = Number(chatIndexRaw);
+          if (Number.isInteger(characterIndex) && characterIndex >= 0 && Number.isInteger(chatIndex) && chatIndex >= 0) {
+            const [freshCharacter, freshChat] = await Promise.all([
+              liveApi.getCharacterFromIndex(characterIndex),
+              liveApi.getChatFromIndex(characterIndex, chatIndex)
+            ]);
+            const freshCharacterId = contextId(freshCharacter, '');
+            const freshChatId = contextId(freshChat, '');
+            const expectedCharacterId = string(context?.scope?.characterId || '');
+            if (freshCharacter
+              && (!expectedCharacterId || !freshCharacterId || freshCharacterId === expectedCharacterId)
+              && (!targetChatId || !freshChatId || freshChatId === targetChatId)) {
+              character = freshCharacter;
+              targetChat = freshChat || targetChat;
+              source = 'getCharacterFromIndex+getChatFromIndex';
+            }
+          }
+        }
+      } catch (error) {
+        refreshError = compact(error?.message || error, 300);
+      }
+      const chats = Array.isArray(character?.chats) ? character.chats : [];
+      if (targetChatId && chats.length) {
+        const matched = chats.find(chat => contextId(chat, '') === targetChatId);
+        if (matched) targetChat = matched;
+      }
+      return { character, targetChat, chats, source, characterIndex, chatIndex, refreshError };
+    };
+
+    const recordNativeCopyCheck = (value = {}) => {
+      const check = { at: Date.now(), ...clone(value) };
+      state.lastNativeCopyCheck = check;
+      Runtime.lastNativeChatCopyCheck = clone(check);
+      return check;
+    };
+
+    const locateNativeChatCopySource = async context => {
+      const targetScope = context?.scope;
+      if (!targetScope?.chatId) return null;
+      const chatSnapshot = await nativeCopyChatListSnapshot(context);
+      const targetChat = chatSnapshot.targetChat || context?.chat;
+      const character = chatSnapshot.character || context?.character;
+      const chats = Array.isArray(chatSnapshot.chats) ? chatSnapshot.chats : [];
+      if (!targetChat || !character || !chats.length) {
+        recordNativeCopyCheck({
+          phase: 'locate', reason: 'character_chat_list_unavailable', targetChatId: targetScope.chatId,
+          chatListSource: chatSnapshot.source, chatCount: chats.length, refreshError: chatSnapshot.refreshError || ''
+        });
+        return null;
+      }
+      const bridgeState = nativeCopyBridgeMarkerState(targetChat, targetScope.chatId);
+      if (bridgeState.valid) {
+        recordNativeCopyCheck({ phase: 'locate', reason: 'session_handoff_target', targetChatId: targetScope.chatId, chatListSource: chatSnapshot.source, chatCount: chats.length });
+        return { blocked: true, reason: 'session_handoff_target' };
+      }
+      const ignoreExplicit = bridgeState.present && bridgeState.stale;
+      const explicitId = ignoreExplicit ? '' : nativeCopyExplicitSourceChatId(targetChat);
+      const branchId = nativeCopyBranchSourceChatId(targetChat);
+      const targetTitle = nativeCopyTitleInfo(firstFilled(targetChat?.name, targetChat?.title, targetChat?.chatName, targetChat?.filename, targetScope.chatId));
+      const targetPairCount = buildPairs(targetChat).length;
+      const allowTranscriptFallback = !explicitId && !branchId && !targetTitle.marked && targetPairCount >= BATCH_SIZE;
+
+      const candidates = [];
+      for (let index = 0; index < chats.length; index += 1) {
+        const candidateChat = chats[index];
+        if (!candidateChat || candidateChat === targetChat) continue;
+        const candidateChatId = contextId(candidateChat, '');
+        if (!candidateChatId || candidateChatId === targetScope.chatId) continue;
+        const explicit = !!explicitId && candidateChatId === explicitId;
+        const branch = !!branchId && candidateChatId === branchId;
+        const candidateTitle = nativeCopyTitleInfo(firstFilled(candidateChat?.name, candidateChat?.title, candidateChat?.chatName, candidateChat?.filename, candidateChatId));
+        const immediateTitle = !!targetTitle.parent && candidateTitle.raw.toLowerCase() === targetTitle.parent.toLowerCase();
+        const baseTitle = !!targetTitle.base && candidateTitle.base === targetTitle.base;
+        const shared = nativeCopySharedPrefixPairs(candidateChat, targetChat);
+        const titleDetected = targetTitle.marked && baseTitle;
+        const transcriptDetected = allowTranscriptFallback
+          && shared.leftCount >= BATCH_SIZE
+          && shared.leftCount <= shared.rightCount
+          && shared.common === shared.leftCount;
+        if (!explicit && !branch && !titleDetected && !transcriptDetected) continue;
+        if (!explicit && !branch && titleDetected && !shared.prefixCompatible && !(immediateTitle && shared.leftCount === 0 && shared.rightCount === 0)) continue;
+        const stored = await findStoredScopeForChat(targetScope.characterId, candidateChatId);
+        if (!stored?.manifest || !nativeCopyManifestHasData(stored.manifest)) continue;
+        const dataWeight = listCurrentMemoryRefs(stored.manifest).length * 4
+          + listInheritedMemoryRefs(stored.manifest).length * 2
+          + Math.min(8, asArray(stored.manifest.worldAdditionalIds).length);
+        const reason = explicit ? 'explicit_copy_source'
+          : branch ? 'risu_branch_marker'
+            : titleDetected ? 'risu_native_chat_copy_title'
+              : 'risu_native_chat_copy_transcript';
+        const priority = explicit ? 1000 : branch ? 900 : immediateTitle ? 650 : titleDetected ? 550 : 400;
+        candidates.push({
+          chat: candidateChat, chatId: candidateChatId, scope: stored.scope, manifest: stored.manifest,
+          reason, priority, dataWeight, sharedPairs: shared.common,
+          updatedAt: Date.parse(string(stored.manifest.updatedAt || '')) || 0, chatIndex: index
+        });
+      }
+      candidates.sort((a, b) => b.priority - a.priority
+        || b.sharedPairs - a.sharedPairs
+        || b.dataWeight - a.dataWeight
+        || b.updatedAt - a.updatedAt
+        || b.chatIndex - a.chatIndex);
+      const selected = candidates[0] || null;
+      recordNativeCopyCheck({
+        phase: 'locate',
+        reason: selected ? selected.reason : 'copy_source_not_found',
+        targetChatId: targetScope.chatId,
+        targetTitle: targetTitle.raw,
+        targetTitleMarked: targetTitle.marked,
+        targetPairCount,
+        explicitSourceChatId: explicitId || '',
+        branchSourceChatId: branchId || '',
+        transcriptFallback: allowTranscriptFallback,
+        chatListSource: chatSnapshot.source,
+        chatCount: chats.length,
+        refreshError: chatSnapshot.refreshError || '',
+        candidateCount: candidates.length,
+        selectedSourceChatId: selected?.chatId || '',
+        selectedSourceScopeKey: selected?.scope?.scopeKey || '',
+        selectedSharedPairs: Number(selected?.sharedPairs || 0)
+      });
+      return selected;
+    };
+
+    const cloneNativeCopyVectorForMemory = async (sourceMemory, targetMemory, targetScope, vectorKeyFactory, writtenKeys) => {
+      const embedding = asObject(sourceMemory?.embedding);
+      if (embedding.status !== 'ready' || !embedding.vectorKey) return targetMemory;
+      const sourceVector = await storage.getJson(string(embedding.vectorKey), null);
+      if (!sourceVector) {
+        targetMemory.embedding = {
+          ...embedding, status: 'retry_pending', vectorKey: '', vectorCount: 0,
+          reason: 'native_chat_copy_source_vector_missing', copiedAt: nowIso()
+        };
+        return targetMemory;
+      }
+      const profileId = string(sourceVector.profileId || embedding.profileId || 'profile');
+      const targetVectorKey = vectorKeyFactory(profileId);
+      const vector = {
+        ...clone(sourceVector), scopeKey: targetScope.scopeKey, memoryId: targetMemory.memoryId,
+        revision: Number(targetMemory.revision || 0), createdAt: nowIso(), nativeCopiedFromVectorKey: string(embedding.vectorKey)
+      };
+      await storage.setJson(targetVectorKey, vector);
+      writtenKeys.push(targetVectorKey);
+      targetMemory.embedding = { ...embedding, vectorKey: targetVectorKey, copiedAt: nowIso() };
+      return targetMemory;
+    };
+
+    const cloneNativeCopyMemoryRecord = async (sourceMemory, targetScope, memoryKey, vectorKeyFactory, sourceScopeKey, writtenKeys) => {
+      const memory = {
+        ...clone(sourceMemory), scopeKey: targetScope.scopeKey, updatedAt: nowIso(),
+        nativeCopiedFromScopeKey: string(sourceScopeKey), nativeCopiedAt: nowIso()
+      };
+      await cloneNativeCopyVectorForMemory(sourceMemory, memory, targetScope, vectorKeyFactory, writtenKeys);
+      await storage.setJson(memoryKey, memory);
+      writtenKeys.push(memoryKey);
+      return memory;
+    };
+
+    const cloneNativeChatCopyStorage = async (context, sourceCandidate) => {
+      const targetScope = context.scope;
+      const targetPairs = buildPairs(context.chat);
+      const sourceScope = sourceCandidate.scope;
+      const sourceManifest = await loadManifest(sourceScope, buildPairs(sourceCandidate.chat).length);
+      const targetLoaded = await storage.getJson(key.manifest(targetScope), null);
+      const targetManifest = targetLoaded ? await loadManifest(targetScope, targetPairs.length) : defaultManifest(targetScope, targetPairs.length);
+      if (nativeCopyManifestHasData(targetManifest)) return { ok: false, skipped: true, reason: 'target_not_empty' };
+      if (targetManifest.inFlight?.runId) return { ok: false, skipped: true, reason: 'target_in_flight' };
+
+      const writtenKeys = [];
+      const clonedMemoryIds = new Set();
+      const clonedRunIds = new Set();
+      const copiedMemories = {};
+      const copiedInherited = [];
+      let vectorCount = 0;
+      try {
+        for (const [slot, sourceRef] of Object.entries(asObject(sourceManifest.memories))) {
+          if (sourceRef?.status !== 'committed' || !sourceRef?.key) continue;
+          const startTurn = Number(sourceRef?.turnRange?.start || slot || 0);
+          const targetBatch = startTurn > 0 ? batchForStart(targetPairs, startTurn) : [];
+          if (targetBatch.length !== BATCH_SIZE) continue;
+          const targetDigest = sourceDigest(targetBatch);
+          if (!targetDigest || string(sourceRef.sourceDigest || '') !== targetDigest) continue;
+          const sourceMemory = await storage.getJson(sourceRef.key, null);
+          if (!sourceMemory || sourceMemory.status !== 'committed' || string(sourceMemory.sourceDigest || '') !== targetDigest) continue;
+          const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
+          const memoryKey = key.memory(targetScope, startTurn, revision);
+          const history = [];
+          for (const old of asArray(sourceRef.history).slice(-12)) {
+            if (!old?.key) continue;
+            const oldMemory = await storage.getJson(old.key, null);
+            if (!oldMemory) continue;
+            const oldRevision = Number(oldMemory.revision || old.revision || 0);
+            if (!oldRevision || oldRevision === revision) continue;
+            const oldKey = key.memory(targetScope, startTurn, oldRevision);
+            const oldClone = await cloneNativeCopyMemoryRecord(
+              oldMemory, targetScope, oldKey,
+              profileId => key.vector(targetScope, oldMemory.memoryId, oldRevision, profileId),
+              sourceScope.scopeKey, writtenKeys
+            );
+            if (oldClone.embedding?.vectorKey) vectorCount += 1;
+            history.push({ ...clone(old), key: oldKey });
+          }
+          const memory = await cloneNativeCopyMemoryRecord(
+            sourceMemory, targetScope, memoryKey,
+            profileId => key.vector(targetScope, sourceMemory.memoryId, revision, profileId),
+            sourceScope.scopeKey, writtenKeys
+          );
+          if (memory.embedding?.vectorKey) vectorCount += 1;
+          const targetRef = {
+            ...clone(sourceRef),
+            ...memoryRefFromStoredMemory(memory, memoryKey, history, sourceRef.createdAt || memory.createdAt || ''),
+            key: memoryKey, history, status: 'committed', nativeCopiedFromScopeKey: sourceScope.scopeKey
+          };
+          copiedMemories[String(startTurn)] = targetRef;
+          clonedMemoryIds.add(string(memory.memoryId));
+          if (memory.runId) clonedRunIds.add(string(memory.runId));
+        }
+
+        const copyTransferId = `nativecopy_${stableDraftHash(`${sourceScope.scopeKey}|${targetScope.scopeKey}`)}`;
+        for (let index = 0; index < listInheritedMemoryRefs(sourceManifest).length; index += 1) {
+          const sourceRef = listInheritedMemoryRefs(sourceManifest)[index];
+          const sourceMemory = await storage.getJson(sourceRef.key, null);
+          if (!sourceMemory || sourceMemory.status !== 'committed') continue;
+          const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
+          const memoryId = string(sourceMemory.memoryId || sourceRef.memoryId || `prev_${index + 1}`);
+          const memoryKey = key.predecessorMemory(targetScope, copyTransferId, index + 1, memoryId, revision);
+          const memory = await cloneNativeCopyMemoryRecord(
+            sourceMemory, targetScope, memoryKey,
+            profileId => key.predecessorVector(targetScope, copyTransferId, index + 1, memoryId, revision, profileId),
+            sourceScope.scopeKey, writtenKeys
+          );
+          if (memory.embedding?.vectorKey) vectorCount += 1;
+          copiedInherited.push({
+            ...clone(sourceRef),
+            ...memoryRefFromStoredMemory(memory, memoryKey, [], sourceRef.createdAt || memory.createdAt || ''),
+            key: memoryKey, status: 'committed', inheritedSessionHistory: true,
+            authorityClass: string(sourceRef.authorityClass || memory.authorityClass || 'permanent_predecessor'),
+            handoffTransferId: string(sourceRef.handoffTransferId || memory.handoffTransferId || ''),
+            sourceSessionChatId: string(sourceRef.sourceSessionChatId || memory.sourceSessionChatId || ''),
+            sourceSessionScopeKey: string(sourceRef.sourceSessionScopeKey || memory.sourceSessionScopeKey || ''),
+            nativeCopiedFromScopeKey: sourceScope.scopeKey
+          });
+          clonedMemoryIds.add(memoryId);
+          if (memory.runId) clonedRunIds.add(string(memory.runId));
+        }
+
+        const copiedWorldIds = [];
+        for (const itemId of asArray(sourceManifest.worldAdditionalIds)) {
+          const sourceItem = await loadWorldItem(sourceScope, itemId);
+          if (!sourceItem) continue;
+          if (sourceItem.sourceRunId && !clonedRunIds.has(string(sourceItem.sourceRunId))) continue;
+          if (sourceItem.sourceMemoryId && !clonedMemoryIds.has(string(sourceItem.sourceMemoryId))) continue;
+          const item = {
+            ...clone(sourceItem), scopeKey: targetScope.scopeKey, updatedAt: nowIso(),
+            nativeCopiedFromScopeKey: sourceScope.scopeKey, nativeCopiedAt: nowIso()
+          };
+          const targetItemId = string(item.itemId || itemId);
+          if (!targetItemId) continue;
+          await storage.setJson(key.worldAdditional(targetScope, targetItemId), item);
+          writtenKeys.push(key.worldAdditional(targetScope, targetItemId));
+          copiedWorldIds.push(targetItemId);
+        }
+
+        const copiedCurrentRefs = Object.values(copiedMemories);
+        if (!copiedCurrentRefs.length && !copiedInherited.length && !copiedWorldIds.length) {
+          for (const storageKey of writtenKeys.reverse()) {
+            try { await storage.remove(storageKey); } catch (_) {}
+          }
+          return { ok: false, skipped: true, reason: 'source_has_no_target_valid_records' };
+        }
+        const committedTurn = Math.max(0, ...copiedCurrentRefs.map(ref => Number(ref.turnRange?.end || 0)));
+        const copiedAt = nowIso();
+        const manifest = {
+          ...targetManifest,
+          scopeKey: targetScope.scopeKey, characterId: targetScope.characterId, chatId: targetScope.chatId,
+          frontiers: { observedTurn: targetPairs.length, committedTurn },
+          memories: copiedMemories, inheritedMemories: copiedInherited,
+          worldAdditionalIds: copiedWorldIds, inFlight: null,
+          stats: {
+            ...defaultManifest(targetScope, targetPairs.length).stats,
+            ...asObject(targetManifest.stats),
+            nativeCopyImports: Number(targetManifest.stats?.nativeCopyImports || 0) + 1
+          },
+          nativeChatCopy: {
+            schema: NATIVE_CHAT_COPY_SCHEMA, complete: true, reason: sourceCandidate.reason,
+            sourceChatId: sourceScope.chatId, sourceScopeKey: sourceScope.scopeKey,
+            targetChatId: targetScope.chatId, targetScopeKey: targetScope.scopeKey,
+            memories: copiedCurrentRefs.length, inheritedMemories: copiedInherited.length,
+            vectors: vectorCount, worldAdditional: copiedWorldIds.length, copiedAt
+          },
+          updatedAt: copiedAt
+        };
+        await saveManifest(targetScope, manifest);
+        const persistedManifest = await storage.getJson(key.manifest(targetScope), null);
+        if (persistedManifest?.nativeChatCopy?.schema !== NATIVE_CHAT_COPY_SCHEMA
+          || persistedManifest?.nativeChatCopy?.complete !== true
+          || string(persistedManifest?.nativeChatCopy?.sourceScopeKey) !== string(sourceScope.scopeKey)
+          || string(persistedManifest?.nativeChatCopy?.targetScopeKey) !== string(targetScope.scopeKey)) {
+          throw new Error('LIBRA native chat-copy manifest durable readback failed.');
+        }
+        for (const startTurn of Object.keys(copiedMemories).map(Number).filter(Number.isFinite)) {
+          try { await storage.remove(key.work(targetScope, startTurn)); } catch (_) {}
+        }
+        state.recallCatalogCache.delete(string(targetScope.scopeKey));
+        state.lastNativeCopy = clone(manifest.nativeChatCopy);
+        Runtime.lastNativeChatCopy = clone(manifest.nativeChatCopy);
+        return { ok: true, skipped: false, ...clone(manifest.nativeChatCopy) };
+      } catch (error) {
+        try {
+          if (targetLoaded) await storage.setJson(key.manifest(targetScope), targetLoaded);
+          else await storage.remove(key.manifest(targetScope));
+        } catch (_) {}
+        for (const storageKey of writtenKeys.reverse()) {
+          try { await storage.remove(storageKey); } catch (_) {}
+        }
+        throw error;
+      }
+    };
+
+    const ensureNativeChatCopyAdopted = async (context, options = {}) => {
+      if (!context?.scope?.scopeKey || state.disposed) return { ok: false, skipped: true, reason: 'context_unavailable' };
+      const scopeKey = string(context.scope.scopeKey);
+      const now = Date.now();
+      const cached = state.nativeCopyChecks.get(scopeKey);
+      if (options.force !== true && cached && Number(cached.expiresAt || 0) > now) return clone(cached.result);
+      if (state.nativeCopyInFlight.has(scopeKey)) return await state.nativeCopyInFlight.get(scopeKey);
+      const task = (async () => {
+        if (await nativeCopySuppressedForScope(context.scope)) {
+          return { ok: false, skipped: true, reason: 'native_copy_suppressed' };
+        }
+        const existing = await storage.getJson(key.manifest(context.scope), null);
+        if (existing?.nativeChatCopy?.complete === true || nativeCopyManifestHasData(existing)) {
+          return { ok: true, skipped: true, reason: 'target_already_initialized', nativeChatCopy: clone(existing?.nativeChatCopy || null) };
+        }
+        if (existing?.inFlight?.runId) return { ok: false, skipped: true, reason: 'target_in_flight' };
+        const source = await locateNativeChatCopySource(context);
+        if (source?.blocked) return { ok: false, skipped: true, reason: source.reason };
+        if (!source?.scope) return { ok: false, skipped: true, reason: 'copy_source_not_found' };
+        return await cloneNativeChatCopyStorage(context, source);
+      })().then(result => {
+        recordNativeCopyCheck({
+          ...asObject(state.lastNativeCopyCheck),
+          phase: 'ensure',
+          result: clone(result),
+          reason: string(result?.reason || state.lastNativeCopyCheck?.reason || ''),
+          targetChatId: string(context?.scope?.chatId || state.lastNativeCopyCheck?.targetChatId || ''),
+          targetScopeKey: string(context?.scope?.scopeKey || '')
+        });
+        const positive = result?.ok === true || ['target_already_initialized', 'native_copy_suppressed', 'session_handoff_target'].includes(result?.reason);
+        state.nativeCopyChecks.set(scopeKey, {
+          expiresAt: Date.now() + (positive ? NATIVE_CHAT_COPY_POSITIVE_TTL_MS : NATIVE_CHAT_COPY_NEGATIVE_TTL_MS),
+          result: clone(result)
+        });
+        return result;
+      }).finally(() => {
+        state.nativeCopyInFlight.delete(scopeKey);
+      });
+      state.nativeCopyInFlight.set(scopeKey, task);
+      return await task;
+    };
+
     const loadMemoryRef = async ref => ref?.key ? await storage.getJson(ref.key, null) : null;
     const removeMemoryRecord = async ref => {
       if (!ref?.key) return false;
@@ -26466,8 +26869,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const verifyBatchStillCurrent = async (expectedContext, startTurn, expectedDigest) => {
+      if (state.disposed) return { ok: false, reason: 'runtime_disposed', currentDigest: '', liveContext: null };
       try {
         const liveContext = await resolveContext();
+        if (state.disposed) return { ok: false, reason: 'runtime_disposed', currentDigest: '', liveContext };
         if (liveContext.scope.scopeKey !== expectedContext.scope.scopeKey) {
           return { ok: false, reason: 'scope_changed', currentDigest: '', liveContext };
         }
@@ -28375,6 +28780,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     });
 
     const processBatch = async (context, manifest, pairs, startTurn, options = {}) => {
+      const disposedResult = () => ({
+        staleDiscarded: true,
+        runtimeDisposed: true,
+        startTurn,
+        reason: 'runtime_disposed'
+      });
+      if (state.disposed) return disposedResult();
       const batch = batchForStart(pairs, startTurn);
       if (batch.length !== BATCH_SIZE) return null;
       const sourceHash = sourceDigest(batch);
@@ -28384,6 +28796,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const revision = Math.max(1, Number(activeRef?.revision || 0) + 1);
       const workKey = key.work(context.scope, startTurn);
       let work = await storage.getJson(workKey, null);
+      if (state.disposed) return disposedResult();
       if (!work || work.schema !== WORK_SCHEMA || work.sourceDigest !== sourceHash || Number(work.revision) !== revision) {
         const run = runRecord({ scope: context.scope, startTurn, batch, sourceHash, revision });
         work = {
@@ -28394,15 +28807,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           createdAt: nowIso(), updatedAt: nowIso()
         };
         await storage.setJson(key.run(context.scope, run.runId), run);
+        if (state.disposed) return disposedResult();
         await storage.setJson(workKey, work);
+        if (state.disposed) return disposedResult();
       }
 
       let run = await loadRun(context.scope, work.runId);
+      if (state.disposed) return disposedResult();
       if (!run) {
         run = runRecord({ scope: context.scope, startTurn, batch, sourceHash, revision });
         work.runId = run.runId;
       }
       await updateManifestRunIds(context.scope, manifest, run.runId, await loadMemorySettings());
+      if (state.disposed) return disposedResult();
       manifest.inFlight = {
         startTurn, endTurn: startTurn + BATCH_SIZE - 1, runId: run.runId,
         stage: STAGE_ORDER[work.stageIndex] || 'commit', sourceDigest: sourceHash,
@@ -28422,6 +28839,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             startIndex: Number(work.stageIndex || 0),
             currentStage,
             onStageStart: async ({ stageName }) => {
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               const label = STAGE_LABELS[stageName];
               await updatePipelineWorkPanel(`${label}가 TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 메모리를 처리하고 있습니다…`, `libra_${stageName}`, {
                 busy: true, source: 'libra_memory', currentStage: stageName,
@@ -28429,6 +28847,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               });
             },
             onStageComplete: async ({ index, outcome, currentStage: completedStage }) => {
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               work.currentDraft = stageDraft(completedStage);
               work.stageObjects[index] = clone(completedStage);
               work.failedStages = asArray(work.failedStages).filter(item => item?.stage !== STAGE_ORDER[index]);
@@ -28438,11 +28857,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               run.stages[index] = clone(outcome.receipt);
               run.status = 'running';
               await storage.setJson(workKey, work);
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               await storage.setJson(key.run(context.scope, run.runId), run);
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               manifest.inFlight.stage = STAGE_ORDER[index + 1] || 'commit';
               await saveManifest(context.scope, manifest);
             },
             onStageFailure: async ({ index, stageName, failure, currentStage: preservedStage }) => {
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               const message = compact(failure?.message || `${STAGE_LABELS[stageName] || stageName} failed`, 700);
               work.currentDraft = stageDraft(preservedStage) || work.currentDraft;
               work.stageIndex = index + 1;
@@ -28459,13 +28881,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               run.errors.push({ stage: stageName, message, at: nowIso(), optional: true });
               manifest.stats.itoFailures = Number(manifest.stats.itoFailures || 0) + 1;
               await storage.setJson(workKey, work);
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               await storage.setJson(key.run(context.scope, run.runId), run);
+              if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
               manifest.inFlight.stage = STAGE_ORDER[index + 1] || 'commit';
               manifest.inFlight.status = 'running_with_warnings';
               delete manifest.inFlight.error;
               await saveManifest(context.scope, manifest);
             }
           });
+        if (state.disposed) return disposedResult();
         currentStage = pipelineResult?.currentStage || pipelineResult?.stages?.at?.(-1) || currentStage;
         const failedItoStages = asArray(work.failedStages)
           .filter(item => item?.stage && item.stage !== 'ariadne')
@@ -28478,6 +28903,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!finalValidation.valid) throw new Error(`최종 메모리 검증 실패: ${finalValidation.errors.join(',')}`);
         const preCommitVerification = await verifyBatchStillCurrent(context, startTurn, sourceHash);
         if (!preCommitVerification.ok) {
+          if (preCommitVerification.reason === 'runtime_disposed') return disposedResult();
           return await discardStaleBatchBuild({ context, manifest, work, run, workKey, startTurn, sourceHash, revision, verification: preCommitVerification });
         }
         const previousMemory = activeRef?.key ? await loadMemoryRef(activeRef) : null;
@@ -28524,6 +28950,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
         const finalCommitVerification = await verifyBatchStillCurrent(context, startTurn, sourceHash);
         if (!finalCommitVerification.ok) {
+          if (finalCommitVerification.reason === 'runtime_disposed') {
+            const provisionalVectorKey = string(memory?.embedding?.vectorKey || '');
+            if (provisionalVectorKey) { try { await storage.remove(provisionalVectorKey); } catch (_) {} }
+            return disposedResult();
+          }
           return await discardStaleBatchBuild({
             context, manifest, work, run, workKey, startTurn, sourceHash, revision,
             verification: finalCommitVerification,
@@ -28533,6 +28964,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
         const memoryKey = key.memory(context.scope, startTurn, revision);
         await storage.setJson(memoryKey, memory);
+        if (state.disposed) {
+          try { await storage.remove(memoryKey); } catch (_) {}
+          const provisionalVectorKey = string(memory?.embedding?.vectorKey || '');
+          if (provisionalVectorKey) { try { await storage.remove(provisionalVectorKey); } catch (_) {} }
+          return disposedResult();
+        }
         const previousHistory = asArray(activeRef?.history);
         const history = activeRef?.key
           ? [...previousHistory, { key: activeRef.key, revision: activeRef.revision, sourceDigest: activeRef.sourceDigest, status: 'inactive', supersededAt: nowIso() }]
@@ -28589,6 +29026,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         scheduleGuiTraceRefresh();
         return memory;
       } catch (error) {
+        if (state.disposed) return disposedResult();
         const stageName = STAGE_ORDER[Number(work.stageIndex || 0)] || manifest.inFlight?.stage || 'unknown';
         work.status = 'failed';
         work.lastError = compact(error?.message || error, 700);
@@ -28622,15 +29060,26 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       try {
         const oldVectorKey = string(memory.embedding?.vectorKey || '');
         memory.embedding = await embedMemory(context.scope, memory, memory);
-        if (oldVectorKey && memory.embedding?.vectorKey && oldVectorKey !== memory.embedding.vectorKey) await storage.remove(oldVectorKey);
+        if (state.disposed) {
+          const provisionalVectorKey = string(memory.embedding?.vectorKey || '');
+          if (provisionalVectorKey && provisionalVectorKey !== oldVectorKey) {
+            try { await storage.remove(provisionalVectorKey); } catch (_) {}
+          }
+          return memory;
+        }
         await storage.setJson(ref.key, memory);
+        if (state.disposed) return memory;
         ref.embeddingStatus = memory.embedding.status;
         ref.retrievalVersion = memory.embedding?.projectionVersion || memory.retrieval?.version || RETRIEVAL_PROJECTION_VERSION;
         ref.vectorCount = Number(memory.embedding?.vectorCount || 0);
         ref.updatedAt = nowIso();
         manifest.stats.embeddings += memory.embedding.status === 'ready' ? 1 : 0;
         await saveManifest(context.scope, manifest);
+        if (!state.disposed && oldVectorKey && memory.embedding?.vectorKey && oldVectorKey !== memory.embedding.vectorKey) {
+          await storage.remove(oldVectorKey);
+        }
       } catch (error) {
+        if (state.disposed) return memory;
         memory.embedding = { status: 'retry_pending', reason: compact(error?.message || error, 500), projectionVersion: RETRIEVAL_PROJECTION_VERSION };
         await storage.setJson(ref.key, memory);
       }
@@ -28647,12 +29096,35 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const scan = async (options = {}) => {
+      if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
       const settings = await loadMemorySettings();
       if (settings.enabled === false) return { ok: true, skipped: true, reason: 'disabled' };
-      const context = await resolveContext();
+      if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
+      let context;
+      try {
+        context = await resolveContext();
+      } catch (error) {
+        if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
+        throw error;
+      }
+      const expectedScope = asObject(options.expectedScope);
+      if (string(expectedScope.scopeKey) && (
+        string(expectedScope.scopeKey) !== string(context.scope.scopeKey)
+        || (string(expectedScope.characterId) && string(expectedScope.characterId) !== string(context.scope.characterId))
+        || (string(expectedScope.chatId) && string(expectedScope.chatId) !== string(context.scope.chatId))
+      )) {
+        return { ok: true, skipped: true, reason: 'scope_changed_before_scan' };
+      }
+      if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
+      if (state.deletingScopes.has(context.scope.scopeKey)) return { ok: true, skipped: true, reason: 'scope_deleting' };
+      await ensureNativeChatCopyAdopted(context);
+      if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
       return await enqueue(context.scope.scopeKey, async () => {
+        if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
+        if (state.deletingScopes.has(context.scope.scopeKey)) return { ok: true, skipped: true, reason: 'scope_deleting' };
         const pairs = buildPairs(context.chat);
         const manifest = await loadManifest(context.scope, pairs.length);
+        if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
         const starts = completeBatchStarts(pairs);
         const scanMode = string(options.mode || options.reason || 'live').toLowerCase();
         const allowHistoricalBackfill = options.allowHistoricalBackfill === true
@@ -28685,6 +29157,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         });
 
         for (const startTurn of eligibleStarts) {
+          if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
           const batch = batchForStart(pairs, startTurn);
           const sourceHash = sourceDigest(batch);
           const ref = memoryRefForStart(manifest, startTurn);
@@ -28700,6 +29173,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           }
           try {
             const committedMemory = await processBatch(context, manifest, pairs, startTurn, { ...options, mode: scanMode });
+            if (committedMemory?.runtimeDisposed || state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
             if (committedMemory?.staleDiscarded) {
               staleDiscarded += 1;
               continue;
@@ -28709,6 +29183,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               if (committedMemory?.pipeline?.status === 'partial') partialCommitted += 1;
             }
           } catch (error) {
+            if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
             const failed = {
               startTurn, endTurn: startTurn + BATCH_SIZE - 1,
               message: compact(error?.message || error, 700), at: nowIso()
@@ -28728,10 +29203,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           if (Number(options.maxBatches || 0) > 0 && processed >= Number(options.maxBatches)) break;
         }
 
+        if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
         manifest.frontiers.observedTurn = pairs.length;
         manifest.frontiers.committedTurn = Math.max(0, ...Object.values(manifest.memories).filter(ref => ref?.status === 'committed').map(ref => Number(ref.turnRange?.end || 0)));
         await saveManifest(context.scope, manifest);
-        await refreshSnapshot(context);
+        await refreshSnapshot(context, {
+          cloneResult: false,
+          suppressGuiSchedule: options.suppressGuiSchedule === true,
+          limits: options.snapshotLimits || state.guiSnapshotLimits || LIBRA_SNAPSHOT_PAGE_LIMITS
+        });
         return {
           ok: failedBatches.length === 0, processed, partialCommitted, staleDiscarded, failed: failedBatches.length, failedBatches,
           observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn,
@@ -28742,14 +29222,31 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const scheduleScan = (options = {}) => {
       if (state.disposed) return false;
+      const scheduledOptions = { ...options };
+      const scheduleSerial = ++state.scheduledScanSerial;
       const timerKey = 'current';
       const existing = state.timers.get(timerKey);
-      if (existing) clearTimeout(existing);
-      const timer = setTimeout(() => {
+      if (existing) {
+        clearTimeout(existing);
         state.timers.delete(timerKey);
-        void scan(options).catch(error => warn('LIBRA scheduled memory scan failed', error));
-      }, Math.max(40, Number(options.delay || 100)));
-      state.timers.set(timerKey, timer);
+      }
+      // Capture the current owner scope when the event arrives. The timer later resolves
+      // the live context again and scan() fails closed if the user changed chats.
+      void resolveContext().then(context => {
+        if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+        const delay = clamp(scheduledOptions.delay, 40, 60000, 100);
+        const timer = setTimeout(() => {
+          if (state.timers.get(timerKey) === timer) state.timers.delete(timerKey);
+          if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+          void scan({ ...scheduledOptions, expectedScope: clone(context.scope) })
+            .catch(error => warn('LIBRA scheduled memory scan failed', error));
+        }, delay);
+        state.timers.set(timerKey, timer);
+      }).catch(error => {
+        if (!state.disposed && scheduleSerial === state.scheduledScanSerial) {
+          warn('LIBRA scheduled memory scan context capture failed', error);
+        }
+      });
       return true;
     };
 
@@ -28907,10 +29404,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       ].join('\n') : '';
       const sceneText = compact(Array.from(new Set([lastPairText, visibleTail].filter(Boolean))).join('\n\n'), 5200);
       const explicitShift = /(?:한편|다른 이야기|주제를 바꿔|시간을 돌려|몇 년 전|완전히 다른|meanwhile|different topic|change the subject|years? ago|flashback|一方|別の話)/i.test(currentText);
-      const continuationCue = /(?:그래서|그다음|계속|이어|아까|방금|그녀|그 사람|그것|그곳|then|continue|after that|what next|それで|続)/i.test(currentText);
+      const sceneReferenceCue = /(?:그래서|그다음|계속|이어|아까|방금|그녀|그 사람|그것|그곳|then|continue|after that|what next|それで|続)/i.test(currentText);
       let sceneWeight = 0;
       if (!explicitShift && sceneText) {
-        if (currentText.length <= 36 || continuationCue) sceneWeight = 0.55;
+        if (currentText.length <= 36 || sceneReferenceCue) sceneWeight = 0.55;
         else if (currentText.length <= 120) sceneWeight = 0.35;
         else sceneWeight = 0.15;
       }
@@ -29671,6 +30168,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!isMainNarrativeRequest(type) || (await loadMemorySettings()).enabled === false) return messages;
         if ((Array.isArray(messages) ? messages : []).some(item => contentToText(item?.content ?? item?.data ?? '').includes(MEMORY_INJECTION_MARKER))) return messages;
         const context = await resolveContext();
+        await ensureNativeChatCopyAdopted(context);
         const settings = await loadMemorySettings();
         // Branch guard runs before recall so a rollback cannot inject future memories and
         // a reroll cannot feed the discarded assistant branch into its replacement.
@@ -29706,47 +30204,124 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return response;
     };
 
-    const refreshSnapshot = async suppliedContext => {
+    const sameSnapshotScope = (left, right) => !!left && !!right
+      && string(left.scopeKey || '') === string(right.scopeKey || '')
+      && string(left.characterId || '') === string(right.characterId || '')
+      && string(left.chatId || '') === string(right.chatId || '');
+
+    const refreshSnapshot = async (suppliedContext, options = {}) => {
+      const refreshSerial = ++state.snapshotRefreshSerial;
+      let context = suppliedContext || null;
       try {
-        const context = suppliedContext || await resolveContext();
+        context = context || await resolveContext();
+        if (options.skipNativeCopyAdoption !== true) {
+          try { await ensureNativeChatCopyAdopted(context); }
+          catch (error) {
+            recordNativeCopyCheck({
+              phase: 'snapshot', reason: 'native_copy_adoption_failed', targetChatId: string(context?.scope?.chatId || ''),
+              targetScopeKey: string(context?.scope?.scopeKey || ''), error: compact(error?.message || error, 500)
+            });
+            warn('LIBRA native chat-copy adoption failed during snapshot refresh.', error);
+          }
+        }
         const pairs = buildPairs(context.chat);
         const manifest = await loadManifest(context.scope, pairs.length);
-        const memories = [];
-        for (const ref of listMemoryRefs(manifest)) {
-          const memory = await loadMemoryRef(ref);
-          if (memory) memories.push(memory);
-        }
-        const runs = [];
         const detailLimit = (await loadMemorySettings()).runDetailRetention;
-        for (const runId of manifest.runIds.slice(0, detailLimit)) {
-          const run = await loadRun(context.scope, runId);
-          if (run) runs.push(run);
+        const memoryRefs = listMemoryRefs(manifest);
+        const runIds = manifest.runIds.slice(0, detailLimit);
+        const worldAdditionalIds = manifest.worldAdditionalIds.slice();
+        const requestedLimits = asObject(options.limits);
+        const limitFor = (name, total) => {
+          if (!Object.prototype.hasOwnProperty.call(requestedLimits, name)) return total;
+          const value = Number(requestedLimits[name]);
+          return Number.isFinite(value) ? Math.max(0, Math.min(total, Math.floor(value))) : total;
+        };
+        const memoryLimit = limitFor('memories', memoryRefs.length);
+        const runLimit = limitFor('runs', runIds.length);
+        const worldAdditionalLimit = limitFor('worldAdditional', worldAdditionalIds.length);
+        const selectedMemoryRefs = memoryRefs.slice(Math.max(0, memoryRefs.length - memoryLimit));
+        const selectedRunIds = runIds.slice(0, runLimit);
+        const selectedWorldAdditionalIds = worldAdditionalIds.slice(Math.max(0, worldAdditionalIds.length - worldAdditionalLimit));
+        const tasks = [
+          ...selectedMemoryRefs.map((value, index) => ({ kind: 'memory', index, value })),
+          ...selectedRunIds.map((value, index) => ({ kind: 'run', index, value })),
+          ...selectedWorldAdditionalIds.map((value, index) => ({ kind: 'world', index, value }))
+        ];
+        const loaded = await mapWithConcurrency(tasks, async task => {
+          if (task.kind === 'memory') return { ...task, record: await loadMemoryRef(task.value) };
+          if (task.kind === 'run') return { ...task, record: await loadRun(context.scope, task.value) };
+          return { ...task, record: await loadWorldItem(context.scope, task.value) };
+        }, 12);
+        const memorySlots = new Array(selectedMemoryRefs.length);
+        const runSlots = new Array(selectedRunIds.length);
+        const worldSlots = new Array(selectedWorldAdditionalIds.length);
+        for (const item of loaded) {
+          if (!item?.record) continue;
+          if (item.kind === 'memory') memorySlots[item.index] = item.record;
+          else if (item.kind === 'run') runSlots[item.index] = item.record;
+          else worldSlots[item.index] = item.record;
         }
-        const worldAdditional = [];
-        for (const itemId of manifest.worldAdditionalIds) {
-          const item = await loadWorldItem(context.scope, itemId);
-          if (item) worldAdditional.push(item);
-        }
-        state.snapshot = { scope: clone(context.scope), manifest: clone(manifest), pairs: clone(pairs), memories, runs, worldAdditional, refreshedAt: Date.now(), error: '' };
+        const memories = memorySlots.filter(Boolean);
+        const runs = runSlots.filter(Boolean);
+        const worldAdditional = worldSlots.filter(Boolean);
+        const nextSnapshot = {
+          scope: clone(context.scope), manifest: clone(manifest), pairs: clone(pairs), memories, runs, worldAdditional,
+          totals: { memories: memoryRefs.length, runs: runIds.length, worldAdditional: worldAdditionalIds.length },
+          refreshedAt: Date.now(), error: ''
+        };
         await loadEmbeddingRebuildState();
         if (asArray(state.embeddingRebuild?.quarantine).some(item => !item.deletedAt && item.expiresAt && Date.parse(item.expiresAt) <= Date.now())) {
           void cleanupQuarantinedVectors(false).catch(error => warn('LIBRA expired embedding quarantine cleanup failed', error));
         }
-        scheduleGuiTraceRefresh();
-        return clone(state.snapshot);
+        let committed = false;
+        if (refreshSerial === state.snapshotRefreshSerial) {
+          let activeContext = null;
+          try { activeContext = await resolveContext(); } catch (_) {}
+          if (refreshSerial === state.snapshotRefreshSerial && sameSnapshotScope(activeContext?.scope, context.scope)) {
+            state.snapshot = nextSnapshot;
+            if (options.trackGuiLimits === true) {
+              state.guiSnapshotLimits = {
+                memories: Math.max(0, Math.floor(Number(requestedLimits.memories) || LIBRA_SNAPSHOT_PAGE_LIMITS.memories)),
+                runs: Math.max(0, Math.floor(Number(requestedLimits.runs) || LIBRA_SNAPSHOT_PAGE_LIMITS.runs)),
+                worldAdditional: Math.max(0, Math.floor(Number(requestedLimits.worldAdditional) || LIBRA_SNAPSHOT_PAGE_LIMITS.worldAdditional))
+              };
+            }
+            committed = true;
+          }
+        }
+        if (committed && options.suppressGuiSchedule !== true) scheduleGuiTraceRefresh();
+        return options.cloneResult === false ? nextSnapshot : clone(nextSnapshot);
       } catch (error) {
-        state.snapshot = { ...state.snapshot, refreshedAt: Date.now(), error: compact(error?.message || error, 500) };
-        return clone(state.snapshot);
+        const sameScope = context?.scope && sameSnapshotScope(state.snapshot.scope, context.scope);
+        const failedSnapshot = {
+          ...(sameScope ? state.snapshot : {
+            scope: context?.scope ? clone(context.scope) : null,
+            manifest: null, pairs: [], memories: [], runs: [], worldAdditional: [],
+            totals: { memories: 0, runs: 0, worldAdditional: 0 }
+          }),
+          refreshedAt: Date.now(), error: compact(error?.message || error, 500)
+        };
+        let committed = false;
+        if (refreshSerial === state.snapshotRefreshSerial) {
+          let activeContext = null;
+          try { activeContext = await resolveContext(); } catch (_) {}
+          if (!context?.scope || (refreshSerial === state.snapshotRefreshSerial && sameSnapshotScope(activeContext?.scope, context.scope))) {
+            state.snapshot = failedSnapshot;
+            committed = true;
+          }
+        }
+        if (committed && options.suppressGuiSchedule !== true) scheduleGuiTraceRefresh();
+        return options.cloneResult === false ? failedSnapshot : clone(failedSnapshot);
       }
     };
 
     const exportCurrentScope = async () => {
-      await refreshSnapshot();
+      const snapshot = await refreshSnapshot(undefined, { suppressGuiSchedule: true });
       return clone({
         schema: 'libra.scope_export.v1', version: VERSION, exportedAt: nowIso(),
         settings: await loadMemorySettings(), embedding: { ...(await loadEmbeddingSettings()), key: '[REDACTED]' },
         embeddingRebuild: await loadEmbeddingRebuildState(),
-        ...state.snapshot
+        ...snapshot
       });
     };
 
@@ -29786,7 +30361,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       throw lastError || new Error(`대상 채팅 ${string(targetChatId)}을 찾지 못했습니다.`);
     };
 
-    const mapForRetrace = async (items, loader, concurrency = 12) => {
+    const mapWithConcurrency = async (items, loader, concurrency = 12) => {
       const source = asArray(items);
       const width = Math.max(1, Math.min(24, Number(concurrency || 12) || 12));
       const out = new Array(source.length);
@@ -29819,7 +30394,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const pairs = buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
       const memoryRefs = listMemoryRefs(manifest);
-      const loadedMemories = await mapForRetrace(memoryRefs, ref => loadMemoryRef(ref), 12);
+      const loadedMemories = await mapWithConcurrency(memoryRefs, ref => loadMemoryRef(ref), 12);
       const memories = loadedMemories.filter(Boolean);
       const missingMemoryKeys = memoryRefs
         .filter((ref, index) => !loadedMemories[index] && ref?.key)
@@ -29831,11 +30406,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const activeRunIds = new Set(memories
         .filter(memory => memory?.status === 'committed' && memory?.runId)
         .map(memory => string(memory.runId)));
-      const loadedWorldAdditional = await mapForRetrace(
+      const loadedWorldAdditional = await mapWithConcurrency(
         manifest.worldAdditionalIds,
         itemId => loadWorldItem(context.scope, itemId),
         12
       );
+      const missingWorldAdditionalIds = manifest.worldAdditionalIds
+        .filter((itemId, index) => !loadedWorldAdditional[index] && itemId)
+        .map(itemId => string(itemId));
       const worldAdditional = loadedWorldAdditional.filter(item => (
         item && (!item.sourceRunId || activeRunIds.has(string(item.sourceRunId)))
       ));
@@ -29853,7 +30431,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stats: manifest.stats,
           updatedAt: manifest.updatedAt
         },
-        integrity: { ok: missingMemoryKeys.length === 0, missingMemoryKeys },
+        integrity: {
+          ok: missingMemoryKeys.length === 0 && missingWorldAdditionalIds.length === 0,
+          missingMemoryKeys,
+          missingWorldAdditionalIds
+        },
         memories,
         worldAdditional,
         counts: {
@@ -29871,32 +30453,75 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const prefix = `${PREFIX}:handoff:`;
       const now = Date.now();
       for (const storageKey of await storage.keys()) {
-        if (!storageKey.startsWith(prefix)) continue;
+        if (!storageKey.startsWith(prefix) || storageKey.includes('::chunk:v1:')) continue;
         const value = await storage.getJson(storageKey, null);
         const expiresAt = Date.parse(string(value?.expiresAt || '')) || 0;
         if (expiresAt && expiresAt <= now) await storage.remove(storageKey);
       }
     };
 
+    const normalizeHandoffTransferId = value => {
+      const transferId = string(value || '').trim();
+      if (!transferId
+        || transferId.length > 160
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(transferId)
+        || transferId.includes('::')) {
+        throw new Error('LIBRA handoff transferId 형식이 올바르지 않습니다.');
+      }
+      return transferId;
+    };
+
     const prepareSessionHandoff = async (options = {}) => {
-      const transferId = string(options.transferId || id('libra_handoff')).trim();
-      if (!transferId) throw new Error('LIBRA handoff transferId가 비어 있습니다.');
+      const transferId = normalizeHandoffTransferId(options.transferId || id('libra_handoff'));
       await cleanupExpiredHandoffPackages();
       const context = await resolveContext();
       const pairs = buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
-      const memoryRefs = listMemoryRefs(manifest).map(ref => ({
-        key: string(ref.key), memoryId: string(ref.memoryId), revision: Number(ref.revision || 0),
-        sourceDigest: string(ref.sourceDigest || ''), sessionEpoch: memoryRefSessionEpoch(ref),
-        turnRange: clone(ref.turnRange || {}), runId: string(ref.runId || '')
-      })).filter(ref => ref.key);
-      const activeRunIds = await activeCanonicalRunIds(context.scope, manifest);
+      const sourceMemoryRefs = listMemoryRefs(manifest).filter(ref => ref?.key);
+      const sourceMemories = await mapWithConcurrency(sourceMemoryRefs, ref => loadMemoryRef(ref), 12);
+      const invalidMemoryRefs = sourceMemoryRefs.filter((ref, index) => {
+        const memory = sourceMemories[index];
+        if (!memory || memory.status !== 'committed') return true;
+        if (ref.memoryId && string(memory.memoryId) !== string(ref.memoryId)) return true;
+        if (Number(ref.revision || 0) > 0 && Number(memory.revision || 0) !== Number(ref.revision || 0)) return true;
+        if (ref.sourceDigest && string(memory.sourceDigest) !== string(ref.sourceDigest)) return true;
+        return false;
+      });
+      if (invalidMemoryRefs.length) {
+        throw new Error(`LIBRA handoff source integrity failed: ${invalidMemoryRefs.map(ref => string(ref.memoryId || ref.key)).join(', ')}`);
+      }
+      const memoryRefs = sourceMemoryRefs.map((ref, index) => {
+        const memory = sourceMemories[index];
+        return {
+          key: string(ref.key), memoryId: string(memory.memoryId || ref.memoryId), revision: Number(memory.revision || ref.revision || 0),
+          sourceDigest: string(memory.sourceDigest || ref.sourceDigest || ''), sessionEpoch: memoryRefSessionEpoch(memory),
+          turnRange: clone(memory.turnRange || ref.turnRange || {}), runId: string(memory.runId || ref.runId || ''),
+          recordDigest: digest(memory)
+        };
+      });
+      const activeRunIds = new Set(sourceMemories
+        .filter(memory => memory?.status === 'committed' && memory?.runId)
+        .map(memory => string(memory.runId)));
       const worldAdditionalRefs = [];
       for (const itemId of manifest.worldAdditionalIds) {
         const item = await loadWorldItem(context.scope, itemId);
         if (!item || !['eligible', 'injected'].includes(string(item.status))) continue;
         if (item.sourceRunId && !activeRunIds.has(string(item.sourceRunId))) continue;
-        worldAdditionalRefs.push({ itemId: string(item.itemId || itemId), key: key.worldAdditional(context.scope, itemId) });
+        worldAdditionalRefs.push({
+          itemId: string(item.itemId || itemId),
+          key: key.worldAdditional(context.scope, itemId),
+          recordDigest: digest(item),
+          record: clone(item)
+        });
+      }
+      const expectedRecords = options.expectedRecords == null
+        ? memoryRefs.length
+        : Math.max(0, Number(options.expectedRecords || 0) || 0);
+      const expectedWorldAdditional = options.expectedWorldAdditional == null
+        ? worldAdditionalRefs.length
+        : Math.max(0, Number(options.expectedWorldAdditional || 0) || 0);
+      if (expectedRecords !== memoryRefs.length || expectedWorldAdditional !== worldAdditionalRefs.length) {
+        throw new Error('LIBRA handoff source count changed before preparation.');
       }
       const preparedAt = nowIso();
       const packageValue = {
@@ -29905,14 +30530,44 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         source: { scope: clone(context.scope), identity: context.identity },
         memoryRefs,
         worldAdditionalRefs,
+        expectedRecords,
+        expectedWorldAdditional,
         preparedAt,
         expiresAt: new Date(Date.now() + LIBRA_SESSION_HANDOFF_TTL_MS).toISOString()
       };
+      packageValue.packageDigest = digest({
+        transferId: packageValue.transferId,
+        source: packageValue.source,
+        memoryRefs: packageValue.memoryRefs,
+        worldAdditionalRefs: packageValue.worldAdditionalRefs,
+        expectedRecords: packageValue.expectedRecords,
+        expectedWorldAdditional: packageValue.expectedWorldAdditional,
+        preparedAt: packageValue.preparedAt,
+        expiresAt: packageValue.expiresAt
+      });
       await storage.setJson(key.handoffPackage(transferId), packageValue);
+      const durablePackage = await storage.getJson(key.handoffPackage(transferId), null);
+      const durable = durablePackage?.schema === LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA
+        && string(durablePackage.transferId || '') === transferId
+        && asArray(durablePackage.memoryRefs).length === expectedRecords
+        && asArray(durablePackage.worldAdditionalRefs).length === expectedWorldAdditional
+        && string(durablePackage.packageDigest || '') === string(packageValue.packageDigest)
+        && digest({
+          transferId: durablePackage.transferId,
+          source: durablePackage.source,
+          memoryRefs: durablePackage.memoryRefs,
+          worldAdditionalRefs: durablePackage.worldAdditionalRefs,
+          expectedRecords: durablePackage.expectedRecords,
+          expectedWorldAdditional: durablePackage.expectedWorldAdditional,
+          preparedAt: durablePackage.preparedAt,
+          expiresAt: durablePackage.expiresAt
+        }) === string(durablePackage.packageDigest || '');
+      if (!durable) throw new Error('LIBRA handoff package durable readback failed.');
       return clone({
         schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
-        action: 'prepared', transferId, prepared: true, sourceScope: context.scope,
-        records: memoryRefs.length, worldAdditional: worldAdditionalRefs.length,
+        action: 'prepared', transferId, prepared: true, durable: true, sourceScope: context.scope,
+        records: memoryRefs.length, expectedRecords,
+        worldAdditional: worldAdditionalRefs.length, expectedWorldAdditional,
         preparedAt, expiresAt: packageValue.expiresAt
       });
     };
@@ -29929,9 +30584,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     });
 
     const verifySessionHandoff = async (options = {}) => {
-      const transferId = string(options.transferId || '').trim();
+      const transferId = normalizeHandoffTransferId(options.transferId || '');
       const targetChatId = string(options.targetChatId || '').trim();
-      if (!transferId || !targetChatId) throw new Error('LIBRA handoff 검증에는 transferId와 targetChatId가 필요합니다.');
+      if (!targetChatId) throw new Error('LIBRA handoff 검증에는 transferId와 targetChatId가 필요합니다.');
       const target = await waitForTargetContextForHandoff(targetChatId);
       const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
       const refs = asArray(manifest.inheritedMemories).filter(ref => ref?.status === 'committed' && string(ref.handoffTransferId) === transferId);
@@ -29950,28 +30605,127 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const expectedRecords = expectedRaw === undefined || expectedRaw === null || expectedRaw === ''
         ? refs.length
         : Math.max(0, Number(expectedRaw) || 0);
-      const verified = readable === refs.length && readable === expectedRecords;
+      const expectedWorldRaw = options.expectedWorldAdditional;
+      const priorReceipt = await storage.getJson(key.handoffReceipt(transferId), null);
+      const receiptMatchesTransfer = priorReceipt?.schema === LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA
+        && string(priorReceipt?.transferId || '') === transferId
+        && string(priorReceipt?.targetChatId || '') === targetChatId
+        && priorReceipt?.verified === true
+        && priorReceipt?.durable === true;
+      const expectedWorldAdditional = expectedWorldRaw === undefined || expectedWorldRaw === null || expectedWorldRaw === ''
+        ? Math.max(0, Number(
+          manifest.lastSessionHandoff?.transferId === transferId
+            ? manifest.lastSessionHandoff?.worldAdditional
+            : receiptMatchesTransfer ? priorReceipt?.expectedWorldAdditional : 0
+        ) || 0)
+        : Math.max(0, Number(expectedWorldRaw) || 0);
+      const markerMatchesTransfer = manifest.lastSessionHandoff?.transferId === transferId;
+      const markerWorldIds = markerMatchesTransfer
+        ? asArray(manifest.lastSessionHandoff?.worldAdditionalIds).map(itemId => string(itemId)).filter(Boolean)
+        : [];
+      const receiptWorldIds = receiptMatchesTransfer
+        ? asArray(priorReceipt?.worldAdditionalIds).map(itemId => string(itemId)).filter(Boolean)
+        : [];
+      const knownWorldIds = markerMatchesTransfer ? markerWorldIds : receiptWorldIds;
+      const candidateWorldIds = knownWorldIds.length || expectedWorldAdditional === 0
+        ? knownWorldIds
+        : asArray(manifest.worldAdditionalIds);
+      const loadedWorldItems = await mapWithConcurrency(
+        candidateWorldIds,
+        itemId => loadWorldItem(target.scope, itemId),
+        12
+      );
+      const missingWorldAdditionalIds = candidateWorldIds
+        .filter((itemId, index) => !loadedWorldItems[index] && itemId)
+        .map(itemId => string(itemId));
+      const transferredWorldAdditional = loadedWorldItems.filter(item => (
+        item && string(item.handoffTransferId || '') === transferId
+      ));
+      const worldAdditionalReadable = transferredWorldAdditional.length;
+      const transferKnown = markerMatchesTransfer || receiptMatchesTransfer;
+      const verified = transferKnown
+        && readable === refs.length
+        && readable === expectedRecords
+        && missingWorldAdditionalIds.length === 0
+        && worldAdditionalReadable === expectedWorldAdditional;
       return clone({
         schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
         action: 'verified', transferId, targetChatId, targetScope: target.scope,
         verified, durable: verified, records: readable, expectedRecords,
+        worldAdditional: worldAdditionalReadable,
+        expectedWorldAdditional,
+        worldAdditionalIds: transferredWorldAdditional.map(item => string(item.itemId)).filter(Boolean),
+        missingWorldAdditionalIds,
         vectorsReady, reason: verified ? 'libra_handoff_durable' : 'libra_handoff_readback_mismatch'
       });
     };
 
     const adoptSessionHandoff = async (options = {}) => {
-      const transferId = string(options.transferId || '').trim();
+      const transferId = normalizeHandoffTransferId(options.transferId || '');
       const targetChatId = string(options.targetChatId || '').trim();
-      if (!transferId || !targetChatId) throw new Error('LIBRA handoff 채택에는 transferId와 targetChatId가 필요합니다.');
+      const requestedExpectedRecords = options.expectedRecords == null
+        ? null
+        : Math.max(0, Number(options.expectedRecords || 0) || 0);
+      const requestedExpectedWorldAdditional = options.expectedWorldAdditional == null
+        ? null
+        : Math.max(0, Number(options.expectedWorldAdditional || 0) || 0);
+      if (!targetChatId) throw new Error('LIBRA handoff 채택에는 transferId와 targetChatId가 필요합니다.');
       const packageValue = await storage.getJson(key.handoffPackage(transferId), null);
       if (!packageValue || packageValue.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA) {
         const prior = await storage.getJson(key.handoffReceipt(transferId), null);
-        if (prior?.targetChatId === targetChatId && prior?.verified === true) return clone(prior);
+        if (prior?.targetChatId === targetChatId
+          && prior?.transferId === transferId
+          && prior?.verified === true
+          && prior?.durable === true
+          && (requestedExpectedRecords == null || (
+            Object.prototype.hasOwnProperty.call(prior, 'records')
+            && Object.prototype.hasOwnProperty.call(prior, 'expectedRecords')
+            && Number.isInteger(Number(prior.records))
+            && Number.isInteger(Number(prior.expectedRecords))
+            && Number(prior.records) === requestedExpectedRecords
+            && Number(prior.expectedRecords) === requestedExpectedRecords
+          ))
+          && (requestedExpectedWorldAdditional == null || (
+            Object.prototype.hasOwnProperty.call(prior, 'worldAdditional')
+            && Object.prototype.hasOwnProperty.call(prior, 'expectedWorldAdditional')
+            && Number.isInteger(Number(prior.worldAdditional))
+            && Number.isInteger(Number(prior.expectedWorldAdditional))
+            && Number(prior.worldAdditional) === requestedExpectedWorldAdditional
+            && Number(prior.expectedWorldAdditional) === requestedExpectedWorldAdditional
+          ))) return clone(prior);
         throw new Error('준비된 LIBRA handoff package를 찾지 못했습니다.');
       }
       if (Date.parse(string(packageValue.expiresAt || '')) && Date.parse(string(packageValue.expiresAt)) <= Date.now()) {
         await storage.remove(key.handoffPackage(transferId));
         throw new Error('LIBRA handoff package가 만료되었습니다. 다시 다음 세션 전환을 실행하세요.');
+      }
+      if (string(packageValue.transferId || '') !== transferId || !string(packageValue.packageDigest || '')) {
+        throw new Error('LIBRA handoff package identity verification failed.');
+      }
+      const computedPackageDigest = digest({
+        transferId: packageValue.transferId,
+        source: packageValue.source,
+        memoryRefs: packageValue.memoryRefs,
+        worldAdditionalRefs: packageValue.worldAdditionalRefs,
+        expectedRecords: packageValue.expectedRecords,
+        expectedWorldAdditional: packageValue.expectedWorldAdditional,
+        preparedAt: packageValue.preparedAt,
+        expiresAt: packageValue.expiresAt
+      });
+      if (computedPackageDigest !== string(packageValue.packageDigest)) {
+        throw new Error('LIBRA handoff package integrity verification failed.');
+      }
+      const packageRecords = asArray(packageValue.memoryRefs).length;
+      const packageWorldAdditional = asArray(packageValue.worldAdditionalRefs).length;
+      if (!Number.isInteger(Number(packageValue.expectedRecords))
+        || !Number.isInteger(Number(packageValue.expectedWorldAdditional))
+        || Number(packageValue.expectedRecords) !== packageRecords
+        || Number(packageValue.expectedWorldAdditional) !== packageWorldAdditional) {
+        throw new Error('LIBRA handoff package declared counts do not match its records.');
+      }
+      if ((requestedExpectedRecords != null && requestedExpectedRecords !== packageRecords)
+        || (requestedExpectedWorldAdditional != null && requestedExpectedWorldAdditional !== packageWorldAdditional)) {
+        throw new Error('LIBRA handoff package count does not match the requested transfer.');
       }
       const target = await waitForTargetContextForHandoff(targetChatId);
       if (string(packageValue.source?.scope?.chatId) === targetChatId) throw new Error('LIBRA handoff 대상이 원본 채팅과 같습니다.');
@@ -29983,6 +30737,18 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const sourceRef = packageValue.memoryRefs[index];
         const sourceMemory = await storage.getJson(sourceRef?.key, null);
         if (!sourceMemory || sourceMemory.status !== 'committed') throw new Error(`LIBRA 원본 정본을 읽지 못했습니다: ${string(sourceRef?.memoryId || sourceRef?.key)}`);
+        if (sourceRef?.memoryId && string(sourceMemory.memoryId) !== string(sourceRef.memoryId)) {
+          throw new Error(`LIBRA handoff source identity changed: ${string(sourceRef.memoryId)}`);
+        }
+        if (Number(sourceRef?.revision || 0) > 0 && Number(sourceMemory.revision || 0) !== Number(sourceRef.revision || 0)) {
+          throw new Error(`LIBRA handoff source revision changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
+        }
+        if (sourceRef?.sourceDigest && string(sourceMemory.sourceDigest) !== string(sourceRef.sourceDigest)) {
+          throw new Error(`LIBRA handoff source transcript digest changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
+        }
+        if (sourceRef?.recordDigest && digest(sourceMemory) !== string(sourceRef.recordDigest)) {
+          throw new Error(`LIBRA handoff source record changed after preparation: ${string(sourceRef.memoryId || sourceRef.key)}`);
+        }
         const sourceEpoch = Number.isFinite(Number(sourceMemory.sessionEpoch)) ? Number(sourceMemory.sessionEpoch) : 0;
         const inheritedEpoch = Math.min(-1, sourceEpoch - 1);
         const predecessorLineage = {
@@ -30027,8 +30793,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const copiedWorldIds = [];
       for (let index = 0; index < asArray(packageValue.worldAdditionalRefs).length; index += 1) {
         const sourceItemRef = packageValue.worldAdditionalRefs[index];
-        const sourceItem = await storage.getJson(sourceItemRef?.key, null);
-        if (!sourceItem) continue;
+        const sourceItem = sourceItemRef?.record && typeof sourceItemRef.record === 'object'
+          ? clone(sourceItemRef.record)
+          : await storage.getJson(sourceItemRef?.key, null);
+        if (!sourceItem) throw new Error(`LIBRA source World Additional item is missing: ${string(sourceItemRef?.itemId || sourceItemRef?.key)}`);
+        if (sourceItemRef?.recordDigest && digest(sourceItem) !== string(sourceItemRef.recordDigest)) {
+          throw new Error(`LIBRA handoff World Additional record changed: ${string(sourceItemRef.itemId || sourceItemRef.key)}`);
+        }
         const itemId = `prevwa_${stableDraftHash(`${transferId}|${index}|${sourceItem.itemId || sourceItemRef.itemId}`)}`;
         const item = {
           ...clone(sourceItem), itemId, scopeKey: target.scope.scopeKey,
@@ -30045,23 +30816,66 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         schema: LIBRA_SESSION_HANDOFF_MARKER_SCHEMA, transferId,
         sourceChatId: string(sourceScope.chatId || ''), sourceScopeKey: string(sourceScope.scopeKey || ''),
         targetChatId, targetScopeKey: target.scope.scopeKey, records: copiedRefs.length,
-        worldAdditional: copiedWorldIds.length, adoptedAt: nowIso()
+        worldAdditional: copiedWorldIds.length, worldAdditionalIds: copiedWorldIds.slice(), adoptedAt: nowIso()
       };
       await saveManifest(target.scope, manifest);
-      const verification = await verifySessionHandoff({ transferId, targetChatId, expectedRecords: asArray(packageValue.memoryRefs).length });
+      const verification = await verifySessionHandoff({
+        transferId,
+        targetChatId,
+        expectedRecords: packageRecords,
+        expectedWorldAdditional: packageWorldAdditional
+      });
       const receipt = {
         ...verification,
         action: 'adopted', adopted: verification.verified === true,
-        sourceScope: clone(sourceScope), worldAdditional: copiedWorldIds.length, adoptedAt: nowIso()
+        sourceScope: clone(sourceScope), adoptedAt: nowIso()
       };
       await storage.setJson(key.handoffReceipt(transferId), receipt);
+      const persistedReceipt = await storage.getJson(key.handoffReceipt(transferId), null);
+      const receiptPersisted = persistedReceipt?.schema === LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA
+        && persistedReceipt?.action === 'adopted'
+        && persistedReceipt?.adopted === true
+        && persistedReceipt?.verified === true
+        && persistedReceipt?.durable === true
+        && string(persistedReceipt?.transferId || '') === transferId
+        && string(persistedReceipt?.targetChatId || '') === targetChatId
+        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'records')
+        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'expectedRecords')
+        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'worldAdditional')
+        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'expectedWorldAdditional')
+        && Number.isInteger(Number(persistedReceipt.records))
+        && Number.isInteger(Number(persistedReceipt.expectedRecords))
+        && Number.isInteger(Number(persistedReceipt.worldAdditional))
+        && Number.isInteger(Number(persistedReceipt.expectedWorldAdditional))
+        && Number(persistedReceipt.records) === packageRecords
+        && Number(persistedReceipt.expectedRecords) === packageRecords
+        && Number(persistedReceipt.worldAdditional) === packageWorldAdditional
+        && Number(persistedReceipt.expectedWorldAdditional) === packageWorldAdditional;
+      if (!receiptPersisted) {
+        throw new Error('LIBRA handoff receipt durable readback failed.');
+      }
       if (verification.verified) await storage.remove(key.handoffPackage(transferId));
       if (string((await resolveContext()).scope?.chatId) === targetChatId) await refreshSnapshot(target);
-      return clone(receipt);
+      return clone(persistedReceipt);
     };
 
-    const deleteCurrentScope = async () => {
+    const deleteCurrentScope = async (options = {}) => {
       const context = await resolveContext();
+      const scopeKey = string(context.scope.scopeKey);
+      state.deletingScopes.add(scopeKey);
+      try {
+        state.scheduledScanSerial += 1;
+        const scheduled = state.timers.get('current');
+        if (scheduled) {
+          clearTimeout(scheduled);
+          state.timers.delete('current');
+        }
+        const queued = state.queues.get(scopeKey);
+        if (queued) { try { await queued; } catch (_) {} }
+        if (state.embeddingRebuildPromise) {
+          await stopEmbeddingRebuild();
+          try { await state.embeddingRebuildPromise; } catch (_) {}
+        }
       const pairs = buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
       for (const ref of Object.values(manifest.memories)) {
@@ -30074,9 +30888,38 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       for (const startTurn of completeBatchStarts(pairs)) await storage.remove(key.work(context.scope, startTurn));
       await storage.remove(key.manifest(context.scope));
       await storage.remove(key.recallCatalog(context.scope));
+      const scopePrefix = `${PREFIX}:scope:${string(context.scope.scopeKey)}:`;
+      for (const storageKey of await storage.keys()) {
+        if (storageKey.startsWith(scopePrefix)) await storage.remove(storageKey);
+      }
+      await markNativeCopySuppressed(context.scope, 'manual_scope_delete');
+      state.nativeCopyChecks.set(scopeKey, {
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        result: { ok: false, skipped: true, reason: 'native_copy_suppressed' }
+      });
+      const rebuild = state.embeddingRebuild || await loadEmbeddingRebuildState();
+      const belongsToDeletedScope = item => string(item?.scopeKey) === string(context.scope.scopeKey)
+        || string(item?.memoryKey).startsWith(scopePrefix)
+        || string(item?.manifestKey).startsWith(scopePrefix)
+        || string(item?.vectorKey).startsWith(scopePrefix);
+      const retainedItems = asArray(rebuild?.items).filter(item => !belongsToDeletedScope(item));
+      const retainedQuarantine = asArray(rebuild?.quarantine).filter(item => !belongsToDeletedScope(item));
+      if (retainedItems.length !== asArray(rebuild?.items).length || retainedQuarantine.length !== asArray(rebuild?.quarantine).length) {
+        rebuild.items = retainedItems;
+        rebuild.quarantine = retainedQuarantine;
+        await saveEmbeddingRebuildState(rebuild);
+      }
       state.recallCatalogCache.delete(string(context.scope.scopeKey || ''));
-      await refreshSnapshot(context);
+      await refreshSnapshot(context, {
+        cloneResult: false,
+        suppressGuiSchedule: options.suppressGuiSchedule === true,
+        limits: options.snapshotLimits,
+        trackGuiLimits: options.trackGuiLimits === true
+      });
       return true;
+      } finally {
+        state.deletingScopes.delete(scopeKey);
+      }
     };
 
     const retryFailed = async () => await scan({ throwOnError: false, mode: 'manual_retry' });
@@ -30094,12 +30937,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       debugExtractCurrentRequestHypaEvidence: extractCurrentRequestHypaEvidence,
       debugHypaOverlapForMemory: hypaOverlapForMemory,
       debugBuildAriadneHistoricalHypaPacket: buildAriadneHistoricalHypaPacket,
-      refreshSnapshot, exportCurrentScope, retraceCapabilities, inspectForRetrace, prepareSessionHandoff, adoptSessionHandoff, verifySessionHandoff, resolveTargetContextForHandoff, waitForTargetContextForHandoff, resolveStableScopeKey, deleteCurrentScope, retryFailed,
+      refreshSnapshot, exportCurrentScope, retraceCapabilities, inspectForRetrace, prepareSessionHandoff, adoptSessionHandoff, verifySessionHandoff, resolveTargetContextForHandoff, waitForTargetContextForHandoff, resolveStableScopeKey, ensureNativeChatCopyAdopted, locateNativeChatCopySource, deleteCurrentScope, retryFailed,
       listEmbeddingProviders: () => EmbeddingProviderRegistry.list(),
       getSnapshot: () => clone(state.snapshot),
+      peekSnapshot: () => state.snapshot,
       getSettings: () => clone(state.settings || DEFAULT_SETTINGS),
       getEmbeddingSettings: () => clone(state.embeddingSettings || DEFAULT_EMBEDDING),
       getEmbeddingRebuildState: () => clone(state.embeddingRebuild || defaultEmbeddingRebuildState()),
+      peekEmbeddingRebuildState: () => state.embeddingRebuild || defaultEmbeddingRebuildState(),
       getLastRecall: () => clone(state.lastRecall)
     });
   })();
@@ -30142,12 +30987,24 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
   };
 
-  const beforeRequest = async (messages, type) => await LibraMemoryCore.beforeRequest(messages, type);
-  const afterRequestReuseCleanup = async (response, type) => await LibraMemoryCore.afterRequest(response, type);
+  const beforeRequest = async (messages, type) => {
+    if (LibraMemoryCore.state.disposed) return messages;
+    return await LibraMemoryCore.beforeRequest(messages, type);
+  };
+  const afterRequestReuseCleanup = async (response, type) => (
+    LibraMemoryCore.state.disposed ? response : await LibraMemoryCore.afterRequest(response, type)
+  );
 
   const renderTemplate = renderPromptTemplate;
 
 
+
+  const GUI_LIST_PAGE_SIZES = Object.freeze({
+    ...LIBRA_SNAPSHOT_PAGE_LIMITS,
+    moduleLore: 40,
+    characterLore: 40,
+    hypa: 40
+  });
 
   const Gui = {
     root: null,
@@ -30188,7 +31045,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     hypaCatalogScope: '',
     userIntentOocDraft: '',
     confirmationVisible: false,
-    libraSelectedRunId: ''
+    libraSelectedRunId: '',
+    listLimits: { ...GUI_LIST_PAGE_SIZES }
   };
 
   const refreshGuiRuntimeIndicators = () => {
@@ -30658,6 +31516,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
   const clearStructuredSettings = async (includeSecrets = false) => {
     const keys = [
       STORAGE_PROVIDER_PRESETS_KEY,
+      STORAGE_PROVIDER_CONFIG_KEY,
       STORAGE_RUNTIME_SETTINGS_KEY,
       STORAGE_AGENT_SLOTS_KEY,
       STORAGE_POST_PROCESSORS_KEY,
@@ -30670,8 +31529,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     await Promise.all(keys.map(key => RisuCompat.removeItem(key)));
     if (includeSecrets) {
       await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
+      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_CONFIG_SECRETS_KEY);
       await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
     }
+    LibraProviderBridge.resetConfigRuntime();
     const marker = {
       version: 2,
       ragRouteVersion: RAG_ROUTE_VERSION,
@@ -30859,6 +31720,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:transparent!importan
 
 /* v0.12.22 lightweight GUI paint path */
 .sga-main,.sga-sidebar,.sga-insight-rail,.sga-list-items,.sga-live-result-text,.sga-live-result-code{-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.sga-list-items>.sga-card,.sga-module-lore-item{content-visibility:auto;contain-intrinsic-size:180px}
+.sga-list-more{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:64px}
 .sga-top,.sga-tabs{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 .sga-flow-node.state-run::after{display:none!important;animation:none!important}
 .sga-card,.sga-glance-card,.sga-quicknav-btn,.sga-simple-choice,.sga-insight-rail,.sga-sidebar,.sga-rail-card{box-shadow:none!important}
@@ -30925,6 +31788,82 @@ html,body{width:100%;height:100%;overflow:hidden}
       node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
     }
     return node;
+  };
+
+  const guiLazyDetails = (attrs = {}, summaryNode = null, buildChildren = () => []) => {
+    const node = guiEl('details', attrs, summaryNode ? [summaryNode] : []);
+    let hydrated = false;
+    let hydrating = false;
+    let errorNode = null;
+    const hydrate = () => {
+      if (hydrated || hydrating) return;
+      hydrating = true;
+      if (errorNode) {
+        errorNode.remove?.();
+        errorNode = null;
+      }
+      try {
+        const children = buildChildren();
+        for (const child of (Array.isArray(children) ? children : [children])) {
+          if (child != null) node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+        }
+        hydrated = true;
+      } catch (error) {
+        errorNode = guiEl('div', { class: 'sga-callout danger', text: `상세 내용을 표시하지 못했습니다. 닫았다가 다시 열어 재시도하세요. · ${compact(error?.message || error, 300)}` });
+        node.appendChild(errorNode);
+        warn('LIBRA lazy GUI hydration failed', error);
+      } finally {
+        hydrating = false;
+      }
+    };
+    node.addEventListener('toggle', () => { if (node.open) hydrate(); });
+    if (node.open) hydrate();
+    return node;
+  };
+
+  const guiListLimit = key => {
+    const pageSize = Number(GUI_LIST_PAGE_SIZES[key] || 20);
+    return Math.max(pageSize, Number(Gui.listLimits?.[key] || pageSize));
+  };
+
+  const guiSnapshotLimits = () => ({
+    memories: guiListLimit('memories'),
+    runs: guiListLimit('runs'),
+    worldAdditional: guiListLimit('worldAdditional')
+  });
+
+  const refreshGuiSnapshot = async (render = true) => {
+    const snapshot = await LibraMemoryCore.refreshSnapshot(undefined, {
+      cloneResult: false,
+      suppressGuiSchedule: true,
+      limits: guiSnapshotLimits(),
+      trackGuiLimits: true
+    });
+    if (render) await renderSettingsGui();
+    return snapshot;
+  };
+
+  const guiLoadMoreControl = (key, total, noun = '항목') => {
+    const limit = guiListLimit(key);
+    if (!(total > limit)) return null;
+    const pageSize = Number(GUI_LIST_PAGE_SIZES[key] || 20);
+    const remaining = total - limit;
+    return guiEl('div', {
+      class: 'sga-card wide sga-list-more',
+      dataset: { guiLoadMore: key }
+    }, [
+      guiEl('div', { class: 'sga-note', text: `${total}개 중 ${limit}개 표시 · ${remaining}개 남음` }),
+      guiEl('button', {
+        class: 'sga-btn',
+        type: 'button',
+        text: `${noun} ${Math.min(pageSize, remaining)}개 더 보기`,
+        onClick: async () => {
+          Gui.listLimits[key] = Math.min(total, limit + pageSize);
+          if (['memories', 'runs', 'worldAdditional'].includes(key)) await refreshGuiSnapshot(true);
+          else await renderSettingsGui();
+        }
+      })
+    ]);
   };
 
   const guiSetStatus = (message, isError = false, sticky = false) => {
@@ -31115,7 +32054,6 @@ html,body{width:100%;height:100%;overflow:hidden}
       let originalTranslationView = 'source';
       let expandedTranslationView = 'source';
       let busy = false;
-      const sourceIsExplicitContinue = source === 'explicit_continue_button';
       const app = guiEl('div', { class: 'sga-input-confirm-app' });
       Gui.app = app;
       const expandedTextNode = guiEl('textarea', {
@@ -31127,11 +32065,9 @@ html,body{width:100%;height:100%;overflow:hidden}
       const expandedCountNode = guiEl('span', { text: `${currentExpanded.length.toLocaleString('ko-KR')}자` });
       const statusNode = guiEl('div', {
         class: `sga-input-confirm-status${notice ? ' err' : ''}`,
-        text: notice || (sourceIsExplicitContinue
-          ? '상황 이어가기는 원본 메시지가 없습니다. 오른쪽 확장본을 편집해 보내거나 닫아서 취소할 수 있습니다.'
-          : '오른쪽 확장본을 직접 편집할 수 있습니다. 닫기를 누르면 확장본 대신 원본 메시지를 전송합니다.')
+        text: notice || '오른쪽 확장본을 직접 편집할 수 있습니다. 닫기를 누르면 확장본 대신 원본 메시지를 전송합니다.'
       });
-      const originalLabel = initialOriginal || '(원본 메시지 없음 · 상황 이어가기 요청)';
+      const originalLabel = initialOriginal || '(원본 메시지 없음)';
       const originalTextNode = guiEl('pre', {
         class: `sga-input-confirm-text${initialOriginal ? '' : ' sga-input-confirm-empty'}`,
         text: originalLabel
@@ -31186,8 +32122,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       const closeButton = guiEl('button', {
         class: 'sga-input-confirm-close',
         text: '×',
-        title: sourceIsExplicitContinue ? '닫고 전송 취소' : '닫고 원본 메시지 전송',
-        'aria-label': sourceIsExplicitContinue ? '닫고 전송 취소' : '닫고 원본 메시지 전송'
+        title: canUseOriginal ? '닫고 원본 메시지 전송' : '닫고 취소',
+        'aria-label': canUseOriginal ? '닫고 원본 메시지 전송' : '닫고 취소'
       });
       const setBusy = (next, message = '') => {
         busy = !!next;
@@ -31263,7 +32199,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         resolve({ action, content: selected });
       };
       const close = async () => {
-        if (sourceIsExplicitContinue || !canUseOriginal) {
+        if (!canUseOriginal) {
           await finish('cancelled', '');
           return;
         }
@@ -32368,9 +33304,6 @@ html,body{width:100%;height:100%;overflow:hidden}
         output_chars: parsed.outputChars ?? Runtime.lastInputAssist?.outputChars ?? 0,
         recent_turns: parsed.recentTurns ?? Runtime.lastInputAssist?.recentTurns ?? 0,
         previous_turn_anchor: parsed.previousTurnAnchorAvailable ?? Runtime.lastInputAssist?.previousTurnAnchorAvailable ?? false,
-        continuation_cue: parsed.continuationCue ?? Runtime.lastInputAssist?.continuationCue ?? false,
-        continuation_cue_kind: parsed.continuationCueKind || Runtime.lastInputAssist?.continuationCueKind || '',
-        continuation_created: parsed.continuationCreated ?? Runtime.lastInputAssist?.continuationCreated ?? false,
         delivery_fallback: parsed.deliveryFallback ?? Runtime.lastInputAssist?.deliveryFallback ?? false,
         delivery_fallback_reason: parsed.deliveryFallbackReason || Runtime.lastInputAssist?.deliveryFallbackReason || '',
         auto_translated_english: parsed.autoTranslatedEnglish ?? Runtime.lastInputAssist?.autoTranslatedEnglish ?? false,
@@ -33098,7 +34031,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           onClick: () => applyInputAssistTargetCharsToGui(choice.id),
           className: 'compact'
         }))),
-        guiEl('div', { class: 'sga-callout', style: { marginTop: '12px' }, text: '인풋 작성 도우미는 직전 AI 응답의 종결부에서 바로 이어지는 입력을 만듭니다. 일반 인풋 확장과 “LIBRA로 상황 이어가기”에 동일하게 적용됩니다.' }),
+        guiEl('div', { class: 'sga-callout', style: { marginTop: '12px' }, text: '인풋 작성 도우미는 일반 입력을 직전 AI 응답의 종결부에서 자연스럽게 이어지도록 재구성합니다.' }),
         guiEl('div', { class: 'sga-simple-stage-provider-grid', style: { marginTop: '12px' } }, [
           guiEl('div', { class: 'sga-simple-stage-provider' }, [
             fieldNode(
@@ -33756,7 +34689,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       markGuiDirty();
       renderSettingsGui();
     };
-    const rows = catalog.map(item => {
+    const visibleCatalog = catalog.slice(0, guiListLimit('characterLore'));
+    const rows = visibleCatalog.map(item => {
       const checked = excluded.has(item.key);
       return guiEl('label', {
         class: `sga-module-lore-item${checked ? ' excluded' : ''}`,
@@ -33827,6 +34761,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       Gui.characterLoreCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `캐릭터 로어북 목록을 불러오지 못했습니다: ${Gui.characterLoreCatalogError}` }) : null,
       !Gui.characterLoreCatalogLoading && !catalog.length ? guiEl('div', { class: 'sga-callout', text: '현재 캐릭터에 선택 가능한 캐릭터 로어북이 없습니다.' }) : null,
       rows.length ? guiEl('div', { class: 'sga-module-lore-grid' }, rows) : null,
+      guiLoadMoreControl('characterLore', catalog.length, '로어북'),
       guiEl('div', { class: 'sga-note', text: `배제 목록은 설정에 영구 저장됩니다. 현재 다른 캐릭터에서 저장된 배제 항목을 포함한 전체 저장 수는 ${excludedIds.length}개입니다. 채팅 로어북은 이 창의 배제 대상에 포함하지 않습니다.` })
     ]);
   };
@@ -33849,7 +34784,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       markGuiDirty();
       renderSettingsGui();
     };
-    const rows = catalog.map((item, index) => {
+    const visibleCatalog = catalog.slice(0, guiListLimit('hypa'));
+    const rows = visibleCatalog.map((item, index) => {
       const checked = excluded.has(item.id);
       const selectedByShadow = shadowSelectedIds.has(item.id);
       return guiEl('article', {
@@ -33926,6 +34862,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       Gui.hypaCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `HypaV3 기록을 불러오지 못했습니다: ${Gui.hypaCatalogError}` }) : null,
       !Gui.hypaCatalogLoading && !catalog.length ? guiEl('div', { class: 'sga-callout', text: '현재 채팅방에 HypaV3 기록이 없거나 플러그인 API에서 기록에 접근할 수 없습니다.' }) : null,
       rows.length ? guiEl('div', { class: 'sga-module-lore-grid' }, rows) : null,
+      guiLoadMoreControl('hypa', catalog.length, 'Hypa 기록'),
       guiEl('div', { class: 'sga-note', text: `체크한 항목은 설정 저장 후 Ariadne 참고 자료에서 제거됩니다. 최신 분석과 과거 재분석 모두 분석할 5턴의 첫 메시지보다 앞에서 끝난 Hypa 기록만 사용할 수 있어 동일 구간의 중복 요약과 미래 정보 유입을 차단합니다. 전체 제외 저장 수는 ${excludedIds.length}개입니다.` })
     ]);
   };
@@ -33948,7 +34885,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       markGuiDirty();
       renderSettingsGui();
     };
-    const rows = activeModules.map(item => {
+    const visibleModules = activeModules.slice(0, guiListLimit('moduleLore'));
+    const rows = visibleModules.map(item => {
       const checked = selected.has(item.key) || (item.aliases || []).some(alias => selected.has(alias));
       return guiEl('label', {
         class: `sga-module-lore-item${checked ? ' selected' : ''}`,
@@ -33994,6 +34932,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       Gui.moduleCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `모듈 목록을 불러오지 못했습니다: ${Gui.moduleCatalogError}` }) : null,
       !Gui.moduleCatalogLoading && !activeModules.length ? guiEl('div', { class: 'sga-callout', text: '현재 활성 상태이며 로어북을 가진 모듈이 없습니다.' }) : null,
       rows.length ? guiEl('div', { class: 'sga-module-lore-grid' }, rows) : null,
+      guiLoadMoreControl('moduleLore', activeModules.length, '모듈'),
       unavailableSelected.length ? guiEl('div', { class: 'sga-note', text: `현재 찾을 수 없거나 비활성인 기존 선택값: ${unavailableSelected.join(', ')}. 실행 시 읽지 않습니다.` }) : null
     ]);
   };
@@ -34148,7 +35087,7 @@ html,body{width:100%;height:100%;overflow:hidden}
             note: '경량은 판단을 같은 호출에 통합합니다. 중량은 각 단계의 분리 분석이 성공해야 Ariadne 작성 또는 ito 부분 수정을 진행합니다.'
           }),
           fieldNode('현재 확인 순서', guiEl('div', { class: 'sga-provider-note-box' }, [guiEl('span', { text: orderedAideStageDefs(Gui.state.runtime.itoStageOrder).map(def => def.label).join(' → ') })]), '쉬운 설정의 “무엇을 먼저 확인할까요?” 또는 단계별 전문가 설정에서 변경합니다.'),
-          runtimeField('응답 마무리 방식', 'outputMode', { choices: [['draft_guided','일반: RisuAI 메인 모델이 마무리'],['risu_engine','확장: LIBRA가 한 단계 더 처리']] }),
+          runtimeField('응답 마무리 방식', 'outputMode', { choices: [['draft_guided','일반: RisuAI 메인 모델이 마무리']] }),
           runtimeField('내부 초안 작성 언어', 'internalDraftLanguage', {
             choices: [['korean','한국어'],['english','English'],['japanese','日本語']],
             note: 'Ariadne의 초안, 세 ito의 자연어 분석값과 수정문, 최종 장면 본문에 적용합니다. 참고 원문과 고유명사·태그·JSON 키는 번역하지 않습니다.'
@@ -34494,6 +35433,8 @@ html,body{width:100%;height:100%;overflow:hidden}
     migration: Runtime.migration,
     lastBefore: Runtime.last,
     lastAuxiliarySkip: Runtime.lastAuxiliarySkip,
+    lastNativeChatCopy: Runtime.lastNativeChatCopy || LibraMemoryCore.state.lastNativeCopy || null,
+    lastNativeChatCopyCheck: Runtime.lastNativeChatCopyCheck || LibraMemoryCore.state.lastNativeCopyCheck || null,
     warnings: Runtime.warnings.slice(-20),
     lastProviderRequest: Runtime.lastProviderRequest,
     lastProviderResponse: Runtime.lastProviderResponse,
@@ -34539,17 +35480,6 @@ html,body{width:100%;height:100%;overflow:hidden}
       originalPreview: compact(Runtime.lastInputAssist.original, 1200),
       rewrittenPreview: compact(Runtime.lastInputAssist.rewritten, 2400)
     } : null,
-    inputAssistSend: {
-      busy: Runtime.inputAssistSend?.busy === true,
-      phase: Runtime.inputAssistSend?.phase || 'idle',
-      requestId: Number(Runtime.inputAssistSend?.requestId) || 0,
-      cancelRequested: Runtime.inputAssistSend?.cancelRequested === true,
-      cancelled: Runtime.inputAssistSend?.cancelled === true,
-      lastAt: Number(Runtime.inputAssistSend?.lastAt) || 0,
-      ok: Runtime.inputAssistSend?.ok ?? null,
-      reason: Runtime.inputAssistSend?.reason || '',
-      generatedPreview: compact(Runtime.inputAssistSend?.generated || '', 2400)
-    },
     pipelineWorkStatus: JSON.parse(JSON.stringify(Runtime.pipelineWorkStatus || null)),
     analysisLedger: Runtime.analysisLedger,
     writerControl: Runtime.writerControl ? {
@@ -35158,9 +36088,12 @@ html,body{width:100%;height:100%;overflow:hidden}
     }
   };
 
-  const libraEmbeddingDisplayForMemory = memory => {
-    const rebuild = LibraMemoryCore.getEmbeddingRebuildState();
-    const item = (rebuild.items || []).find(entry => entry.memoryId === memory?.memoryId && Number(entry.revision || 0) === Number(memory?.revision || 0));
+  const libraEmbeddingDisplayForMemory = (memory, rebuildIndex = null) => {
+    const rebuild = LibraMemoryCore.peekEmbeddingRebuildState();
+    const lookupKey = `${memory?.memoryId || ''}:r${Number(memory?.revision || 0)}`;
+    const item = rebuildIndex instanceof Map
+      ? rebuildIndex.get(lookupKey)
+      : (rebuild.items || []).find(entry => entry.memoryId === memory?.memoryId && Number(entry.revision || 0) === Number(memory?.revision || 0));
     if (item && item.status !== 'complete') {
       const labels = { pending: '격리 · 재생성 대기', running: '새 벡터 생성 중', failed: '재생성 실패' };
       return { text: labels[item.status] || `재생성 ${item.status}`, tone: item.status === 'failed' ? 'danger' : 'warn' };
@@ -35172,7 +36105,7 @@ html,body{width:100%;height:100%;overflow:hidden}
   };
 
   const buildLibraHomePanel = () => {
-    const snapshot = LibraMemoryCore.getSnapshot();
+    const snapshot = LibraMemoryCore.peekSnapshot();
     const manifest = snapshot.manifest || {};
     const pairs = snapshot.pairs || [];
     const memories = snapshot.memories || [];
@@ -35253,8 +36186,13 @@ html,body{width:100%;height:100%;overflow:hidden}
             if (typeof confirm === 'function' && !confirm('현재 세션에서 아직 LIBRA 정본이 없는 과거 5턴 구간을 수동으로 분석할까요? 이미 같은 원문으로 커밋된 정본은 건너뜁니다.')) return;
             guiSetStatus('수동 콜드스타트: 누락된 과거 5턴 구간을 확인하고 있습니다…', false, true);
             try {
-              const result = await LibraMemoryCore.scan({ throwOnError: false, mode: 'manual_cold_start', allowHistoricalBackfill: true });
-              await LibraMemoryCore.refreshSnapshot();
+              const result = await LibraMemoryCore.scan({
+                throwOnError: false,
+                mode: 'manual_cold_start',
+                allowHistoricalBackfill: true,
+                suppressGuiSchedule: true,
+                snapshotLimits: guiSnapshotLimits()
+              });
               await renderSettingsGui();
               const built = Number(result?.processed || 0);
               const partial = Number(result?.partialCommitted || 0);
@@ -35268,7 +36206,7 @@ html,body{width:100%;height:100%;overflow:hidden}
             }
             catch (error) { guiSetStatus(error?.message || String(error), true, true); }
           } }),
-          guiEl('button', { class: 'sga-btn', type: 'button', text: '상태 새로고침', onClick: async () => { await LibraMemoryCore.refreshSnapshot(); await renderSettingsGui(); } }),
+          guiEl('button', { class: 'sga-btn', type: 'button', text: '상태 새로고침', onClick: async () => { await refreshGuiSnapshot(true); } }),
           guiEl('button', { class: 'sga-btn', type: 'button', text: '최근 실행 보기', onClick: () => libraGuiNavigate('runs') })
         ])
       ]),
@@ -35283,76 +36221,88 @@ html,body{width:100%;height:100%;overflow:hidden}
   };
 
   const buildLibraMemoriesPanel = () => {
-    const memories = LibraMemoryCore.getSnapshot().memories || [];
+    const snapshot = LibraMemoryCore.peekSnapshot();
+    const memories = snapshot.memories || [];
+    const total = Number(snapshot.totals?.memories ?? memories.length);
     if (!memories.length) return guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '정본 메모리가 없습니다.' }), guiEl('div', { class: 'sga-note', text: '설치 이후 새 대화에서 완성되는 5턴은 자동 분석할 수 있습니다. 이미 누적된 기존 세션의 과거 대화는 홈의 ‘수동 콜드스타트’를 눌렀을 때만 구축합니다.' })]);
-    return guiEl('div', { class: 'sga-list-items' }, memories.slice().reverse().map(memory => {
-      const embeddingDisplay = libraEmbeddingDisplayForMemory(memory);
+    const ordered = memories.slice().reverse();
+    const visible = ordered.slice(0, guiListLimit('memories'));
+    const rebuildItems = LibraMemoryCore.peekEmbeddingRebuildState().items || [];
+    const rebuildIndex = new Map(rebuildItems.map(item => [`${item.memoryId || ''}:r${Number(item.revision || 0)}`, item]));
+    const cards = visible.map(memory => {
+      const embeddingDisplay = libraEmbeddingDisplayForMemory(memory, rebuildIndex);
       const failedItoStages = Array.isArray(memory?.pipeline?.failedItoStages)
         ? memory.pipeline.failedItoStages
         : [];
-      return guiEl('details', { class: 'sga-card wide' }, [
-      guiEl('summary', {}, [
+      return guiLazyDetails({ class: 'sga-card wide' }, guiEl('summary', {}, [
         guiEl('strong', { text: `TURN ${memory.turnRange.start}~${memory.turnRange.end}` }),
         guiEl('span', { text: `revision ${memory.revision} · ${memory.pipeline?.status === 'partial' ? '부분 정본 · ' : ''}${embeddingDisplay.text}` })
-      ]),
-      guiEl('div', { class: 'sga-summary-table', style: { marginTop: '12px' } }, [
-        guiEl('span', { text: '메모리 ID' }), guiEl('strong', { text: memory.memoryId }),
-        guiEl('span', { text: '정본 상태' }), guiEl('strong', { text: memory.status }),
-        guiEl('span', { text: '파이프라인' }), guiEl('strong', { text: memory.pipeline?.status === 'partial' ? `부분 정본 · 실패 ito: ${failedItoStages.map(item => LibraMemoryCore.STAGE_LABELS[item?.stage] || item?.stage).filter(Boolean).join(', ') || '기록됨'}` : '완료' }),
-        guiEl('span', { text: '원문 digest' }), guiEl('strong', { text: memory.sourceDigest }),
-        guiEl('span', { text: '생성 시각' }), guiEl('strong', { text: libraFormatTime(memory.updatedAt) }),
-        guiEl('span', { text: '임베딩' }), guiEl('strong', { text: embeddingDisplay.text }),
-        guiEl('span', { text: '검색 인덱스' }), guiEl('strong', { text: memory.retrieval?.version || memory.embedding?.projectionVersion || 'legacy' })
-      ]),
-      guiEl('h4', { text: '최종 종합 메모리' }),
-      guiEl('pre', { class: 'sga-live-result-code', text: memory.text }),
-      guiEl('details', {}, [guiEl('summary', { text: '검색 영역·anchor·근거 U+A' }), guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ sourcePairs: memory.sourcePairs, recallKeys: memory.recallKeys, sections: memory.sections, anchors: memory.anchors, retrieval: memory.retrieval, embedding: memory.embedding }, null, 2) })]),
-      guiEl('div', { class: 'sga-actions' }, [guiEl('button', { class: 'sga-btn', type: 'button', text: '이 메모리의 실행 기록', onClick: () => { Gui.libraSelectedRunId = memory.runId; libraGuiNavigate('runs'); } })])
+      ]), () => [
+        guiEl('div', { class: 'sga-summary-table', style: { marginTop: '12px' } }, [
+          guiEl('span', { text: '메모리 ID' }), guiEl('strong', { text: memory.memoryId }),
+          guiEl('span', { text: '정본 상태' }), guiEl('strong', { text: memory.status }),
+          guiEl('span', { text: '파이프라인' }), guiEl('strong', { text: memory.pipeline?.status === 'partial' ? `부분 정본 · 실패 ito: ${failedItoStages.map(item => LibraMemoryCore.STAGE_LABELS[item?.stage] || item?.stage).filter(Boolean).join(', ') || '기록됨'}` : '완료' }),
+          guiEl('span', { text: '원문 digest' }), guiEl('strong', { text: memory.sourceDigest }),
+          guiEl('span', { text: '생성 시각' }), guiEl('strong', { text: libraFormatTime(memory.updatedAt) }),
+          guiEl('span', { text: '임베딩' }), guiEl('strong', { text: embeddingDisplay.text }),
+          guiEl('span', { text: '검색 인덱스' }), guiEl('strong', { text: memory.retrieval?.version || memory.embedding?.projectionVersion || 'legacy' })
+        ]),
+        guiEl('h4', { text: '최종 종합 메모리' }),
+        guiEl('pre', { class: 'sga-live-result-code', text: memory.text }),
+        guiLazyDetails({}, guiEl('summary', { text: '검색 영역·anchor·근거 U+A' }), () => guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ sourcePairs: memory.sourcePairs, recallKeys: memory.recallKeys, sections: memory.sections, anchors: memory.anchors, retrieval: memory.retrieval, embedding: memory.embedding }, null, 2) })),
+        guiEl('div', { class: 'sga-actions' }, [guiEl('button', { class: 'sga-btn', type: 'button', text: '이 메모리의 실행 기록', onClick: () => { Gui.libraSelectedRunId = memory.runId; libraGuiNavigate('runs'); } })])
       ]);
-    }));
+    });
+    return guiEl('div', { class: 'sga-list-items' }, [...cards, guiLoadMoreControl('memories', total, '기억')]);
   };
 
   const buildLibraRunsPanel = () => {
-    const runs = LibraMemoryCore.getSnapshot().runs || [];
+    const snapshot = LibraMemoryCore.peekSnapshot();
+    const runs = snapshot.runs || [];
+    const total = Number(snapshot.totals?.runs ?? runs.length);
     const selected = Gui.libraSelectedRunId || '';
     if (!runs.length) return guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '실행 기록이 없습니다.' }), guiEl('div', { class: 'sga-note', text: '첫 5턴 메모리 분석이 실행되면 Ariadne와 ito의 실제 결과가 이곳에 저장됩니다.' })]);
     const ordered = selected ? [...runs].sort((a, b) => (a.runId === selected ? -1 : b.runId === selected ? 1 : 0)) : runs;
-    return guiEl('div', { class: 'sga-list-items', id: 'sga-execution-results' }, ordered.map(run => guiEl('details', { class: 'sga-card wide', open: run.runId === selected }, [
-      guiEl('summary', {}, [
+    const visible = ordered.slice(0, guiListLimit('runs'));
+    const cards = visible.map(run => guiLazyDetails({ class: 'sga-card wide', open: run.runId === selected }, guiEl('summary', {}, [
         guiEl('strong', { text: `TURN ${run.turnRange.start}~${run.turnRange.end} · ${run.status}` }),
         guiEl('span', { text: `${run.durationMs || 0}ms · revision ${run.revision || run.commit?.revision || 0}` })
-      ]),
-      guiEl('div', { class: 'sga-summary-table', style: { marginTop: '12px' } }, [
-        guiEl('span', { text: 'runId' }), guiEl('strong', { text: run.runId }),
-        guiEl('span', { text: '시작' }), guiEl('strong', { text: libraFormatTime(run.startedAt) }),
-        guiEl('span', { text: '완료' }), guiEl('strong', { text: libraFormatTime(run.finishedAt) }),
-        guiEl('span', { text: '커밋' }), guiEl('strong', { text: run.commit?.status || 'pending' }),
-        guiEl('span', { text: '임베딩' }), guiEl('strong', { text: run.embedding?.status || 'pending' })
-      ]),
-      ...(run.stages || []).map((stage, index) => guiEl('details', { class: 'sga-card', open: index === 0 }, [
-        guiEl('summary', {}, [guiEl('strong', { text: `${index + 1}. ${stage.label || LibraMemoryCore.STAGE_LABELS[stage.stage] || stage.stage}` }), guiEl('span', { text: `${stage.status} · ${stage.provider || 'provider?'} / ${stage.model || 'model?'} · ${stage.durationMs || 0}ms${Number(stage.cache?.readTokens || 0) > 0 ? ` · 캐시 ${stage.cache.readTokens}T` : ''}` })]),
-        stage.outputType === 'full_draft'
-          ? guiEl('div', {}, [guiEl('h4', { text: 'Ariadne 초안 V0' }), guiEl('pre', { class: 'sga-live-result-code', text: stage.output || '' })])
-          : guiEl('div', {}, [
-              guiEl('h4', { text: 'ito가 적용한 patch' }),
-              guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(stage.patch || {}, null, 2) }),
-              guiEl('h4', { text: 'patch 적용 뒤 메모리' }),
-              guiEl('pre', { class: 'sga-live-result-code', text: stage.preview || '' })
-            ]),
-        stage.referenceMeta ? guiEl('details', {}, [
-          guiEl('summary', { text: 'Ariadne 참고 자료 사용 결과' }),
-          guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(stage.referenceMeta, null, 2) })
-        ]) : null,
-        guiEl('details', {}, [guiEl('summary', { text: '모델 원본 출력과 검증' }), guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ rawResponse: stage.rawResponse || '', validation: stage.validation || {}, usage: stage.usage || {}, cache: stage.cache || {}, changeSummary: stage.changeSummary || [] }, null, 2) })])
-      ].filter(Boolean))),
-      run.errors?.length ? guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(run.errors, null, 2) }) : null
-    ])));
+      ]), () => [
+        guiEl('div', { class: 'sga-summary-table', style: { marginTop: '12px' } }, [
+          guiEl('span', { text: 'runId' }), guiEl('strong', { text: run.runId }),
+          guiEl('span', { text: '시작' }), guiEl('strong', { text: libraFormatTime(run.startedAt) }),
+          guiEl('span', { text: '완료' }), guiEl('strong', { text: libraFormatTime(run.finishedAt) }),
+          guiEl('span', { text: '커밋' }), guiEl('strong', { text: run.commit?.status || 'pending' }),
+          guiEl('span', { text: '임베딩' }), guiEl('strong', { text: run.embedding?.status || 'pending' })
+        ]),
+        ...(Array.isArray(run.stages) ? run.stages : []).filter(stage => stage && typeof stage === 'object').map((stage, index) => guiLazyDetails({ class: 'sga-card', open: index === 0 }, guiEl('summary', {}, [
+          guiEl('strong', { text: `${index + 1}. ${stage.label || LibraMemoryCore.STAGE_LABELS[stage.stage] || stage.stage}` }),
+          guiEl('span', { text: `${stage.status} · ${stage.provider || 'provider?'} / ${stage.model || 'model?'} · ${stage.durationMs || 0}ms${Number(stage.cache?.readTokens || 0) > 0 ? ` · 캐시 ${stage.cache.readTokens}T` : ''}` })
+        ]), () => [
+          stage.outputType === 'full_draft'
+            ? guiEl('div', {}, [guiEl('h4', { text: 'Ariadne 초안 V0' }), guiEl('pre', { class: 'sga-live-result-code', text: stage.output || '' })])
+            : guiEl('div', {}, [
+                guiEl('h4', { text: 'ito가 적용한 patch' }),
+                guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(stage.patch || {}, null, 2) }),
+                guiEl('h4', { text: 'patch 적용 뒤 메모리' }),
+                guiEl('pre', { class: 'sga-live-result-code', text: stage.preview || '' })
+              ]),
+          stage.referenceMeta ? guiLazyDetails({}, guiEl('summary', { text: 'Ariadne 참고 자료 사용 결과' }), () => guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(stage.referenceMeta, null, 2) })) : null,
+          guiLazyDetails({}, guiEl('summary', { text: '모델 원본 출력과 검증' }), () => guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ rawResponse: stage.rawResponse || '', validation: stage.validation || {}, usage: stage.usage || {}, cache: stage.cache || {}, changeSummary: stage.changeSummary || [] }, null, 2) }))
+        ])),
+        run.errors?.length ? guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(run.errors, null, 2) }) : null
+      ]));
+    return guiEl('div', { class: 'sga-list-items', id: 'sga-execution-results' }, [...cards, guiLoadMoreControl('runs', total, '실행 기록')]);
   };
 
   const buildLibraWorldAdditionalPanel = () => {
-    const items = LibraMemoryCore.getSnapshot().worldAdditional || [];
+    const snapshot = LibraMemoryCore.peekSnapshot();
+    const items = snapshot.worldAdditional || [];
+    const total = Number(snapshot.totals?.worldAdditional ?? items.length);
     if (!items.length) return guiEl('div', { class: 'sga-card wide' }, [guiEl('h3', { text: '월드 에디셔널 후보가 없습니다.' }), guiEl('div', { class: 'sga-note', text: '세계 ito가 반복 사용 가능성이 높은 구체적 설정 공백을 발견했을 때만 소수 후보를 만듭니다.' })]);
-    return guiEl('div', { class: 'sga-list-items' }, items.slice().reverse().map(item => {
+    const ordered = items.slice().reverse();
+    const visible = ordered.slice(0, guiListLimit('worldAdditional'));
+    const cards = visible.map(item => {
       const applied = item.status === 'applied_tombstone';
       const statusLabel = applied ? (item.tombstone?.label || '적용 완료') : item.status;
       const statusTone = applied ? 'good' : item.status === 'eligible' ? 'good' : 'warn';
@@ -35361,13 +36311,13 @@ html,body{width:100%;height:100%;overflow:hidden}
         : item.status === 'injected'
           ? `주입 ${Number(item.injectionCount || 0)}회 · 마지막 TURN ${item.lastInjectedTurn || '?'}`
           : `후보 생성 TURN ${item.sourceTurnRange?.end || '?'}`;
-      return guiEl('details', { class: 'sga-card wide' }, [
-        guiEl('summary', {}, [guiEl('strong', { text: item.title }), libraStatusBadge(statusLabel, statusTone)]),
+      return guiLazyDetails({ class: 'sga-card wide' }, guiEl('summary', {}, [guiEl('strong', { text: item.title }), libraStatusBadge(statusLabel, statusTone)]), () => [
         guiEl('div', { class: 'sga-live-result-text', text: item.content }),
         guiEl('div', { class: 'sga-note', text: lifecycle }),
         guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ itemId: item.itemId, kind: item.kind, keywords: item.keywords, reason: item.reason, sourceMemoryId: item.sourceMemoryId, sourceRunId: item.sourceRunId, sourceTurnRange: item.sourceTurnRange, injectedAt: item.injectedAt, firstInjectedTurn: item.firstInjectedTurn, lastInjectedTurn: item.lastInjectedTurn, injectionCount: item.injectionCount, appliedAt: item.appliedAt, appliedTurn: item.appliedTurn, tombstone: item.tombstone }, null, 2) })
       ]);
-    }));
+    });
+    return guiEl('div', { class: 'sga-list-items' }, [...cards, guiLoadMoreControl('worldAdditional', total, '월드 후보')]);
   };
 
   const buildLibraMemorySettingsPanel = () => {
@@ -35411,7 +36361,9 @@ html,body{width:100%;height:100%;overflow:hidden}
           guiEl('button', { class: 'sga-btn good', type: 'button', text: 'LIBRA 설정 저장', onClick: async () => { await LibraMemoryCore.saveSettings(LibraMemoryCore.state.settings || settings); await renderSettingsGui(); guiSetStatus('LIBRA 기억 설정을 저장했습니다.'); } }),
           guiEl('button', { class: 'sga-btn danger', type: 'button', text: '현재 채팅 LIBRA 데이터 삭제', onClick: async () => {
             if (typeof confirm === 'function' && !confirm('현재 채팅의 LIBRA 메모리·벡터·실행 기록·월드 에디셔널을 모두 삭제할까요?')) return;
-            await LibraMemoryCore.deleteCurrentScope(); await renderSettingsGui();
+            await LibraMemoryCore.deleteCurrentScope({ suppressGuiSchedule: true, snapshotLimits: guiSnapshotLimits(), trackGuiLimits: true });
+            if (Gui.refreshTimer) { clearTimeout(Gui.refreshTimer); Gui.refreshTimer = null; }
+            await renderSettingsGui();
           } })
         ])
       ])
@@ -35427,6 +36379,13 @@ html,body{width:100%;height:100%;overflow:hidden}
     const activePerformancePreset = memorySettings.recallQualityPreset || 'custom';
     const activePerformancePresetMeta = performancePresets.find(preset => preset.id === activePerformancePreset) || performancePresets.find(preset => preset.id === 'custom');
     const providers = LibraMemoryCore.listEmbeddingProviders();
+    const ollamaVisible = EmbeddingProviderRegistry.normalizeProvider(cfg.provider) === 'ollama';
+    const ollamaDiscovery = EmbeddingProviderRegistry.getOllamaDiscovery();
+    const ollamaModelNames = [...new Set([
+      ...EmbeddingProviderRegistry.ollamaSuggestedModelNames(),
+      ...(Array.isArray(ollamaDiscovery?.models) ? ollamaDiscovery.models.map(item => item?.name) : [])
+    ].map(value => String(value || '').trim()).filter(Boolean))];
+    const ollamaModelListId = 'libra-ollama-embedding-models';
     const update = patch => {
       const next = { ...cfg, ...(LibraMemoryCore.state.embeddingSettings || {}), ...patch };
       LibraMemoryCore.state.embeddingSettings = next;
@@ -35441,7 +36400,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     };
     const directInput = (value, onInput, options = {}) => guiEl(options.tag || 'input', {
       class: options.tag === 'textarea' ? 'sga-textarea' : 'sga-input', type: options.type || 'text', value: value ?? '', placeholder: options.placeholder || '',
-      min: options.min, max: options.max, step: options.step,
+      min: options.min, max: options.max, step: options.step, list: options.list,
       onInput: event => onInput(event.target.value),
       onChange: options.onChange
     });
@@ -35490,11 +36449,14 @@ html,body{width:100%;height:100%;overflow:hidden}
         })()),
         fieldNode('Endpoint / URL', directInput(cfg.url, value => update({ url: value }))),
         fieldNode('API Key', directInput(cfg.key, value => update({ key: value }), { type: 'password' })),
-        fieldNode('Model', directInput(cfg.model, value => {
-          const allowed = EmbeddingProviderRegistry.allowedDimensionsFor(cfg.provider, value);
-          const currentDimensions = Number((LibraMemoryCore.state.embeddingSettings || cfg).dimensions || 0);
-          update({ model: value, ...(allowed.length && currentDimensions && !allowed.includes(currentDimensions) ? { dimensions: 'auto' } : {}) });
-        })),
+        fieldNode('Model', guiEl('div', {}, [
+          directInput(cfg.model, value => {
+            const allowed = EmbeddingProviderRegistry.allowedDimensionsFor(cfg.provider, value);
+            const currentDimensions = Number((LibraMemoryCore.state.embeddingSettings || cfg).dimensions || 0);
+            update({ model: value, ...(allowed.length && currentDimensions && !allowed.includes(currentDimensions) ? { dimensions: 'auto' } : {}) });
+          }, { list: ollamaVisible ? ollamaModelListId : undefined }),
+          ollamaVisible ? guiEl('datalist', { id: ollamaModelListId }, ollamaModelNames.map(model => guiEl('option', { value: model }))) : null
+        ].filter(Boolean))),
         fieldNode('Dimensions', (() => {
           const allowed = EmbeddingProviderRegistry.allowedDimensionsFor(cfg.provider, cfg.model);
           const currentValue = Number(cfg.dimensions || 0) || 'auto';
@@ -35513,6 +36475,36 @@ html,body{width:100%;height:100%;overflow:hidden}
         fieldNode('Query prefix', directInput(cfg.queryPrefix, value => update({ queryPrefix: value }))),
         fieldNode('Document prefix', directInput(cfg.documentPrefix, value => update({ documentPrefix: value })))
       ]),
+      ollamaVisible ? (() => {
+        const policy = EmbeddingProviderRegistry.ollamaModelPolicy(cfg.model);
+        const discoveredCount = Array.isArray(ollamaDiscovery?.models) ? ollamaDiscovery.models.length : 0;
+        const discoveryText = ollamaDiscovery?.at
+          ? `Ollama ${ollamaDiscovery.version || '버전 미상'} · 설치 ${ollamaDiscovery.checked || 0}개 확인 · 임베딩 ${discoveredCount}개`
+          : '아직 설치 모델을 검색하지 않았습니다.';
+        const queryPrefix = EmbeddingProviderRegistry.effectiveEmbeddingPrefix(EmbeddingProviderRegistry.normalizeConfig(cfg), 'query');
+        const documentPrefix = EmbeddingProviderRegistry.effectiveEmbeddingPrefix(EmbeddingProviderRegistry.normalizeConfig(cfg), 'document');
+        return guiEl('div', { class: 'sga-callout', style: { marginTop: '12px' } }, [
+          guiEl('div', { class: 'sga-agent-head' }, [
+            guiEl('div', {}, [
+              guiEl('strong', { text: 'Ollama 임베딩 계약' }),
+              guiEl('div', { class: 'sga-note', text: `${discoveryText} · 로컬 주소에는 API Key를 보내지 않으며 truncate:false로 요청합니다.` })
+            ]),
+            guiEl('button', { class: 'sga-btn', type: 'button', text: 'Ollama 모델 검색', onClick: async () => {
+              guiSetStatus('Ollama 설치 모델과 embedding capability를 확인하고 있습니다…', false, true);
+              try {
+                const draft = { ...cfg, ...(LibraMemoryCore.state.embeddingSettings || {}), provider: 'ollama' };
+                const result = await EmbeddingProviderRegistry.discoverOllamaModels(draft, { force: true });
+                await renderSettingsGui();
+                guiSetStatus(`Ollama ${result.version || '버전 미상'} · 설치 ${result.checked}개 중 임베딩 모델 ${result.models.length}개를 찾았습니다.`, false, true);
+              }
+              catch (error) {
+                guiSetStatus(`${EmbeddingProviderRegistry.classifyError(error)}: ${String(error?.message || error || 'Ollama 모델 검색 실패')}`, true, true);
+              }
+            } })
+          ]),
+          policy ? guiEl('div', { class: 'sga-note', style: { marginTop: '8px' }, text: `안전 입력 한도 ${policy.safeInputTokens || '자동'} tokens · query prefix ${queryPrefix ? JSON.stringify(queryPrefix) : '없음'} · document prefix ${documentPrefix ? JSON.stringify(documentPrefix) : '없음'}` }) : null
+        ].filter(Boolean));
+      })() : null,
       guiEl('details', {}, [
         guiEl('summary', { text: 'Custom HTTP 및 고급 설정' }),
         guiEl('div', { class: 'sga-grid', style: { marginTop: '12px' } }, [
@@ -35600,7 +36592,10 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('button', { class: 'sga-btn', type: 'button', text: '실제 연결 테스트', onClick: async () => {
           guiSetStatus('임베딩 provider에 실제 테스트 요청을 보내고 있습니다…', false, true);
           const result = await LibraMemoryCore.testEmbeddingConnection(LibraMemoryCore.state.embeddingSettings || cfg);
-          guiSetStatus(result.ok ? `${result.provider} / ${result.model} · ${result.dimensions}차원 · ${result.durationMs}ms` : `${result.errorType}: ${result.error}`, !result.ok, true);
+          const ollamaDetail = result.ok && result.modelMetadata
+            ? ` · context ${result.modelMetadata.contextLength || '?'} · embedding ${result.modelMetadata.embeddingLength || result.dimensions}`
+            : '';
+          guiSetStatus(result.ok ? `${result.provider} / ${result.model} · ${result.dimensions}차원 · ${result.durationMs}ms${ollamaDetail}` : `${result.errorType}: ${result.error}`, !result.ok, true);
         } })
       ])
     ]);
@@ -35625,7 +36620,6 @@ html,body{width:100%;height:100%;overflow:hidden}
   const navigateMobileGui = async value => {
     const target = MOBILE_NAV_ITEMS.find(item => item.value === value) || MOBILE_NAV_ITEMS[0];
     libraGuiNavigate(target.section, target.tab);
-    await renderSettingsGui();
   };
 
   const buildMobileNavigation = () => {
@@ -35678,7 +36672,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       class: 'sga-side-item', dataset: { active: String((tab === 'providers' ? Gui.activeTab === 'providers' : Gui.activeTab === 'flow' && Gui.sidebarSection === section)) },
       onClick: () => libraGuiNavigate(section, tab)
     }, [guiEl('span', { class: 'sga-side-icon', text: icon }), guiEl('span', { class: 'sga-side-label', text: label })]);
-    const snapshot = LibraMemoryCore.getSnapshot();
+    const snapshot = LibraMemoryCore.peekSnapshot();
     const lastRun = snapshot.runs?.[0];
     return guiEl('aside', { class: 'sga-sidebar' }, [
       guiEl('nav', { class: 'sga-side-nav' }, [
@@ -35706,7 +36700,7 @@ html,body{width:100%;height:100%;overflow:hidden}
   };
 
   const buildInsightRail = () => {
-    const snapshot = LibraMemoryCore.getSnapshot();
+    const snapshot = LibraMemoryCore.peekSnapshot();
     const manifest = snapshot.manifest || {};
     const lastRun = snapshot.runs?.[0];
     const lastRecall = LibraMemoryCore.getLastRecall();
@@ -35715,8 +36709,8 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('h3', { text: '현재 기억 상태' }),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '관찰된 턴' }), guiEl('strong', { text: String(manifest.frontiers?.observedTurn || 0) })]),
         guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '정본화된 턴' }), guiEl('strong', { text: String(manifest.frontiers?.committedTurn || 0) })]),
-        guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '정본 메모리' }), guiEl('strong', { text: String(snapshot.memories?.length || 0) })]),
-        guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '월드 후보' }), guiEl('strong', { text: String(snapshot.worldAdditional?.length || 0) })])
+        guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '정본 메모리' }), guiEl('strong', { text: String(snapshot.totals?.memories ?? snapshot.memories?.length ?? 0) })]),
+        guiEl('div', { class: 'sga-rail-stat' }, [guiEl('span', { text: '월드 후보' }), guiEl('strong', { text: String(snapshot.totals?.worldAdditional ?? snapshot.worldAdditional?.length ?? 0) })])
       ]),
       guiEl('section', { class: 'sga-rail-card' }, [
         guiEl('h3', { text: '최근 실행' }),
@@ -35842,9 +36836,35 @@ html,body{width:100%;height:100%;overflow:hidden}
 
 
 
+  let GuiRenderPromise = null;
+  let GuiRenderQueued = false;
+
   async function renderSettingsGui() {
+    if (LibraMemoryCore.state.disposed) return false;
+    if (GuiRenderPromise) {
+      GuiRenderQueued = true;
+      return await GuiRenderPromise;
+    }
+    GuiRenderPromise = (async () => {
+      let rendered = false;
+      do {
+        GuiRenderQueued = false;
+        rendered = await renderSettingsGuiOnce();
+      } while (GuiRenderQueued && Gui.visible && !LibraMemoryCore.state.disposed);
+      return rendered;
+    })().catch(error => {
+      warn('settings_gui_render_failed', error);
+      return false;
+    }).finally(() => {
+      GuiRenderPromise = null;
+    });
+    return await GuiRenderPromise;
+  }
+
+  async function renderSettingsGuiOnce() {
     if (typeof document === 'undefined') return false;
     await ensureGuiState();
+    if (LibraMemoryCore.state.disposed) return false;
     if (!Gui.root) return false;
     const viewportState = captureGuiViewportState();
     forceTransparentGuiSurface();
@@ -35907,6 +36927,8 @@ html,body{width:100%;height:100%;overflow:hidden}
 
   const hideSettingsGui = async () => {
     Gui.visible = false;
+    Gui.listLimits = { ...GUI_LIST_PAGE_SIZES };
+    LibraMemoryCore.state.guiSnapshotLimits = { ...LIBRA_SNAPSHOT_PAGE_LIMITS };
     if (Gui.refreshTimer) { clearTimeout(Gui.refreshTimer); Gui.refreshTimer = null; }
     if (Gui.inputRenderTimer) { clearTimeout(Gui.inputRenderTimer); Gui.inputRenderTimer = null; }
     try {
@@ -35973,6 +36995,8 @@ html,body{width:100%;height:100%;overflow:hidden}
 
   const showSettingsGui = async () => {
     Gui.visible = true;
+    Gui.listLimits = { ...GUI_LIST_PAGE_SIZES };
+    Gui.libraSelectedRunId = '';
 
     // Match Flashback Memory's container path as well as its layout: resolve the
     // live lowercase API at open time instead of reusing a possibly stale uppercase
@@ -35989,8 +37013,8 @@ html,body{width:100%;height:100%;overflow:hidden}
     LibraMemoryCore.state.embeddingSettings = null;
     await LibraMemoryCore.loadSettings();
     await LibraMemoryCore.loadEmbeddingSettings();
-    await LibraMemoryCore.loadEmbeddingRebuildState();
-    await LibraMemoryCore.refreshSnapshot();
+    await LibraMemoryCore.refreshSnapshot(undefined, { cloneResult: false, suppressGuiSchedule: true, limits: guiSnapshotLimits(), trackGuiLimits: true });
+    if (Gui.refreshTimer) { clearTimeout(Gui.refreshTimer); Gui.refreshTimer = null; }
     await renderSettingsGui();
     forceTransparentGuiSurface();
     return true;
@@ -36008,20 +37032,36 @@ html,body{width:100%;height:100%;overflow:hidden}
     try {
       const open = async () => { await showSettingsGui(); };
       const icon = '🧠';
-      if (!registered.setting && typeof API.registerSetting === 'function') {
-        registered.setting = await API.registerSetting(`${PUBLIC_DISPLAY_NAME} 설정`, open, icon, 'html', `${SETTINGS_UI_ID}-menu`);
+      const chatButtonApi = getLiveApi(['registerButton']);
+      const settingApi = getLiveApi(['registerSetting']);
+      if (!registered.setting && typeof settingApi?.registerSetting === 'function') {
+        registered.setting = await settingApi.registerSetting(`${PUBLIC_DISPLAY_NAME} 설정`, open, icon, 'html', `${SETTINGS_UI_ID}-menu`);
         Runtime.hookStatus.setting = !!registered.setting;
       }
-      if (await readGuiEnabledForRegistration() && !registered.button && typeof API.registerButton === 'function') {
-        registered.button = await API.registerButton({ name: `${PUBLIC_DISPLAY_NAME} 설정`, icon, iconType: 'html', location: 'hamburger', id: `${SETTINGS_UI_ID}-button` }, open);
+      if (await readGuiEnabledForRegistration() && !registered.button && typeof chatButtonApi?.registerButton === 'function') {
+        registered.button = await chatButtonApi.registerButton({ name: `${PUBLIC_DISPLAY_NAME} 설정`, icon, iconType: 'html', location: 'hamburger', id: `${SETTINGS_UI_ID}-button` }, open);
         Runtime.hookStatus.button = !!registered.button;
       }
-      Runtime.hookStatus.inputAssistSendButton = false;
       return true;
     } catch (error) {
       warn('libra_settings_gui_register_failed', error);
       return false;
     }
+  };
+
+  const redactPublicSecrets = (value, keyHint = '') => {
+    if (/(^|[-_.])(api[-_]?key|key|token|secret|password|authorization|credential|bearer)(s)?($|[-_.])/i.test(String(keyHint || ''))
+      || /^(?:apiKey|accessToken|refreshToken|authToken|privateKey|clientSecret)$/i.test(String(keyHint || ''))) {
+      return undefined;
+    }
+    if (Array.isArray(value)) return value.map(item => redactPublicSecrets(item));
+    if (!value || typeof value !== 'object') return value;
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      const redacted = redactPublicSecrets(child, key);
+      if (redacted !== undefined) out[key] = redacted;
+    }
+    return out;
   };
 
   const publicApi = Object.freeze({
@@ -36032,30 +37072,37 @@ html,body{width:100%;height:100%;overflow:hidden}
     stageLabels: { ...LibraMemoryCore.STAGE_LABELS },
     async openSettingsGui() { return await showSettingsGui(); },
     async closeSettingsGui() { return await hideSettingsGui(); },
-    getRuntime() { return safeClone(Runtime); },
+    getRuntime() { return redactPublicSecrets(safeClone(Runtime)); },
     getStageTrace() { return safeClone(Runtime.stageTrace || []); },
     getPipelineWorkStatus() { return safeClone(Runtime.pipelineWorkStatus || null); },
     getProviderDebug() {
-      return safeClone({
+      return redactPublicSecrets(safeClone({
         request: Runtime.lastProviderRequest,
         response: Runtime.lastProviderResponse,
         error: Runtime.lastProviderError,
         backendBridge: Runtime.lastBackendBridge
-      });
+      }));
+    },
+    async debugNativeChatCopy(options = {}) {
+      const context = await LibraMemoryCore.resolveContext();
+      const result = await LibraMemoryCore.ensureNativeChatCopyAdopted(context, { force: options.force !== false });
+      return redactPublicSecrets(safeClone({
+        result,
+        lastCopy: LibraMemoryCore.state.lastNativeCopy || null,
+        lastCheck: LibraMemoryCore.state.lastNativeCopyCheck || null
+      }));
     },
     async scanMemoryNow(options = {}) {
       const result = await LibraMemoryCore.scan({ ...options, throwOnError: options.throwOnError !== false });
-      await LibraMemoryCore.refreshSnapshot();
       return result;
     },
     async runManualColdStart(options = {}) {
       const result = await LibraMemoryCore.scan({ ...options, mode: 'manual_cold_start', allowHistoricalBackfill: true, throwOnError: options.throwOnError !== false });
-      await LibraMemoryCore.refreshSnapshot();
       return result;
     },
-    async getCanonicalMemories() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().memories; },
-    async getMemoryRuns() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().runs; },
-    async getWorldAdditional() { await LibraMemoryCore.refreshSnapshot(); return LibraMemoryCore.getSnapshot().worldAdditional; },
+    async getCanonicalMemories() { return (await LibraMemoryCore.refreshSnapshot(undefined, { suppressGuiSchedule: true })).memories; },
+    async getMemoryRuns() { return (await LibraMemoryCore.refreshSnapshot(undefined, { suppressGuiSchedule: true })).runs; },
+    async getWorldAdditional() { return (await LibraMemoryCore.refreshSnapshot(undefined, { suppressGuiSchedule: true })).worldAdditional; },
     getRetraceCapabilities() { return LibraMemoryCore.retraceCapabilities(); },
     async inspectForRetrace() { return await LibraMemoryCore.inspectForRetrace(); },
     async prepareSessionHandoff(options = {}) { return await LibraMemoryCore.prepareSessionHandoff(options); },
@@ -36107,7 +37154,6 @@ html,body{width:100%;height:100%;overflow:hidden}
     async deleteQuarantinedEmbeddingVectors() { return await LibraMemoryCore.cleanupQuarantinedVectors(true); },
     async retryFailedMemoryAnalysis() {
       const result = await LibraMemoryCore.retryFailed();
-      await LibraMemoryCore.refreshSnapshot();
       return result;
     },
     async exportLibraScope() { return await LibraMemoryCore.exportCurrentScope(); },
@@ -36122,12 +37168,12 @@ html,body{width:100%;height:100%;overflow:hidden}
     },
     async getLibraProviderConfig() {
       const settings = await loadSettings();
-      return safeClone({
+      return redactPublicSecrets(safeClone({
         defaultPresetName: settings.defaultPresetName,
         stagePresetNames: settings.stagePresetNames,
         providerPresets: settings.presets,
         embedding: await LibraMemoryCore.loadEmbeddingSettings()
-      });
+      }));
     },
     async saveLibraProviderConfig(value = {}) {
       const source = value && typeof value === 'object' ? value : {};
@@ -36148,12 +37194,12 @@ html,body{width:100%;height:100%;overflow:hidden}
       Runtime.settings = null;
       Runtime.settingsLoadedAt = 0;
       const settings = await loadSettings();
-      return safeClone({
+      return redactPublicSecrets(safeClone({
         defaultPresetName: settings.defaultPresetName,
         stagePresetNames: settings.stagePresetNames,
         providerPresets: settings.presets,
         embedding: await LibraMemoryCore.loadEmbeddingSettings()
-      });
+      }));
     },
     async replaceLibraProviderConfig(value = {}) {
       const source = value && typeof value === 'object' ? value : {};
@@ -36162,10 +37208,18 @@ html,body{width:100%;height:100%;overflow:hidden}
       Runtime.settings = null;
       Runtime.settingsLoadedAt = 0;
       const settings = await loadSettings();
-      return safeClone({ defaultPresetName: settings.defaultPresetName, stagePresetNames: settings.stagePresetNames, providerPresets: settings.presets, embedding: await LibraMemoryCore.loadEmbeddingSettings() });
+      return redactPublicSecrets(safeClone({ defaultPresetName: settings.defaultPresetName, stagePresetNames: settings.stagePresetNames, providerPresets: settings.presets, embedding: await LibraMemoryCore.loadEmbeddingSettings() }));
     },
     async testLibraLlmProvider(target = 'ariadne') { return await LibraProviderBridge.testLlm(target); },
     async testLibraEmbeddingProvider(value = null) { return await LibraProviderBridge.testEmbedding(value || undefined); },
+    async discoverOllamaEmbeddingModels(value = null) {
+      const config = value || await LibraMemoryCore.loadEmbeddingSettings();
+      return safeClone(await LibraProviderBridge.embeddingRegistry.discoverOllamaModels({ ...config, provider: 'ollama' }, { force: true }));
+    },
+    async inspectOllamaEmbeddingModel(value = null) {
+      const config = value || await LibraMemoryCore.loadEmbeddingSettings();
+      return safeClone(await LibraProviderBridge.embeddingRegistry.inspectOllamaModel({ ...config, provider: 'ollama' }, { force: true }));
+    },
     async getEmbeddingAdapterDiagnostics() {
       const config = await LibraMemoryCore.loadEmbeddingSettings();
       const registry = LibraProviderBridge.embeddingRegistry;
@@ -36173,7 +37227,14 @@ html,body{width:100%;height:100%;overflow:hidden}
         profile: registry.profileFor(config),
         requestFingerprint: registry.requestFingerprintFor(config),
         queryCache: registry.getQueryCacheStats(),
-        preprocessVersion: registry.PREPROCESS_VERSION
+        preprocessVersion: registry.normalizeProvider(config.provider) === 'ollama' ? registry.OLLAMA_PREPROCESS_VERSION : registry.PREPROCESS_VERSION,
+        ollama: registry.normalizeProvider(config.provider) === 'ollama' ? {
+          policy: registry.ollamaModelPolicy(config.model),
+          discovery: registry.getOllamaDiscovery(),
+          embedUrl: registry.ollamaApiUrl(config, 'embed'),
+          showUrl: registry.ollamaApiUrl(config, 'show'),
+          safeInputTokenLimit: registry.providerSafeInputTokenLimit('ollama', registry.normalizeConfig(config))
+        } : null
       });
     },
     clearEmbeddingQueryCache() { return LibraProviderBridge.embeddingRegistry.clearQueryCache(); }
@@ -36186,12 +37247,14 @@ html,body{width:100%;height:100%;overflow:hidden}
       return false;
     }
     const handler = async (message, metadata = {}) => {
+      if (LibraMemoryCore.state.disposed) return;
       const request = message && typeof message === 'object' && !Array.isArray(message) ? message : {};
       if (request.schema !== LIBRA_RETRACE_IPC_SCHEMA || request.kind !== 'request') return;
       const sender = text(metadata?.sender || '').trim();
-      if (sender && sender !== RETRACE_PLUGIN_ID) return;
+      if (sender !== RETRACE_PLUGIN_ID) return;
       const requestId = text(request.requestId || '').trim();
       const action = text(request.action || '').trim();
+      if (!requestId || !action) return;
       let ok = true;
       let result = null;
       let error = '';
@@ -36202,33 +37265,131 @@ html,body{width:100%;height:100%;overflow:hidden}
         else if (action === 'adopt_session_handoff') result = await LibraMemoryCore.adoptSessionHandoff(request.payload || {});
         else if (action === 'verify_session_handoff') result = await LibraMemoryCore.verifySessionHandoff(request.payload || {});
         else throw new Error(`지원하지 않는 LIBRA IPC action입니다: ${action || '(empty)'}`);
+        result = {
+          ...safeClone(result),
+          ownerPluginId: PLUGIN_NAME,
+          authorizedRequester: sender,
+          mutation: action
+        };
       } catch (caught) {
         ok = false;
         error = compact(caught?.message || caught, 1200);
       }
+      if (LibraMemoryCore.state.disposed) return;
       await ipcApi.postPluginChannelMessage(RETRACE_PLUGIN_ID, LIBRA_RETRACE_IPC_RESPONSE_CHANNEL, {
         schema: LIBRA_RETRACE_IPC_SCHEMA,
         kind: 'response', requestId, action, ok,
         ...(ok ? { result: safeClone(result) } : { error })
       });
     };
-    await ipcApi.addPluginChannelListener(LIBRA_RETRACE_IPC_REQUEST_CHANNEL, handler);
+    const registration = await ipcApi.addPluginChannelListener(LIBRA_RETRACE_IPC_REQUEST_CHANNEL, handler);
     registered.retraceIpc = handler;
+    registered.retraceIpcApi = ipcApi;
+    registered.retraceIpcRegistration = registration;
     Runtime.hookStatus.retraceIpc = true;
     return true;
   };
 
+  const unregisterRetraceIpc = async () => {
+    const handler = registered.retraceIpc;
+    const registration = registered.retraceIpcRegistration;
+    const registeredApi = registered.retraceIpcApi;
+    registered.retraceIpc = null;
+    registered.retraceIpcApi = null;
+    registered.retraceIpcRegistration = null;
+    Runtime.hookStatus.retraceIpc = false;
+    if (!handler && !registration) return false;
+    try {
+      if (typeof registration === 'function') {
+        await registration();
+        return true;
+      }
+      for (const method of ['dispose', 'unsubscribe', 'remove']) {
+        if (typeof registration?.[method] === 'function') {
+          await registration[method]();
+          return true;
+        }
+      }
+      const removalApi = getLiveApi(['removePluginChannelListener', 'unregisterPluginChannelListener']) || registeredApi;
+      for (const method of ['removePluginChannelListener', 'unregisterPluginChannelListener']) {
+        const api = typeof removalApi?.[method] === 'function' ? removalApi : registeredApi;
+        if (handler && typeof api?.[method] === 'function') {
+          await api[method](LIBRA_RETRACE_IPC_REQUEST_CHANNEL, handler);
+          return true;
+        }
+      }
+    } catch (error) {
+      warn('LIBRA RE:TRACE IPC unregistration failed; retired handler remains inert.', error);
+    }
+    return false;
+  };
+
   try {
+    const registerInputAssistHandler = async () => {
+      const inputApi = getLiveApi(['addRisuScriptHandler']);
+      if (typeof inputApi?.addRisuScriptHandler !== 'function') {
+        Runtime.hookStatus.input = false;
+        warn('RisuAI addRisuScriptHandler input API is unavailable. Normal input reconstruction is disabled.');
+        return false;
+      }
+      const handler = async content => {
+        if (LibraMemoryCore.state.disposed) return content;
+        try {
+          const settings = await loadSettings();
+          if (settings.inputAssistMode === 'off') return content;
+          let rewritten = await runInputAssistForContent(content, settings, { source: 'normal_input' });
+          if (Runtime.lastInputAssist?.bypassed === true && sameRagChatContent(Runtime.lastInputAssist.original, content)) {
+            return content;
+          }
+          const deliveryPlan = resolveInputAssistDeliveryPlan(content, rewritten, settings);
+          rewritten = deliveryPlan.deliveryBase;
+          if (deliveryPlan.shouldTranslate) {
+            rewritten = await prepareInputAssistExpandedForDelivery(rewritten, settings, deliveryPlan);
+          }
+          if (deliveryPlan.shouldConfirm && !!text(rewritten).trim()) {
+            const reviewed = await showInputAssistConfirmation({
+              original: content,
+              expanded: rewritten,
+              source: 'normal_input',
+              canUseOriginal: true,
+              onRegenerate: async () => {
+                const next = await runInputAssistForContent(content, settings, { source: 'normal_input_regenerate' });
+                const nextPlan = resolveInputAssistDeliveryPlan(content, next, settings);
+                return await prepareInputAssistExpandedForDelivery(nextPlan.deliveryBase, settings, nextPlan);
+              },
+              onTranslate: async (value, targetLanguage) => await translateInputAssistReviewText(value, settings, targetLanguage)
+            });
+            rewritten = text(reviewed?.content || content);
+          }
+          return text(rewritten).trim() ? rewritten : content;
+        } catch (error) {
+          warn('input_assist_handler_failed', error);
+          Runtime.lastInputAssist = {
+            at: Date.now(), ok: false, reason: compact(error?.message || error, 500),
+            requestedMode: 'unknown', effectiveMode: 'unknown', scope: 'unknown',
+            original: text(content || ''), rewritten: text(content || ''), trace: null
+          };
+          return content;
+        }
+      };
+      await inputApi.addRisuScriptHandler('input', handler);
+      registered.input = handler;
+      Runtime.hookStatus.input = true;
+      return true;
+    };
+
     const registerBeforeRequestHook = async () => {
-      if (typeof API.addRisuReplacer !== 'function') {
+      const replacerApi = getLiveApi(['addRisuReplacer']);
+      if (typeof replacerApi?.addRisuReplacer !== 'function') {
         Runtime.hookStatus.beforeRequest = false;
         Runtime.hookStatus.replacerPermission = 'unavailable';
         warn('RisuAI addRisuReplacer API is unavailable.');
         return false;
       }
       let granted = true;
-      if (typeof API.requestPluginPermission === 'function') {
-        try { granted = await API.requestPluginPermission('replacer'); }
+      const permissionApi = getLiveApi(['requestPluginPermission']);
+      if (typeof permissionApi?.requestPluginPermission === 'function') {
+        try { granted = await permissionApi.requestPluginPermission('replacer'); }
         catch (_) { granted = false; }
       }
       Runtime.hookStatus.replacerPermission = granted === true ? 'granted' : 'denied';
@@ -36239,7 +37400,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       }
       try {
         registered.before = beforeRequest;
-        await API.addRisuReplacer('beforeRequest', beforeRequest);
+        await replacerApi.addRisuReplacer('beforeRequest', beforeRequest);
         Runtime.hookStatus.beforeRequest = true;
       } catch (error) {
         registered.before = null;
@@ -36249,7 +37410,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       }
       try {
         registered.after = afterRequestReuseCleanup;
-        await API.addRisuReplacer('afterRequest', afterRequestReuseCleanup);
+        await replacerApi.addRisuReplacer('afterRequest', afterRequestReuseCleanup);
         Runtime.hookStatus.afterRequest = true;
       } catch (error) {
         registered.after = null;
@@ -36268,6 +37429,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       }
       try {
         const handler = (...args) => {
+          if (LibraMemoryCore.state.disposed) return true;
           if (LibraMemoryCore.getSettings().autoAnalyze !== false) {
             LibraMemoryCore.scheduleScan({ delay: 90, reason: 'risu_output', args: args.length });
           }
@@ -36286,59 +37448,72 @@ html,body{width:100%;height:100%;overflow:hidden}
         return false;
       }
     };
-    Runtime.hookStatus.input = false;
     // Register cross-plugin discovery first. Permission prompts, replacer setup, or
     // output-listener setup must never delay RE:TRACE from discovering LIBRA.
     await registerRetraceIpc().catch(error => { Runtime.hookStatus.retraceIpc = false; warn('LIBRA RE:TRACE IPC registration failed.', error); });
+    await registerInputAssistHandler();
     await registerBeforeRequestHook();
     await registerOutputListener();
 
     const unload = async () => {
+      // Retire the runtime before touching host APIs. Any failed/unavailable removal then
+      // leaves only inert callbacks, and local timers cannot repopulate UI or storage.
+      LibraMemoryCore.state.disposed = true;
+      LibraMemoryCore.state.scheduledScanSerial += 1;
+      for (const timer of LibraMemoryCore.state.timers.values()) clearTimeout(timer);
+      LibraMemoryCore.state.timers.clear();
+      LibraMemoryCore.state.outputListenerRegistered = false;
+      LibraMemoryCore.state.outputListener = null;
+      Gui.visible = false;
+      for (const timerKey of ['statusTimer', 'refreshTimer', 'inputRenderTimer']) {
+        if (Gui[timerKey]) clearTimeout(Gui[timerKey]);
+        Gui[timerKey] = null;
+      }
+      Runtime.hookStatus.input = false;
+      Runtime.hookStatus.beforeRequest = false;
+      Runtime.hookStatus.afterRequest = false;
+      Runtime.hookStatus.output = false;
+      Runtime.hookStatus.retraceIpc = false;
+
+      const inputHandler = registered.input;
+      registered.input = null;
       try {
-        if (registered.input) {
+        if (inputHandler) {
           const inputApi = getLiveApi(['removeRisuScriptHandler']);
-          if (typeof inputApi?.removeRisuScriptHandler === 'function') await inputApi.removeRisuScriptHandler('input', registered.input);
+          if (typeof inputApi?.removeRisuScriptHandler === 'function') await inputApi.removeRisuScriptHandler('input', inputHandler);
         }
-        Runtime.hookStatus.input = false;
       } catch (_) {}
+      const beforeHandler = registered.before;
+      const afterHandler = registered.after;
+      registered.before = null;
+      registered.after = null;
       try {
-        if (registered.before && typeof API.removeRisuReplacer === 'function') await API.removeRisuReplacer('beforeRequest', registered.before);
-        if (registered.after && typeof API.removeRisuReplacer === 'function') await API.removeRisuReplacer('afterRequest', registered.after);
-        Runtime.hookStatus.beforeRequest = false;
-        Runtime.hookStatus.afterRequest = false;
+        const replacerApi = getLiveApi(['removeRisuReplacer']);
+        if (beforeHandler && typeof replacerApi?.removeRisuReplacer === 'function') await replacerApi.removeRisuReplacer('beforeRequest', beforeHandler);
+        if (afterHandler && typeof replacerApi?.removeRisuReplacer === 'function') await replacerApi.removeRisuReplacer('afterRequest', afterHandler);
       } catch (_) {}
+      const outputHandler = registered.output;
+      registered.output = null;
       try {
         const liveApi = getLiveApi(['removeRisuChatListener']);
-        if (registered.output && typeof liveApi?.removeRisuChatListener === 'function') await liveApi.removeRisuChatListener('output', registered.output);
-        registered.output = null;
-        Runtime.hookStatus.output = false;
-        LibraMemoryCore.state.outputListenerRegistered = false;
-        LibraMemoryCore.state.outputListener = null;
-        LibraMemoryCore.state.disposed = true;
-        for (const timer of LibraMemoryCore.state.timers.values()) clearTimeout(timer);
-        LibraMemoryCore.state.timers.clear();
+        if (outputHandler && typeof liveApi?.removeRisuChatListener === 'function') await liveApi.removeRisuChatListener('output', outputHandler);
       } catch (_) {}
+      await unregisterRetraceIpc();
       try {
-        if (registered.setting && typeof API.unregisterUIPart === 'function') await API.unregisterUIPart(registered.setting.id || registered.setting);
+        const uiApi = getLiveApi(['unregisterUIPart']);
+        if (registered.setting && typeof uiApi?.unregisterUIPart === 'function') await uiApi.unregisterUIPart(registered.setting.id || registered.setting);
         Runtime.hookStatus.setting = false;
       } catch (_) {}
       try {
-        if (registered.button && typeof API.unregisterUIPart === 'function') await API.unregisterUIPart(registered.button.id || registered.button);
+        const uiApi = getLiveApi(['unregisterUIPart']);
+        if (registered.button && typeof uiApi?.unregisterUIPart === 'function') await uiApi.unregisterUIPart(registered.button.id || registered.button);
         Runtime.hookStatus.button = false;
       } catch (_) {}
-      try {
-        const uiApi = getLiveApi(['unregisterUIPart']);
-        if (registered.continueButton && typeof uiApi?.unregisterUIPart === 'function') {
-          await uiApi.unregisterUIPart(registered.continueButton.id || registered.continueButton);
-        }
-        Runtime.hookStatus.inputAssistSendButton = false;
-      } catch (_) {}
-      if (InputAssistContinuePanelTimer) {
-        clearTimeout(InputAssistContinuePanelTimer);
-        InputAssistContinuePanelTimer = null;
+      if (PipelineWorkPanelTimer) {
+        clearTimeout(PipelineWorkPanelTimer);
+        PipelineWorkPanelTimer = null;
       }
-      try { await unbindInputAssistContinueCancelButton(); } catch (_) {}
-      try { await setInputAssistContinuePanel(''); } catch (_) {}
+      try { await setPipelineWorkPanel(''); } catch (_) {}
       Runtime.hookStatus.unload = false;
       Runtime.loreContinuity = { scopes: {} };
       Runtime.writerControl = null;
@@ -36356,17 +37531,6 @@ html,body{width:100%;height:100%;overflow:hidden}
         selected: ''
       };
       Gui.confirmationVisible = false;
-      Runtime.inputAssistSend = {
-        busy: false,
-        phase: 'idle',
-        requestId: Number(Runtime.inputAssistSend?.requestId || 0) + 1,
-        cancelRequested: false,
-        cancelled: false,
-        lastAt: 0,
-        ok: null,
-        reason: '',
-        generated: ''
-      };
       Runtime.pipelineWorkStatus = {
         busy: false,
         phase: 'idle',
@@ -36382,6 +37546,9 @@ html,body{width:100%;height:100%;overflow:hidden}
       Runtime.userIntentOoc = { targetStage: 'ariadne', messages: [], messagesByStage: {}, startedByStage: {}, pendingByStage: {}, summariesByStage: {}, revisionsByStage: {}, busy: false, lastError: '', statusText: '', statusState: 'idle', requestId: Number(Runtime.userIntentOoc?.requestId || 0) + 1 };
       clearRequestReuseCache();
       clearArgumentCache();
+      LibraMemoryCore.state.nativeCopyChecks?.clear?.();
+      LibraMemoryCore.state.nativeCopyInFlight?.clear?.();
+      LibraMemoryCore.state.lastNativeCopyCheck = null;
       LoreJaccardTokenSimilarityCache.clear();
     };
     try {
@@ -36394,6 +37561,19 @@ html,body{width:100%;height:100%;overflow:hidden}
     await LibraProviderBridge.getConfig();
     await LibraMemoryCore.loadSettings();
     await LibraMemoryCore.loadEmbeddingSettings();
+    // Native RisuAI chat-copy adoption is not historical cold-start. It only clones
+    // transcript-verified records from an already-existing LIBRA scope into an empty
+    // copied chat scope, so it is safe to probe once at startup.
+    try {
+      const startupContext = await LibraMemoryCore.resolveContext();
+      await LibraMemoryCore.ensureNativeChatCopyAdopted(startupContext);
+    } catch (error) {
+      Runtime.lastNativeChatCopyCheck = {
+        at: Date.now(), phase: 'startup', reason: 'native_copy_startup_probe_failed',
+        error: compact(error?.message || error, 500)
+      };
+      warn('LIBRA native chat-copy startup probe failed open.', error);
+    }
     // dev.16: never backfill an existing session at plugin startup. Historical
     // batches are built only by an explicit manual cold-start action.
 
