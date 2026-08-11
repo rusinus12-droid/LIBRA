@@ -1,7 +1,7 @@
 //@name libra
-//@display-name LIBRA v1.0.26
+//@display-name LIBRA v1.0.27
 //@api 3.0
-//@version 1.0.26
+//@version 1.0.27
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,6 +63,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.27
+ * v1.0.27 hardens automatic five-turn memory triggering on hosts without addRisuChatListener: beforeRequest captures the exact request scope, afterRequest schedules a scope-bound fallback regardless of host request-type spelling, delayed context acquisition is retried without enabling historical backfill, startup native-copy probing retries boundedly, and debug export records scan scheduling/results plus real memory-pipeline attempt counts.
+ *
  * LIBRA v1.0.26
  * v1.0.26 makes native chat-copy adoption immediate and observable: startup/snapshot reads now trigger adoption, source discovery refreshes the authoritative getCharacterFromIndex() chat list, transcript-prefix matching backs up missing copy-title metadata, and debug export records every adoption check/result.
  *
@@ -206,7 +209,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.26';
+  const PLUGIN_VERSION = '1.0.27';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -25638,6 +25641,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       disposed: false,
       lastRecall: null,
       lastScan: null,
+      lastScheduledScanResult: null,
+      lastScanSchedule: null,
+      lastAfterRequest: null,
+      lastRequestScope: null,
+      memoryRunCount: 0,
       currentRun: null,
       nativeCopyChecks: new Map(),
       nativeCopyInFlight: new Map(),
@@ -28829,6 +28837,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
       Runtime.stageTrace = [];
       Runtime.inFlight = true;
+      Runtime.runs = Number(Runtime.runs || 0) + 1;
+      state.memoryRunCount = Number(state.memoryRunCount || 0) + 1;
       state.currentRun = run;
       const startedAt = Date.now();
       work.failedStages = asArray(work.failedStages);
@@ -29212,10 +29222,20 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           suppressGuiSchedule: options.suppressGuiSchedule === true,
           limits: options.snapshotLimits || state.guiSnapshotLimits || LIBRA_SNAPSHOT_PAGE_LIMITS
         });
+        const noEligibleReason = eligibleStarts.length === 0
+          ? pairs.length < BATCH_SIZE
+            ? 'insufficient_complete_turns'
+            : pairs.length % BATCH_SIZE !== 0
+              ? 'waiting_for_five_turn_boundary'
+              : 'no_eligible_live_batch'
+          : '';
         return {
-          ok: failedBatches.length === 0, processed, partialCommitted, staleDiscarded, failed: failedBatches.length, failedBatches,
-          observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn,
-          mode: scanMode, historicalBackfill: allowHistoricalBackfill, eligibleBatches: eligibleStarts.length, totalCompleteBatches: starts.length
+          ok: failedBatches.length === 0,
+          skipped: eligibleStarts.length === 0 && failedBatches.length === 0,
+          reason: noEligibleReason,
+          processed, partialCommitted, staleDiscarded, failed: failedBatches.length, failedBatches,
+          observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn, currentCompletedStart, inFlightStart,
+          mode: scanMode, historicalBackfill: allowHistoricalBackfill, eligibleBatches: eligibleStarts.length, eligibleStarts: eligibleStarts.slice(), totalCompleteBatches: starts.length
         };
       });
     };
@@ -29230,23 +29250,111 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         clearTimeout(existing);
         state.timers.delete(timerKey);
       }
-      // Capture the current owner scope when the event arrives. The timer later resolves
-      // the live context again and scan() fails closed if the user changed chats.
-      void resolveContext().then(context => {
+
+      const delay = clamp(scheduledOptions.delay, 40, 60000, 100);
+      const suppliedScope = asObject(scheduledOptions.expectedScope);
+      const boundScope = string(suppliedScope.scopeKey) ? clone(suppliedScope) : null;
+      const contextRetryDelays = [180, 420, 900, 1600];
+      const settleRetryDelays = [260, 700, 1400];
+      const baseDiagnostic = {
+        at: Date.now(),
+        serial: scheduleSerial,
+        reason: string(scheduledOptions.reason || scheduledOptions.mode || 'live'),
+        requestType: string(scheduledOptions.requestType || state.lastAfterRequest?.requestType || ''),
+        delay,
+        boundScope: boundScope ? clone(boundScope) : null
+      };
+      let resolvedScope = boundScope ? clone(boundScope) : null;
+      state.lastScanSchedule = { ...baseDiagnostic, phase: 'scheduled', contextAttempt: 0 };
+
+      const executeScan = async (contextAttempt = 0, settleAttempt = 0) => {
         if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
-        const delay = clamp(scheduledOptions.delay, 40, 60000, 100);
-        const timer = setTimeout(() => {
-          if (state.timers.get(timerKey) === timer) state.timers.delete(timerKey);
-          if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
-          void scan({ ...scheduledOptions, expectedScope: clone(context.scope) })
-            .catch(error => warn('LIBRA scheduled memory scan failed', error));
-        }, delay);
-        state.timers.set(timerKey, timer);
-      }).catch(error => {
-        if (!state.disposed && scheduleSerial === state.scheduledScanSerial) {
-          warn('LIBRA scheduled memory scan context capture failed', error);
+        let expectedScope = resolvedScope ? clone(resolvedScope) : null;
+        if (!expectedScope?.scopeKey) {
+          try {
+            const context = await resolveContext();
+            expectedScope = clone(context.scope);
+            resolvedScope = clone(context.scope);
+          } catch (error) {
+            if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+            const message = compact(error?.message || error, 500);
+            if (contextAttempt < contextRetryDelays.length) {
+              const retryDelay = contextRetryDelays[contextAttempt];
+              state.lastScanSchedule = {
+                ...baseDiagnostic, phase: 'context_retry', contextAttempt: contextAttempt + 1,
+                retryDelay, lastContextError: message
+              };
+              const retryTimer = setTimeout(() => {
+                if (state.timers.get(timerKey) === retryTimer) state.timers.delete(timerKey);
+                void executeScan(contextAttempt + 1, settleAttempt);
+              }, retryDelay);
+              state.timers.set(timerKey, retryTimer);
+              return;
+            }
+            state.lastScanSchedule = {
+              ...baseDiagnostic, phase: 'context_failed', contextAttempt, lastContextError: message, finishedAt: Date.now()
+            };
+            state.lastScheduledScanResult = {
+              at: Date.now(), ok: false, skipped: true, reason: 'scan_context_unavailable', error: message,
+              scheduleSerial, trigger: baseDiagnostic.reason
+            };
+            warn('LIBRA scheduled memory scan context capture failed after retries', error);
+            return;
+          }
         }
-      });
+
+        if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+        state.lastScanSchedule = {
+          ...baseDiagnostic, phase: 'executing', contextAttempt, settleAttempt, expectedScope: clone(expectedScope), startedAt: Date.now()
+        };
+        try {
+          const result = await scan({ ...scheduledOptions, expectedScope: clone(expectedScope) });
+          if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+          state.lastScheduledScanResult = {
+            at: Date.now(), scheduleSerial, trigger: baseDiagnostic.reason, requestType: baseDiagnostic.requestType,
+            expectedScope: clone(expectedScope), settleAttempt, result: clone(result)
+          };
+          const observedTurns = Number(result?.observedTurns || 0);
+          const shouldSettleRetry = result?.historicalBackfill !== true
+            && Number(result?.eligibleBatches || 0) === 0
+            && observedTurns > 0
+            && observedTurns % BATCH_SIZE === BATCH_SIZE - 1
+            && settleAttempt < settleRetryDelays.length;
+          if (shouldSettleRetry) {
+            const settleDelay = settleRetryDelays[settleAttempt];
+            state.lastScanSchedule = {
+              ...state.lastScanSchedule, phase: 'settle_retry', finishedAt: Date.now(), result: clone(result),
+              settleAttempt: settleAttempt + 1, settleDelay
+            };
+            const settleTimer = setTimeout(() => {
+              if (state.timers.get(timerKey) === settleTimer) state.timers.delete(timerKey);
+              void executeScan(0, settleAttempt + 1);
+            }, settleDelay);
+            state.timers.set(timerKey, settleTimer);
+            return;
+          }
+          state.lastScanSchedule = {
+            ...state.lastScanSchedule, phase: 'complete', finishedAt: Date.now(), result: clone(result)
+          };
+        } catch (error) {
+          if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+          const message = compact(error?.message || error, 700);
+          state.lastScheduledScanResult = {
+            at: Date.now(), scheduleSerial, trigger: baseDiagnostic.reason, requestType: baseDiagnostic.requestType,
+            expectedScope: clone(expectedScope), ok: false, error: message
+          };
+          state.lastScanSchedule = {
+            ...state.lastScanSchedule, phase: 'failed', finishedAt: Date.now(), error: message
+          };
+          warn('LIBRA scheduled memory scan failed', error);
+        }
+      };
+
+      const timer = setTimeout(() => {
+        if (state.timers.get(timerKey) === timer) state.timers.delete(timerKey);
+        void executeScan(0, 0);
+      }, delay);
+      state.timers.set(timerKey, timer);
       return true;
     };
 
@@ -30168,6 +30276,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!isMainNarrativeRequest(type) || (await loadMemorySettings()).enabled === false) return messages;
         if ((Array.isArray(messages) ? messages : []).some(item => contentToText(item?.content ?? item?.data ?? '').includes(MEMORY_INJECTION_MARKER))) return messages;
         const context = await resolveContext();
+        state.lastRequestScope = {
+          at: Date.now(),
+          requestType: normalizeRequestType(type) || 'missing',
+          scope: clone(context.scope)
+        };
         await ensureNativeChatCopyAdopted(context);
         const settings = await loadMemorySettings();
         // Branch guard runs before recall so a rollback cannot inject future memories and
@@ -30200,7 +30313,36 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const afterRequest = async (response, type) => {
-      if (isMainNarrativeRequest(type) && state.settings?.autoAnalyze !== false && !state.outputListenerRegistered) scheduleScan({ delay: 140, reason: 'afterRequest_fallback' });
+      const requestType = normalizeRequestType(type) || 'missing';
+      const fallbackActive = state.settings?.autoAnalyze !== false && !state.outputListenerRegistered;
+      const mainNarrativeType = isMainNarrativeRequest(type);
+      const requestScopeAgeMs = Date.now() - Number(state.lastRequestScope?.at || 0);
+      const requestScopeFresh = requestScopeAgeMs >= 0 && requestScopeAgeMs <= 120000;
+      const rememberedScope = asObject(state.lastRequestScope?.scope);
+      const expectedScope = mainNarrativeType && requestScopeFresh && string(rememberedScope.scopeKey)
+        ? clone(rememberedScope)
+        : null;
+      state.lastAfterRequest = {
+        at: Date.now(),
+        requestType,
+        mainNarrativeType,
+        fallbackActive,
+        requestScopeAgeMs: Number.isFinite(requestScopeAgeMs) ? requestScopeAgeMs : -1,
+        expectedScope: expectedScope ? clone(expectedScope) : null,
+        scheduled: false
+      };
+      // The output listener is optional across RisuAI hosts. When it is unavailable,
+      // every afterRequest is only a debounce signal to inspect the authoritative chat.
+      // scan() itself still enforces the exact five-turn live-batch gate and never
+      // turns this path into implicit historical cold-start/backfill.
+      if (fallbackActive) {
+        state.lastAfterRequest.scheduled = scheduleScan({
+          delay: 140,
+          reason: 'afterRequest_fallback',
+          requestType,
+          expectedScope: expectedScope ? clone(expectedScope) : undefined
+        });
+      }
       return response;
     };
 
@@ -35435,6 +35577,12 @@ html,body{width:100%;height:100%;overflow:hidden}
     lastAuxiliarySkip: Runtime.lastAuxiliarySkip,
     lastNativeChatCopy: Runtime.lastNativeChatCopy || LibraMemoryCore.state.lastNativeCopy || null,
     lastNativeChatCopyCheck: Runtime.lastNativeChatCopyCheck || LibraMemoryCore.state.lastNativeCopyCheck || null,
+    memoryRunCount: Number(LibraMemoryCore.state.memoryRunCount || 0),
+    lastMemoryRequestScope: LibraMemoryCore.state.lastRequestScope ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastRequestScope)) : null,
+    lastMemoryAfterRequest: LibraMemoryCore.state.lastAfterRequest ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastAfterRequest)) : null,
+    lastMemoryScanSchedule: LibraMemoryCore.state.lastScanSchedule ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastScanSchedule)) : null,
+    lastMemoryScheduledScanResult: LibraMemoryCore.state.lastScheduledScanResult ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastScheduledScanResult)) : null,
+    lastMemoryScan: LibraMemoryCore.state.lastScan ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastScan)) : null,
     warnings: Runtime.warnings.slice(-20),
     lastProviderRequest: Runtime.lastProviderRequest,
     lastProviderResponse: Runtime.lastProviderResponse,
@@ -37431,7 +37579,9 @@ html,body{width:100%;height:100%;overflow:hidden}
         const handler = (...args) => {
           if (LibraMemoryCore.state.disposed) return true;
           if (LibraMemoryCore.getSettings().autoAnalyze !== false) {
-            LibraMemoryCore.scheduleScan({ delay: 90, reason: 'risu_output', args: args.length });
+            const lastScope = LibraMemoryCore.state.lastRequestScope;
+            const freshScope = lastScope?.scope && Date.now() - Number(lastScope.at || 0) <= 120000 ? safeClone(lastScope.scope) : undefined;
+            LibraMemoryCore.scheduleScan({ delay: 90, reason: 'risu_output', args: args.length, expectedScope: freshScope });
           }
           return true;
         };
@@ -37549,6 +37699,10 @@ html,body{width:100%;height:100%;overflow:hidden}
       LibraMemoryCore.state.nativeCopyChecks?.clear?.();
       LibraMemoryCore.state.nativeCopyInFlight?.clear?.();
       LibraMemoryCore.state.lastNativeCopyCheck = null;
+      LibraMemoryCore.state.lastRequestScope = null;
+      LibraMemoryCore.state.lastAfterRequest = null;
+      LibraMemoryCore.state.lastScanSchedule = null;
+      LibraMemoryCore.state.lastScheduledScanResult = null;
       LoreJaccardTokenSimilarityCache.clear();
     };
     try {
@@ -37563,16 +37717,43 @@ html,body{width:100%;height:100%;overflow:hidden}
     await LibraMemoryCore.loadEmbeddingSettings();
     // Native RisuAI chat-copy adoption is not historical cold-start. It only clones
     // transcript-verified records from an already-existing LIBRA scope into an empty
-    // copied chat scope, so it is safe to probe once at startup.
+    // copied chat scope. Some hosts expose the current chat shortly after plugin load,
+    // so a missing startup context gets a small bounded retry window.
+    const nativeCopyStartupRetryDelays = [300, 900, 1800];
+    const scheduleNativeCopyStartupRetry = (attempt = 0) => {
+      if (attempt >= nativeCopyStartupRetryDelays.length || LibraMemoryCore.state.disposed) return;
+      const timerKey = 'native_copy_startup_retry';
+      const delay = nativeCopyStartupRetryDelays[attempt];
+      const previous = LibraMemoryCore.state.timers.get(timerKey);
+      if (previous) clearTimeout(previous);
+      const timer = setTimeout(async () => {
+        if (LibraMemoryCore.state.timers.get(timerKey) === timer) LibraMemoryCore.state.timers.delete(timerKey);
+        if (LibraMemoryCore.state.disposed) return;
+        try {
+          const startupContext = await LibraMemoryCore.resolveContext();
+          await LibraMemoryCore.ensureNativeChatCopyAdopted(startupContext, { force: true });
+        } catch (error) {
+          const finalAttempt = attempt + 1 >= nativeCopyStartupRetryDelays.length;
+          Runtime.lastNativeChatCopyCheck = {
+            at: Date.now(), phase: 'startup_retry', attempt: attempt + 1,
+            reason: finalAttempt ? 'native_copy_startup_retry_failed' : 'native_copy_startup_retry_pending',
+            error: compact(error?.message || error, 500)
+          };
+          if (finalAttempt) warn('LIBRA native chat-copy startup probe failed after retries; later request/snapshot probes remain active.', error);
+          else scheduleNativeCopyStartupRetry(attempt + 1);
+        }
+      }, delay);
+      LibraMemoryCore.state.timers.set(timerKey, timer);
+    };
     try {
       const startupContext = await LibraMemoryCore.resolveContext();
       await LibraMemoryCore.ensureNativeChatCopyAdopted(startupContext);
     } catch (error) {
       Runtime.lastNativeChatCopyCheck = {
-        at: Date.now(), phase: 'startup', reason: 'native_copy_startup_probe_failed',
+        at: Date.now(), phase: 'startup', reason: 'native_copy_startup_probe_retrying',
         error: compact(error?.message || error, 500)
       };
-      warn('LIBRA native chat-copy startup probe failed open.', error);
+      scheduleNativeCopyStartupRetry(0);
     }
     // dev.16: never backfill an existing session at plugin startup. Historical
     // batches are built only by an explicit manual cold-start action.
