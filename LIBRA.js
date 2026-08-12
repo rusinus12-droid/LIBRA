@@ -1,7 +1,9 @@
 //@name libra
-//@display-name LIBRA v1.0.28
+//@display-name LIBRA v1.0.31
 //@api 3.0
-//@version 1.0.28
+//@version 1.0.31
+
+/* v1.0.31 preserves RE:TRACE summary-only runtime fallback options so a failed IPC probe cannot silently hydrate every canonical memory; v1.0.30 keeps canonical memory metadata in pluginStorage while moving rebuildable dense projection payloads into SafeLocalPluginStorage as packed Float32 sidecars. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -212,7 +214,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.27';
+  const PLUGIN_VERSION = '1.0.31';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -222,6 +224,9 @@
   const LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA = 'libra.session_handoff.package.v1';
   const LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA = 'libra.session_handoff.receipt.v1';
   const LIBRA_SESSION_HANDOFF_MARKER_SCHEMA = 'libra.session_handoff.marker.v1';
+  const LIBRA_SHARED_ARCHIVE_SCHEMA = 'libra.shared_archive.v1';
+  const LIBRA_SHARED_ARCHIVE_REF_SCHEMA = 'libra.shared_archive_ref.v1';
+  const LIBRA_SHARED_ARCHIVE_MAX_DEPTH = 256;
   const LIBRA_SNAPSHOT_PAGE_LIMITS = Object.freeze({ memories: 20, runs: 10, worldAdditional: 20 });
   const LIBRA_SESSION_HANDOFF_TTL_MS = 30 * 60 * 1000;
   const INJECTION_HEADER = '[LIBRA LONG-TERM MEMORY]';
@@ -25497,6 +25502,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const RETRIEVAL_PROJECTION_VERSION = 'libra.retrieval_projection.v2';
     const EMBEDDING_PROJECTION_SCHEMA = 'libra.embedding_projection.v2';
     const RECALL_CATALOG_SCHEMA = 'libra.recall_catalog.v1';
+    const LOCAL_VECTOR_PAYLOAD_SCHEMA = 'libra.local_vector_payload.v1';
+    const LOCAL_VECTOR_REF_SCHEMA = 'libra.local_vector_ref.v1';
+    const LOCAL_VECTOR_STORAGE_MODE = 'safe_local_float32_v1';
+    const LOCAL_VECTOR_CACHE_MAX = 96;
     const RECALL_VECTOR_SKETCH_DIMS = 128;
     const RECALL_CATALOG_SEARCH_TEXT_MAX_CHARS = 2800;
     const RECALL_CATALOG_ANCHOR_LIMIT = 112;
@@ -25664,7 +25673,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       nativeCopyChecks: new Map(),
       nativeCopyInFlight: new Map(),
       lastNativeCopy: null,
-      lastNativeCopyCheck: null
+      lastNativeCopyCheck: null,
+      localVectorCache: new Map(),
+      localVectorStats: {
+        writes: 0, reads: 0, cacheHits: 0, misses: 0, failures: 0,
+        fallbackInline: 0, bytesWritten: 0, lastError: ''
+      }
     };
 
     Runtime.libraMemory = state;
@@ -25687,24 +25701,260 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
     const estimateTokens = value => Math.max(1, Math.ceil(String(value || '').length / 3.2));
     const stripFence = value => String(value || '').trim().replace(/^```(?:markdown|md|text)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+    const parseStoredJson = (raw, storageKey, fallback = null) => {
+      if (raw === null || raw === undefined || raw === '') return clone(fallback);
+      if (typeof raw === 'object') return clone(raw);
+      try { return JSON.parse(String(raw)); }
+      catch (error) { throw new Error(`pluginStorage JSON parse failed: ${storageKey}: ${compact(error?.message || error, 300)}`); }
+    };
+
+    const libraBase64ToBytes = encoded => {
+      const source = String(encoded || '');
+      if (!source) return new Uint8Array(0);
+      if (typeof atob === 'function') {
+        const binary = atob(source);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return bytes;
+      }
+      if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(source, 'base64'));
+      throw new Error('Base64 decoder is unavailable.');
+    };
+
+    const projectionHasVectorPayload = record => {
+      if (!record || record.schema !== EMBEDDING_PROJECTION_SCHEMA) return false;
+      if (Array.isArray(record.vector) && record.vector.length) return true;
+      return Object.values(asObject(record.entries)).some(entry => Array.isArray(entry?.vector) && entry.vector.length);
+    };
+
+    const normalizeLocalVectorRef = value => {
+      const source = asObject(value);
+      const localKey = string(source.localKey || source.key || '');
+      if (!localKey || source.schema !== LOCAL_VECTOR_REF_SCHEMA) return null;
+      return {
+        schema: LOCAL_VECTOR_REF_SCHEMA,
+        localKey,
+        storageKey: string(source.storageKey || ''),
+        vectorHash: string(source.vectorHash || ''),
+        keys: asArray(source.keys).map(item => string(item)).filter(Boolean),
+        lengths: asArray(source.lengths).map(item => Math.max(0, Number(item) || 0)),
+        floatCount: Math.max(0, Number(source.floatCount || 0) || 0),
+        byteLength: Math.max(0, Number(source.byteLength || 0) || 0),
+        createdAt: string(source.createdAt || '')
+      };
+    };
+
+    const localVectorPayloadKey = storageKey => `${PREFIX}:local-vector:${stableHash(String(storageKey || ''))}`;
+
+    const cacheLocalVectorPayload = (localKey, value) => {
+      if (!localKey || !value) return value;
+      state.localVectorCache.delete(localKey);
+      state.localVectorCache.set(localKey, value);
+      while (state.localVectorCache.size > LOCAL_VECTOR_CACHE_MAX) {
+        const oldest = state.localVectorCache.keys().next().value;
+        if (oldest === undefined) break;
+        state.localVectorCache.delete(oldest);
+      }
+      return value;
+    };
+
+    const packProjectionForLocalStorage = (storageKey, record) => {
+      const sourceEntries = asObject(record?.entries);
+      const vectorRows = Object.entries(sourceEntries)
+        .filter(([, entry]) => Array.isArray(entry?.vector) && entry.vector.length)
+        .map(([keyName, entry]) => ({ keyName, vector: entry.vector.map(Number).filter(Number.isFinite) }));
+      if (!vectorRows.length) return null;
+      const keys = vectorRows.map(row => row.keyName);
+      const lengths = vectorRows.map(row => row.vector.length);
+      const floatCount = lengths.reduce((sum, length) => sum + length, 0);
+      const floats = new Float32Array(floatCount);
+      let offset = 0;
+      for (const row of vectorRows) {
+        floats.set(row.vector, offset);
+        offset += row.vector.length;
+      }
+      const bytes = new Uint8Array(floats.buffer);
+      const canonicalFloat32Vectors = {};
+      let canonicalOffset = 0;
+      keys.forEach((keyName, index) => {
+        const length = lengths[index];
+        canonicalFloat32Vectors[keyName] = Array.from(floats.subarray(canonicalOffset, canonicalOffset + length));
+        canonicalOffset += length;
+      });
+      const localKey = localVectorPayloadKey(storageKey);
+      const payload = {
+        schema: LOCAL_VECTOR_PAYLOAD_SCHEMA,
+        localKey,
+        storageKey: String(storageKey || ''),
+        profileId: string(record?.profileId || ''),
+        vectorHash: digest(canonicalFloat32Vectors),
+        sourceVectorHash: string(record?.vectorHash || ''),
+        keys,
+        lengths,
+        floatCount,
+        byteLength: bytes.byteLength,
+        data: bytesToBase64(bytes),
+        createdAt: nowIso()
+      };
+      const localVectorRef = {
+        schema: LOCAL_VECTOR_REF_SCHEMA,
+        localKey,
+        storageKey: String(storageKey || ''),
+        vectorHash: payload.vectorHash,
+        keys,
+        lengths,
+        floatCount,
+        byteLength: bytes.byteLength,
+        createdAt: payload.createdAt
+      };
+      const metadataEntries = Object.fromEntries(Object.entries(sourceEntries).map(([keyName, entry]) => [
+        keyName,
+        { ...clone(entry), vector: [] }
+      ]));
+      const storedRecord = {
+        ...clone(record),
+        entries: metadataEntries,
+        vector: [],
+        localVectorRef,
+        vectorStorageMode: LOCAL_VECTOR_STORAGE_MODE,
+        vectorPayloadLocal: true
+      };
+      return { payload, localVectorRef, storedRecord };
+    };
+
+    const decodeLocalProjectionPayload = (payload, ref) => {
+      if (!payload || payload.schema !== LOCAL_VECTOR_PAYLOAD_SCHEMA) throw new Error('LIBRA local vector payload schema mismatch.');
+      const keys = asArray(payload.keys).map(item => string(item)).filter(Boolean);
+      const lengths = asArray(payload.lengths).map(item => Math.max(0, Number(item) || 0));
+      if (!keys.length || keys.length !== lengths.length) throw new Error('LIBRA local vector payload index is invalid.');
+      const bytes = libraBase64ToBytes(payload.data || '');
+      const expectedBytes = lengths.reduce((sum, length) => sum + length, 0) * 4;
+      if (bytes.byteLength !== expectedBytes || (Number(payload.byteLength || 0) && Number(payload.byteLength) !== expectedBytes)) {
+        throw new Error(`LIBRA local vector payload byte length mismatch: expected ${expectedBytes}, received ${bytes.byteLength}`);
+      }
+      const aligned = new Uint8Array(bytes.byteLength);
+      aligned.set(bytes);
+      const floats = new Float32Array(aligned.buffer);
+      const vectors = {};
+      let offset = 0;
+      keys.forEach((keyName, index) => {
+        const length = lengths[index];
+        vectors[keyName] = Array.from(floats.subarray(offset, offset + length));
+        offset += length;
+      });
+      const expectedHash = string(ref?.vectorHash || payload.vectorHash || '');
+      const actualHash = digest(vectors);
+      if (expectedHash && actualHash !== expectedHash) throw new Error('LIBRA local vector payload digest mismatch.');
+      return { vectors, byteLength: bytes.byteLength, vectorHash: actualHash };
+    };
+
+    const loadLocalProjectionVectors = async refInput => {
+      const ref = normalizeLocalVectorRef(refInput);
+      if (!ref) throw new Error('LIBRA local vector reference is invalid.');
+      const cached = state.localVectorCache.get(ref.localKey);
+      if (cached) {
+        state.localVectorStats.cacheHits += 1;
+        state.localVectorCache.delete(ref.localKey);
+        state.localVectorCache.set(ref.localKey, cached);
+        return cached;
+      }
+      state.localVectorStats.reads += 1;
+      const raw = await RisuCompat.localGetItem(ref.localKey);
+      if (raw === null || raw === undefined || raw === '') {
+        state.localVectorStats.misses += 1;
+        throw new Error('LIBRA local vector payload is missing on this device.');
+      }
+      const payload = typeof raw === 'string' ? tryJsonParse(raw, null) : raw;
+      const decoded = decodeLocalProjectionPayload(payload, ref);
+      return cacheLocalVectorPayload(ref.localKey, decoded);
+    };
+
+    const hydrateProjectionFromLocalStorage = async record => {
+      if (!record || record.schema !== EMBEDDING_PROJECTION_SCHEMA || projectionHasVectorPayload(record)) return record;
+      const ref = normalizeLocalVectorRef(record.localVectorRef);
+      if (!ref) return record;
+      try {
+        const decoded = await loadLocalProjectionVectors(ref);
+        const entries = Object.fromEntries(Object.entries(asObject(record.entries)).map(([keyName, entry]) => [
+          keyName,
+          { ...clone(entry), vector: asArray(decoded.vectors[keyName]).slice() }
+        ]));
+        return {
+          ...clone(record),
+          entries,
+          vector: asArray(entries.global?.vector).slice(),
+          localVectorHydrated: true,
+          localVectorMissing: false
+        };
+      } catch (error) {
+        state.localVectorStats.failures += 1;
+        state.localVectorStats.lastError = compact(error?.message || error, 500);
+        return {
+          ...clone(record),
+          entries: Object.fromEntries(Object.entries(asObject(record.entries)).map(([keyName, entry]) => [keyName, { ...clone(entry), vector: [] }])),
+          vector: [],
+          localVectorHydrated: false,
+          localVectorMissing: true,
+          localVectorError: state.localVectorStats.lastError
+        };
+      }
+    };
+
     const storage = Object.freeze({
-      async getJson(key, fallback = null) {
-        const raw = await LibraProviderBridge.storage.getItem(key);
-        if (raw === null || raw === undefined || raw === '') return clone(fallback);
-        if (typeof raw === 'object') return clone(raw);
-        try { return JSON.parse(String(raw)); }
-        catch (error) { throw new Error(`pluginStorage JSON parse failed: ${key}: ${compact(error?.message || error, 300)}`); }
+      async getStoredJson(storageKey, fallback = null) {
+        const raw = await LibraProviderBridge.storage.getItem(storageKey);
+        return parseStoredJson(raw, storageKey, fallback);
       },
-      async setJson(key, value) {
-        const ok = await LibraProviderBridge.storage.setItem(key, JSON.stringify(value));
-        if (ok === false) throw new Error(`pluginStorage 쓰기 실패: ${key}`);
+      async getJson(storageKey, fallback = null) {
+        const value = await this.getStoredJson(storageKey, fallback);
+        return await hydrateProjectionFromLocalStorage(value);
+      },
+      async setJson(storageKey, value) {
+        let storedValue = value;
+        if (value?.schema === EMBEDDING_PROJECTION_SCHEMA && projectionHasVectorPayload(value)) {
+          const packed = packProjectionForLocalStorage(storageKey, value);
+          if (packed) {
+            try {
+              const localOk = await RisuCompat.localSetItem(packed.localVectorRef.localKey, packed.payload);
+              if (localOk === false) throw new Error('SafeLocalPluginStorage write returned false.');
+              const readbackRaw = await RisuCompat.localGetItem(packed.localVectorRef.localKey);
+              const readbackPayload = typeof readbackRaw === 'string' ? tryJsonParse(readbackRaw, null) : readbackRaw;
+              const decodedReadback = decodeLocalProjectionPayload(readbackPayload, packed.localVectorRef);
+              cacheLocalVectorPayload(packed.localVectorRef.localKey, decodedReadback);
+              state.localVectorStats.writes += 1;
+              state.localVectorStats.bytesWritten += packed.localVectorRef.byteLength;
+              state.localVectorStats.lastError = '';
+              storedValue = packed.storedRecord;
+            } catch (error) {
+              state.localVectorStats.failures += 1;
+              state.localVectorStats.fallbackInline += 1;
+              state.localVectorStats.lastError = compact(error?.message || error, 500);
+              storedValue = { ...clone(value), vectorStorageMode: 'plugin_storage_inline_fallback', vectorPayloadLocal: false };
+            }
+          }
+        }
+        const ok = await LibraProviderBridge.storage.setItem(storageKey, JSON.stringify(storedValue));
+        if (ok === false) throw new Error(`pluginStorage 쓰기 실패: ${storageKey}`);
         return true;
       },
       async keys() {
         const values = await LibraProviderBridge.storage.keys?.();
         return Array.isArray(values) ? values.map(value => String(value || '')).filter(Boolean) : [];
       },
-      async remove(key) { return await LibraProviderBridge.storage.removeItem(key); }
+      async remove(storageKey) {
+        let localKey = '';
+        try {
+          const stored = await this.getStoredJson(storageKey, null);
+          localKey = string(normalizeLocalVectorRef(stored?.localVectorRef)?.localKey || '');
+        } catch (_) {}
+        const removed = await LibraProviderBridge.storage.removeItem(storageKey);
+        if (removed !== false && localKey) {
+          state.localVectorCache.delete(localKey);
+          try { await RisuCompat.localRemoveItem(localKey); } catch (_) {}
+        }
+        return removed;
+      }
     });
 
     const key = Object.freeze({
@@ -25716,6 +25966,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       worldAdditional: (scope, itemId) => `${PREFIX}:scope:${scope.scopeKey}:world-additional:${itemId}`,
       predecessorMemory: (scope, transferId, ordinal, memoryId, revision) => `${PREFIX}:scope:${scope.scopeKey}:predecessor:${String(transferId || 'handoff')}:${String(ordinal).padStart(5, '0')}:${String(memoryId || 'memory')}:r${Number(revision || 0)}`,
       predecessorVector: (scope, transferId, ordinal, memoryId, revision, profileId) => `${PREFIX}:scope:${scope.scopeKey}:predecessor-vector:${String(transferId || 'handoff')}:${String(ordinal).padStart(5, '0')}:${String(memoryId || 'memory')}:r${Number(revision || 0)}:${String(profileId || 'profile')}`,
+      archiveManifest: archiveId => `${PREFIX}:shared-archive:${String(archiveId || '')}:manifest`,
+      archiveMemory: (archiveId, canonicalId, revision) => `${PREFIX}:shared-archive:${String(archiveId || '')}:memory:${String(canonicalId || '')}:r${Number(revision || 0)}`,
+      archiveVector: (archiveId, canonicalId, revision, profileId) => `${PREFIX}:shared-archive:${String(archiveId || '')}:vector:${String(canonicalId || '')}:r${Number(revision || 0)}:${String(profileId || 'profile')}`,
       handoffPackage: transferId => `${PREFIX}:handoff:${String(transferId || '')}`,
       handoffReceipt: transferId => `${PREFIX}:handoff-receipt:${String(transferId || '')}`,
       scopeRegistry: () => `${PREFIX}:scope-registry:v1`,
@@ -26192,6 +26445,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       frontiers: { observedTurn, committedTurn: 0 },
       memories: {},
       inheritedMemories: [],
+      archiveRef: null,
       runIds: [],
       worldAdditionalIds: [],
       inFlight: null,
@@ -26207,6 +26461,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       manifest.frontiers = { ...defaultManifest(scope, observedTurn).frontiers, ...asObject(manifest.frontiers), observedTurn };
       manifest.memories = asObject(manifest.memories);
       manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => ref && typeof ref === 'object');
+      manifest.archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
       manifest.runIds = asArray(manifest.runIds);
       manifest.worldAdditionalIds = asArray(manifest.worldAdditionalIds);
       manifest.stats = { ...defaultManifest(scope, observedTurn).stats, ...asObject(manifest.stats) };
@@ -26505,7 +26760,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const embedding = asObject(sourceMemory?.embedding);
       if (embedding.status !== 'ready' || !embedding.vectorKey) return targetMemory;
       const sourceVector = await storage.getJson(string(embedding.vectorKey), null);
-      if (!sourceVector) {
+      if (!projectionHasVectorPayload(sourceVector)) {
         targetMemory.embedding = {
           ...embedding, status: 'retry_pending', vectorKey: '', vectorCount: 0,
           reason: 'native_chat_copy_source_vector_missing', copiedAt: nowIso()
@@ -26598,6 +26853,17 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const copyTransferId = `nativecopy_${stableDraftHash(`${sourceScope.scopeKey}|${targetScope.scopeKey}`)}`;
         for (let index = 0; index < listInheritedMemoryRefs(sourceManifest).length; index += 1) {
           const sourceRef = listInheritedMemoryRefs(sourceManifest)[index];
+          if (sourceRef?.archiveShared === true) {
+            copiedInherited.push({
+              ...clone(sourceRef),
+              inheritedSessionHistory: true,
+              nativeCopiedFromScopeKey: sourceScope.scopeKey,
+              sourceSessionScopeKey: string(sourceRef.sourceSessionScopeKey || sourceScope.scopeKey)
+            });
+            clonedMemoryIds.add(string(sourceRef.memoryId || ''));
+            if (sourceRef.runId) clonedRunIds.add(string(sourceRef.runId));
+            continue;
+          }
           const sourceMemory = await storage.getJson(sourceRef.key, null);
           if (!sourceMemory || sourceMemory.status !== 'committed') continue;
           const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
@@ -26654,6 +26920,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           scopeKey: targetScope.scopeKey, characterId: targetScope.characterId, chatId: targetScope.chatId,
           frontiers: { observedTurn: targetPairs.length, committedTurn },
           memories: copiedMemories, inheritedMemories: copiedInherited,
+          archiveRef: normalizeLibraArchiveRef(sourceManifest.archiveRef),
           worldAdditionalIds: copiedWorldIds, inFlight: null,
           stats: {
             ...defaultManifest(targetScope, targetPairs.length).stats,
@@ -26665,6 +26932,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             sourceChatId: sourceScope.chatId, sourceScopeKey: sourceScope.scopeKey,
             targetChatId: targetScope.chatId, targetScopeKey: targetScope.scopeKey,
             memories: copiedCurrentRefs.length, inheritedMemories: copiedInherited.length,
+            archiveId: string(sourceManifest.archiveRef?.archiveId || ''),
+            archiveRecords: Math.max(0, Number(sourceManifest.archiveRef?.recordCount || 0) || 0),
+            physicalInheritedCopies: copiedInherited.filter(ref => ref?.archiveShared !== true).length,
             vectors: vectorCount, worldAdditional: copiedWorldIds.length, copiedAt
           },
           updatedAt: copiedAt
@@ -26738,14 +27008,302 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return await task;
     };
 
-    const loadMemoryRef = async ref => ref?.key ? await storage.getJson(ref.key, null) : null;
+    const loadMemoryRef = async ref => {
+      if (!ref?.key) return null;
+      const stored = await storage.getJson(ref.key, null);
+      if (!stored || ref?.archiveShared !== true) return stored;
+      const sessionEpoch = Number.isFinite(Number(ref.sessionEpoch)) ? Number(ref.sessionEpoch) : Number(stored.sessionEpoch || -1);
+      return {
+        ...stored,
+        sessionEpoch,
+        archiveShared: true,
+        archiveGeneration: Math.max(1, Number(ref.archiveGeneration || stored.archiveGeneration || 1) || 1),
+        archiveBaseSessionEpoch: Number.isFinite(Number(ref.archiveBaseSessionEpoch))
+          ? Number(ref.archiveBaseSessionEpoch)
+          : Number(stored.archiveBaseSessionEpoch || stored.sessionEpoch || -1)
+      };
+    };
     const removeMemoryRecord = async ref => {
-      if (!ref?.key) return false;
+      if (!ref?.key || ref?.archiveShared === true) return false;
       const memory = await storage.getJson(ref.key, null);
       const vectorKey = string(memory?.embedding?.vectorKey || '');
       if (vectorKey) await storage.remove(vectorKey);
       await storage.remove(ref.key);
       return true;
+    };
+
+    const libraArchiveRefPointer = value => {
+      const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      const archiveId = string(source.archiveId || '').trim();
+      if (!archiveId) return null;
+      return {
+        schema: LIBRA_SHARED_ARCHIVE_REF_SCHEMA,
+        archiveId,
+        generation: Math.max(1, Number(source.generation || 1) || 1),
+        depth: Math.max(1, Number(source.depth || 1) || 1),
+        deltaCount: Math.max(0, Number(source.deltaCount ?? source.recordCount ?? 0) || 0),
+        recordCount: Math.max(0, Number(source.recordCount || 0) || 0),
+        digest: string(source.digest || ''),
+        manifestKey: string(source.manifestKey || key.archiveManifest(archiveId)),
+        createdAt: string(source.createdAt || ''),
+        updatedAt: string(source.updatedAt || '')
+      };
+    };
+
+    const normalizeLibraArchiveRef = value => {
+      const pointer = libraArchiveRefPointer(value);
+      if (!pointer) return null;
+      const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      return { ...pointer, parentRef: libraArchiveRefPointer(source.parentRef || source.parentArchiveRef) };
+    };
+
+    const libraArchiveOrigin = memory => {
+      let lineage = memory?.predecessorLineage && typeof memory.predecessorLineage === 'object'
+        ? memory.predecessorLineage
+        : null;
+      let root = lineage;
+      let guard = 0;
+      while (root?.prior && typeof root.prior === 'object' && guard < 32) {
+        root = root.prior;
+        guard += 1;
+      }
+      return {
+        sourceScopeKey: string(root?.sourceScopeKey || memory?.sourceSessionScopeKey || memory?.scopeKey || ''),
+        sourceChatId: string(root?.sourceChatId || memory?.sourceSessionChatId || ''),
+        sourceMemoryId: string(root?.sourceMemoryId || memory?.memoryId || ''),
+        sourceRevision: Number(root?.sourceRevision || memory?.revision || 0),
+        sourceRunId: string(root?.sourceRunId || memory?.runId || ''),
+        sourceSessionEpoch: Number.isFinite(Number(root?.sourceSessionEpoch)) ? Number(root.sourceSessionEpoch) : Number(memory?.sessionEpoch || 0)
+      };
+    };
+
+    const libraArchiveMemoryIdentity = memory => string(memory?.archiveCanonicalId || '') || digest({
+      sourceDigest: string(memory?.sourceDigest || ''),
+      turnRange: clone(memory?.turnRange || {}),
+      text: string(memory?.text || ''),
+      summary: string(memory?.summary || ''),
+      createdAt: string(memory?.createdAt || '')
+    });
+
+    const libraArchiveRefIdentity = ref => string(ref?.archiveCanonicalId || '') || digest({
+      key: string(ref?.key || ''),
+      sourceDigest: string(ref?.sourceDigest || ''),
+      turnRange: clone(ref?.turnRange || {}),
+      revision: Number(ref?.revision || 0)
+    });
+
+    const mergeLibraArchiveMemoryRefs = (...lists) => {
+      const byId = new Map();
+      for (const ref of lists.flatMap(list => asArray(list))) {
+        if (!ref?.key || ref?.status !== 'committed') continue;
+        const identity = libraArchiveRefIdentity(ref);
+        const previous = byId.get(identity);
+        if (!previous || Number(ref.revision || 0) >= Number(previous.revision || 0)) byId.set(identity, ref);
+      }
+      return Array.from(byId.values()).sort((a, b) => (
+        memoryRefSessionEpoch(a) - memoryRefSessionEpoch(b)
+        || Number(a.turnRange?.start || 0) - Number(b.turnRange?.start || 0)
+        || string(a.archiveCanonicalId || '').localeCompare(string(b.archiveCanonicalId || ''))
+      ));
+    };
+
+    const libraArchiveRefsDigest = refs => digest(asArray(refs).map(ref => ({
+      archiveCanonicalId: string(ref.archiveCanonicalId || ''),
+      key: string(ref.key || ''),
+      revision: Number(ref.revision || 0),
+      sourceDigest: string(ref.sourceDigest || ''),
+      vectorKey: string(ref.vectorKey || '')
+    })).sort((a, b) => a.archiveCanonicalId.localeCompare(b.archiveCanonicalId)));
+
+    const readLibraSharedArchive = async archiveRefValue => {
+      const head = normalizeLibraArchiveRef(archiveRefValue);
+      if (!head) return { archiveRef: null, archive: null, memoryRefs: [], layers: [], verified: false, reason: 'archive_ref_absent' };
+      const seen = new Set();
+      const layers = [];
+      let cursor = head;
+      while (cursor && layers.length < LIBRA_SHARED_ARCHIVE_MAX_DEPTH) {
+        if (seen.has(cursor.manifestKey)) return { archiveRef: head, archive: null, memoryRefs: [], layers, verified: false, reason: 'archive_cycle' };
+        seen.add(cursor.manifestKey);
+        const archive = await storage.getJson(cursor.manifestKey, null);
+        if (!archive || archive.schema !== LIBRA_SHARED_ARCHIVE_SCHEMA || string(archive.archiveId) !== cursor.archiveId) {
+          return { archiveRef: head, archive: null, memoryRefs: [], layers, verified: false, reason: 'archive_missing' };
+        }
+        const rawMemoryRefs = asArray(archive.memoryRefs).filter(ref => ref?.key && ref?.status === 'committed');
+        if (Object.prototype.hasOwnProperty.call(archive, 'deltaCount') && rawMemoryRefs.length !== Number(archive.deltaCount || 0)) {
+          return { archiveRef: head, archive, memoryRefs: [], layers, verified: false, reason: 'archive_delta_count_mismatch' };
+        }
+        if (archive.deltaDigest && libraArchiveRefsDigest(rawMemoryRefs) !== string(archive.deltaDigest || '')) {
+          return { archiveRef: head, archive, memoryRefs: [], layers, verified: false, reason: 'archive_delta_digest_mismatch' };
+        }
+        const layerGeneration = Math.max(1, Number(archive.generation || cursor.generation || 1) || 1);
+        const memoryRefs = rawMemoryRefs.map(ref => {
+          const archiveGeneration = Math.max(1, Number(ref.archiveGeneration || layerGeneration) || layerGeneration);
+          const archiveBaseSessionEpoch = Number.isFinite(Number(ref.archiveBaseSessionEpoch))
+            ? Number(ref.archiveBaseSessionEpoch)
+            : Math.min(-1, Number(ref.sessionEpoch || -1));
+          const sessionEpoch = archiveBaseSessionEpoch - Math.max(0, Number(head.generation || layerGeneration) - archiveGeneration);
+          return { ...ref, archiveGeneration, archiveBaseSessionEpoch, sessionEpoch };
+        });
+        layers.push({ ref: cursor, archive, memoryRefs });
+        cursor = normalizeLibraArchiveRef(cursor.parentRef || archive.parentRef || archive.parentArchiveRef);
+      }
+      if (cursor) return { archiveRef: head, archive: layers[0]?.archive || null, memoryRefs: [], layers, verified: false, reason: 'archive_depth_exceeded' };
+      const memoryRefs = mergeLibraArchiveMemoryRefs(...layers.slice().reverse().map(layer => layer.memoryRefs));
+      const digestValue = libraArchiveRefsDigest(memoryRefs);
+      const verified = memoryRefs.length === head.recordCount && digestValue === head.digest;
+      return { archiveRef: head, archive: layers[0]?.archive || null, memoryRefs, layers, digest: digestValue, verified, reason: verified ? 'archive_verified' : 'archive_mismatch' };
+    };
+
+    const ensureLibraSharedArchive = async (context, manifest, sourceMemoryRefs = null, sourceMemories = null) => {
+      const refs = sourceMemoryRefs || listMemoryRefs(manifest).filter(ref => ref?.key);
+      const suppliedMemories = Array.isArray(sourceMemories) ? sourceMemories : null;
+      const existingRef = normalizeLibraArchiveRef(manifest.archiveRef);
+      const parent = existingRef ? await readLibraSharedArchive(existingRef) : null;
+      if (existingRef && parent?.verified !== true) throw new Error('LIBRA parent shared archive verification failed.');
+      const parentRefs = asArray(parent?.memoryRefs);
+      const parentIds = new Set(parentRefs.map(libraArchiveRefIdentity));
+      const pending = [];
+      let refMetadataChanged = false;
+      for (let index = 0; index < refs.length; index += 1) {
+        const sourceRef = refs[index];
+        const knownCanonicalId = string(sourceRef?.archiveCanonicalId || '');
+        if (knownCanonicalId && parentIds.has(knownCanonicalId)) continue;
+        if (sourceRef?.archiveShared === true && parentIds.has(libraArchiveRefIdentity(sourceRef))) continue;
+
+        // Only records not already proven by the immutable parent archive are
+        // hydrated. This keeps handoff preparation proportional to new 5-turn
+        // memories rather than the full multi-session history.
+        const sourceMemory = suppliedMemories?.[index] || await loadMemoryRef(sourceRef);
+        if (!sourceMemory || sourceMemory.status !== 'committed') throw new Error(`LIBRA archive source memory missing: ${string(sourceRef?.memoryId || sourceRef?.key)}`);
+        if (sourceRef.memoryId && string(sourceMemory.memoryId) !== string(sourceRef.memoryId)) throw new Error(`LIBRA archive source identity changed: ${string(sourceRef.memoryId)}`);
+        if (Number(sourceRef.revision || 0) > 0 && Number(sourceMemory.revision || 0) !== Number(sourceRef.revision || 0)) throw new Error(`LIBRA archive source revision changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
+        if (sourceRef.sourceDigest && string(sourceMemory.sourceDigest || '') !== string(sourceRef.sourceDigest)) throw new Error(`LIBRA archive source transcript digest changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
+        const canonicalId = libraArchiveMemoryIdentity(sourceMemory);
+        if (!sourceRef.archiveCanonicalId) {
+          sourceRef.archiveCanonicalId = canonicalId;
+          refMetadataChanged = true;
+        }
+        if (parentIds.has(canonicalId)) continue;
+        pending.push({ sourceRef, sourceMemory, canonicalId });
+      }
+      if (!pending.length && existingRef) {
+        manifest.archiveRef = existingRef;
+        if (refMetadataChanged) await saveManifest(context.scope, manifest);
+        return { archiveRef: existingRef, archive: parent.archive, memoryRefs: parentRefs, changed: false, deltaRecords: 0 };
+      }
+
+      const generation = Math.max(1, Number(existingRef?.generation || 0) + 1);
+      const layerSeed = pending.map(item => item.canonicalId).sort().join('|');
+      const archiveId = `la_${stableDraftHash(`${existingRef?.archiveId || ''}|${context.scope.scopeKey}|${generation}|${layerSeed}`)}`;
+      const manifestKey = key.archiveManifest(archiveId);
+      const deltaRefs = [];
+      for (let index = 0; index < pending.length; index += 1) {
+        const { sourceRef, sourceMemory, canonicalId } = pending[index];
+        const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
+        const archiveMemoryId = `arc_${canonicalId.slice(0, 32)}`;
+        const memoryKey = key.archiveMemory(archiveId, canonicalId, revision);
+        const origin = libraArchiveOrigin(sourceMemory);
+        const memory = {
+          ...clone(sourceMemory),
+          memoryId: archiveMemoryId,
+          scopeKey: `archive:${archiveId}`,
+          status: 'committed',
+          sessionEpoch: Math.min(-1, Number(sourceMemory.sessionEpoch || 0) - 1),
+          archiveBaseSessionEpoch: Math.min(-1, Number(sourceMemory.sessionEpoch || 0) - 1),
+          archiveGeneration: generation,
+          inheritedSessionHistory: true,
+          authorityClass: 'permanent_predecessor',
+          archiveShared: true,
+          archiveId,
+          archiveCanonicalId: canonicalId,
+          archiveOrigin: origin,
+          predecessorLineage: origin,
+          updatedAt: nowIso()
+        };
+        let archiveVectorKey = '';
+        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey) {
+          const sourceVector = await storage.getJson(string(memory.embedding.vectorKey), null);
+          if (projectionHasVectorPayload(sourceVector)) {
+            const profileId = string(sourceVector.profileId || memory.embedding.profileId || 'profile');
+            archiveVectorKey = key.archiveVector(archiveId, canonicalId, revision, profileId);
+            const existingVector = await storage.getJson(archiveVectorKey, null);
+            if (!projectionHasVectorPayload(existingVector)) await storage.setJson(archiveVectorKey, {
+              ...clone(sourceVector),
+              scopeKey: `archive:${archiveId}`,
+              memoryId: archiveMemoryId,
+              archiveId,
+              archiveCanonicalId: canonicalId,
+              createdAt: nowIso()
+            });
+            memory.embedding = { ...memory.embedding, vectorKey: archiveVectorKey };
+          } else {
+            memory.embedding = { ...memory.embedding, status: 'retry_pending', reason: 'archive_source_vector_missing' };
+          }
+        }
+        await storage.setJson(memoryKey, memory);
+        deltaRefs.push({
+          ...memoryRefFromStoredMemory(memory, memoryKey, [], sourceRef.createdAt || memory.createdAt || ''),
+          key: memoryKey,
+          status: 'committed',
+          archiveShared: true,
+          archiveId,
+          archiveCanonicalId: canonicalId,
+          archiveGeneration: generation,
+          archiveBaseSessionEpoch: Math.min(-1, Number(sourceMemory.sessionEpoch || 0) - 1),
+          sessionEpoch: Math.min(-1, Number(sourceMemory.sessionEpoch || 0) - 1),
+          vectorKey: archiveVectorKey,
+          inheritedSessionHistory: true,
+          authorityClass: 'permanent_predecessor'
+        });
+        sourceRef.archiveCanonicalId = canonicalId;
+        sourceRef.archivedInArchiveId = archiveId;
+        sourceRef.archivedAt = sourceRef.archivedAt || nowIso();
+        refMetadataChanged = true;
+      }
+      const memoryRefs = mergeLibraArchiveMemoryRefs(parentRefs, deltaRefs);
+      const digestValue = libraArchiveRefsDigest(memoryRefs);
+      const deltaDigest = libraArchiveRefsDigest(deltaRefs);
+      const archive = {
+        schema: LIBRA_SHARED_ARCHIVE_SCHEMA,
+        archiveId,
+        generation,
+        depth: Math.max(1, Number(existingRef?.depth || 0) + 1),
+        deltaCount: deltaRefs.length,
+        deltaDigest,
+        recordCount: memoryRefs.length,
+        digest: digestValue,
+        parentRef: existingRef ? libraArchiveRefPointer(existingRef) : null,
+        memoryRefs: deltaRefs,
+        createdAt: string(existingRef?.createdAt || nowIso()),
+        updatedAt: nowIso()
+      };
+      await storage.setJson(manifestKey, archive);
+      const persistedArchive = await storage.getJson(manifestKey, null);
+      if (!persistedArchive
+        || persistedArchive.schema !== LIBRA_SHARED_ARCHIVE_SCHEMA
+        || string(persistedArchive.archiveId || '') !== archiveId
+        || Number(persistedArchive.deltaCount || 0) !== deltaRefs.length
+        || string(persistedArchive.deltaDigest || '') !== deltaDigest
+        || Number(persistedArchive.recordCount || 0) !== memoryRefs.length
+        || string(persistedArchive.digest || '') !== digestValue) {
+        throw new Error('LIBRA shared archive durable readback failed.');
+      }
+      const archiveRef = {
+        schema: LIBRA_SHARED_ARCHIVE_REF_SCHEMA,
+        archiveId,
+        generation,
+        depth: archive.depth,
+        deltaCount: deltaRefs.length,
+        recordCount: memoryRefs.length,
+        digest: digestValue,
+        manifestKey,
+        createdAt: archive.createdAt,
+        updatedAt: archive.updatedAt,
+        parentRef: existingRef ? libraArchiveRefPointer(existingRef) : null
+      };
+      manifest.archiveRef = archiveRef;
+      await saveManifest(context.scope, manifest);
+      return { archiveRef, archive, memoryRefs, changed: true, deltaRecords: deltaRefs.length };
     };
 
     const inactiveHistoryEntryForRef = (ref, reason = 'superseded') => ref?.key ? {
@@ -26989,6 +27547,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const previousItems = new Map(asArray(previousState?.items).map(item => [item.memoryKey, item]));
       const previousQuarantine = new Map(asArray(previousState?.quarantine).map(item => [item.vectorKey, item]));
       const items = [];
+      const itemsByMemoryKey = new Map();
       const quarantine = asArray(previousState?.quarantine).map(item => clone(item));
       const quarantineKeys = new Set(quarantine.map(item => item.vectorKey));
       const changedAt = string(previousState?.changedAt || nowIso());
@@ -26998,19 +27557,30 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const scopeKey = string(manifest.scopeKey || manifestKey.slice(`${PREFIX}:scope:`.length, -':manifest'.length));
         for (const ref of listMemoryRefs(manifest)) {
           if (ref?.status !== 'committed' || !ref?.key) continue;
-          const memory = await storage.getJson(ref.key, null);
+          const memoryKey = string(ref.key);
+          const existingInventoryItem = itemsByMemoryKey.get(memoryKey);
+          if (existingInventoryItem) {
+            existingInventoryItem.manifestKeys = Array.from(new Set([
+              ...asArray(existingInventoryItem.manifestKeys),
+              string(existingInventoryItem.manifestKey || ''),
+              manifestKey
+            ].filter(Boolean)));
+            continue;
+          }
+          const memory = await storage.getJson(memoryKey, null);
           if (!memory || memory.status !== 'committed') continue;
           const vectorKey = string(memory.embedding?.vectorKey || '');
           const vectorRecord = vectorKey ? await storage.getJson(vectorKey, null) : null;
-          const compatible = !!(vectorRecord?.entries && vectorRecord?.configHash === targetSignature && memory.embedding?.status === 'ready');
-          const oldItem = previousItems.get(ref.key);
+          const compatible = !!(projectionHasVectorPayload(vectorRecord) && vectorRecord?.configHash === targetSignature && memory.embedding?.status === 'ready');
+          const oldItem = previousItems.get(memoryKey);
           let itemStatus = compatible ? 'complete' : 'pending';
           if (!compatible && oldItem?.status === 'failed' && previousState?.targetSignature === targetSignature) itemStatus = 'failed';
           if (!compatible && oldItem?.status === 'running') itemStatus = 'pending';
           const item = {
-            scopeKey,
+            scopeKey: string(memory.scopeKey || scopeKey),
             manifestKey,
-            memoryKey: string(ref.key),
+            manifestKeys: [manifestKey],
+            memoryKey,
             memoryId: string(memory.memoryId),
             revision: Number(memory.revision || ref.revision || 0),
             turnRange: clone(memory.turnRange || ref.turnRange || {}),
@@ -27022,6 +27592,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             updatedAt: nowIso()
           };
           items.push(item);
+          itemsByMemoryKey.set(memoryKey, item);
           if (!compatible && vectorKey && !quarantineKeys.has(vectorKey)) {
             quarantine.push(quarantineEntryFor(item, vectorRecord, vectorKey, previousQuarantine.get(vectorKey), changedAt));
             quarantineKeys.add(vectorKey);
@@ -27139,7 +27710,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           memory.embedding = { ...nextEmbedding, rebuiltAt: nowIso(), rebuiltFromProfileId: string(oldEmbedding.profileId || '') };
           memory.updatedAt = nowIso();
           await storage.setJson(item.memoryKey, memory);
-          await updateManifestEmbeddingRef(item.manifestKey, item.memoryKey, memory.embedding);
+          const manifestKeys = Array.from(new Set([
+            ...asArray(item.manifestKeys),
+            string(item.manifestKey || '')
+          ].filter(Boolean)));
+          for (const manifestKey of manifestKeys) {
+            await updateManifestEmbeddingRef(manifestKey, item.memoryKey, memory.embedding);
+          }
+          item.manifestKeys = manifestKeys;
           item.oldVectorKey = oldVectorKey;
           item.newVectorKey = generatedVectorKey;
           item.status = 'complete';
@@ -28467,7 +29045,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       if (!contextual && previousRecord?.configHash === configHash) {
         for (const keyName of allKeys) {
           const old = previousEntries[keyName];
-          if (old?.vector && old.textHash === projection.textHashes[keyName]) reusable[keyName] = old;
+          if (Array.isArray(old?.vector) && old.vector.length && old.textHash === projection.textHashes[keyName]) reusable[keyName] = old;
         }
       }
 
@@ -29640,6 +30218,20 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       if (previous?.schema !== RECALL_CATALOG_SCHEMA) previous = { entries: [] };
       const oldByKey = new Map(asArray(previous.entries).map(entry => [string(entry?.memoryKey || ''), entry]).filter(([keyValue]) => keyValue));
+      const preservePreviousVectorSketch = (entry, previousEntry) => {
+        if (!entry || !previousEntry) return entry;
+        if (asArray(entry.vectorSketch).length || !asArray(previousEntry.vectorSketch).length) return entry;
+        const sameIdentity = string(entry.memoryId || '') === string(previousEntry.memoryId || '')
+          && Number(entry.revision || 0) === Number(previousEntry.revision || 0);
+        const sameProfile = string(entry.vectorProfileId || '') === string(previousEntry.vectorProfileId || '')
+          && string(entry.vectorConfigHash || '') === string(previousEntry.vectorConfigHash || '');
+        if (!sameIdentity || !sameProfile || string(entry.embeddingStatus || '') !== 'ready') return entry;
+        return {
+          ...entry,
+          vectorSketch: asArray(previousEntry.vectorSketch).slice(),
+          vectorSketchRecoveredFromCatalog: true
+        };
+      };
       const entries = [];
       let refreshedEntries = 0;
       let reusedEntries = 0;
@@ -29655,7 +30247,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           continue;
         }
         try {
-          const entry = await recallCatalogEntryFromMemory(ref);
+          const entry = preservePreviousVectorSketch(await recallCatalogEntryFromMemory(ref), cached);
           if (entry) {
             entries.push(entry);
             refreshedEntries += 1;
@@ -30577,68 +31169,115 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         canonicalViewer: true,
         sessionHandoff: true,
         parallelInspect: true,
-        inspectConcurrency: 12
+        inspectConcurrency: 12,
+        archiveHandoffV1: true,
+        physicalMemoryCopyOnHandoff: false,
+        summaryInspect: true,
+        localDenseVectorPayloads: true,
+        denseRecallFailSoft: true
       },
       respondedAt: nowIso()
     });
 
-    const inspectForRetrace = async () => {
+    const inspectForRetrace = async (options = {}) => {
+      const includeRecords = options?.includeRecords !== false;
       const context = await resolveContext();
       const pairs = buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
       const memoryRefs = listMemoryRefs(manifest);
-      const loadedMemories = await mapWithConcurrency(memoryRefs, ref => loadMemoryRef(ref), 12);
-      const memories = loadedMemories.filter(Boolean);
-      const missingMemoryKeys = memoryRefs
-        .filter((ref, index) => !loadedMemories[index] && ref?.key)
-        .map(ref => string(ref.key));
-
-      // Derive active run IDs from the records already loaded above. The previous
-      // implementation reread every canonical memory serially here, which made a
-      // harmless RE:TRACE viewer probe scale poorly on long sessions.
-      const activeRunIds = new Set(memories
-        .filter(memory => memory?.status === 'committed' && memory?.runId)
-        .map(memory => string(memory.runId)));
-      const loadedWorldAdditional = await mapWithConcurrency(
-        manifest.worldAdditionalIds,
-        itemId => loadWorldItem(context.scope, itemId),
-        12
-      );
-      const missingWorldAdditionalIds = manifest.worldAdditionalIds
-        .filter((itemId, index) => !loadedWorldAdditional[index] && itemId)
-        .map(itemId => string(itemId));
-      const worldAdditional = loadedWorldAdditional.filter(item => (
-        item && (!item.sourceRunId || activeRunIds.has(string(item.sourceRunId)))
-      ));
-      const inheritedCount = memories.filter(memory => memory?.inheritedSessionHistory === true || Number(memory?.sessionEpoch || 0) < 0).length;
-      return clone({
+      const inheritedCount = memoryRefs.filter(ref => ref?.inheritedSessionHistory === true || Number(ref?.sessionEpoch || 0) < 0).length;
+      const archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
+      const snapshotHash = digest({
+        scopeKey: string(context.scope.scopeKey || ''),
+        memoryRefs: memoryRefs.map(ref => ({
+          key: string(ref?.key || ''), memoryId: string(ref?.memoryId || ''), revision: Number(ref?.revision || 0),
+          sourceDigest: string(ref?.sourceDigest || ''), sessionEpoch: Number(ref?.sessionEpoch || 0),
+          status: string(ref?.status || ''), archiveShared: ref?.archiveShared === true,
+          archiveCanonicalId: string(ref?.archiveCanonicalId || '')
+        })),
+        worldAdditionalIds: asArray(manifest.worldAdditionalIds).map(itemId => string(itemId)),
+        archiveRef
+      });
+      const base = {
         schema: LIBRA_RETRACE_INSPECT_SCHEMA,
         pluginVersion: VERSION,
         available: true,
+        recordsIncluded: includeRecords,
+        capabilities: { archiveHandoffV1: true, summaryInspect: true, physicalMemoryCopyOnHandoff: false, localDenseVectorPayloads: true, denseRecallFailSoft: true },
         scope: context.scope,
         manifest: {
-          schema: manifest.schema,
-          version: manifest.version,
-          frontiers: manifest.frontiers,
-          inFlight: manifest.inFlight,
-          stats: manifest.stats,
-          updatedAt: manifest.updatedAt
+          schema: manifest.schema, version: manifest.version, frontiers: manifest.frontiers,
+          inFlight: manifest.inFlight, stats: manifest.stats, archiveRef, updatedAt: manifest.updatedAt
         },
-        integrity: {
-          ok: missingMemoryKeys.length === 0 && missingWorldAdditionalIds.length === 0,
-          missingMemoryKeys,
-          missingWorldAdditionalIds
-        },
-        memories,
-        worldAdditional,
-        counts: {
-          memories: memories.length,
-          liveMemories: memories.length - inheritedCount,
-          inheritedMemories: inheritedCount,
-          partialMemories: memories.filter(memory => memory?.pipeline?.status === 'partial').length,
-          worldAdditional: worldAdditional.length
+        snapshotHash,
+        localVectorStorage: {
+          mode: LOCAL_VECTOR_STORAGE_MODE,
+          cacheEntries: state.localVectorCache.size,
+          ...clone(state.localVectorStats)
         },
         inspectedAt: nowIso()
+      };
+      if (!includeRecords) {
+        const archive = archiveRef ? await readLibraSharedArchive(archiveRef) : null;
+        const sharedRefs = memoryRefs.filter(ref => ref?.archiveShared === true);
+        const archiveMembersByKey = new Set(asArray(archive?.memoryRefs).map(ref => string(ref?.key || '')).filter(Boolean));
+        const archiveMembersByCanonicalId = new Set(asArray(archive?.memoryRefs).map(ref => string(ref?.archiveCanonicalId || '')).filter(Boolean));
+        const archiveIntegrityOk = !archiveRef || (
+          archive?.verified === true
+          && sharedRefs.every(ref => (
+            (string(ref?.key || '') && archiveMembersByKey.has(string(ref.key)))
+            || (string(ref?.archiveCanonicalId || '') && archiveMembersByCanonicalId.has(string(ref.archiveCanonicalId)))
+          ))
+        );
+        return clone({
+          ...base,
+          integrity: {
+            ok: archiveIntegrityOk,
+            lightweight: true,
+            reason: archiveIntegrityOk ? 'summary_manifest_verified' : (archive?.reason || 'archive_ref_mismatch'),
+            missingMemoryKeys: [],
+            missingWorldAdditionalIds: []
+          },
+          memories: [],
+          memoryRefs: memoryRefs.map(ref => ({
+            memoryId: string(ref.memoryId || ''), key: string(ref.key || ''), revision: Number(ref.revision || 0),
+            sourceDigest: string(ref.sourceDigest || ''), turnRange: clone(ref.turnRange || {}), summary: string(ref.summary || ''),
+            sessionEpoch: Number(ref.sessionEpoch || 0), inheritedSessionHistory: ref.inheritedSessionHistory === true,
+            pipelineStatus: string(ref.pipelineStatus || ''), runId: string(ref.runId || ''),
+            archiveShared: ref.archiveShared === true, archiveId: string(ref.archiveId || ''), archiveCanonicalId: string(ref.archiveCanonicalId || '')
+          })),
+          worldAdditional: [],
+          worldAdditionalRefs: asArray(manifest.worldAdditionalIds).map(itemId => string(itemId)),
+          counts: {
+            memories: memoryRefs.length,
+            liveMemories: memoryRefs.length - inheritedCount,
+            inheritedMemories: inheritedCount,
+            partialMemories: memoryRefs.filter(ref => ref?.pipelineStatus === 'partial').length,
+            worldAdditional: asArray(manifest.worldAdditionalIds).length
+          }
+        });
+      }
+      const loadedMemories = await mapWithConcurrency(memoryRefs, ref => loadMemoryRef(ref), 12);
+      const memories = loadedMemories.filter(Boolean);
+      const missingMemoryKeys = memoryRefs.filter((ref, index) => !loadedMemories[index] && ref?.key).map(ref => string(ref.key));
+      const activeRunIds = new Set(memoryRefs.map(ref => string(ref?.runId || '')).filter(Boolean));
+      const loadedWorldAdditional = await mapWithConcurrency(manifest.worldAdditionalIds, itemId => loadWorldItem(context.scope, itemId), 12);
+      const missingWorldAdditionalIds = manifest.worldAdditionalIds.filter((itemId, index) => !loadedWorldAdditional[index] && itemId).map(itemId => string(itemId));
+      const worldAdditional = loadedWorldAdditional.filter(item => item && (!item.sourceRunId || activeRunIds.has(string(item.sourceRunId))));
+      return clone({
+        ...base,
+        integrity: { ok: missingMemoryKeys.length === 0 && missingWorldAdditionalIds.length === 0, lightweight: false, missingMemoryKeys, missingWorldAdditionalIds },
+        memories,
+        memoryRefs: [],
+        worldAdditional,
+        worldAdditionalRefs: [],
+        counts: {
+          memories: memoryRefs.length,
+          liveMemories: memoryRefs.length - inheritedCount,
+          inheritedMemories: inheritedCount,
+          partialMemories: memoryRefs.filter(ref => ref?.pipelineStatus === 'partial').length,
+          worldAdditional: worldAdditional.length
+        }
       });
     };
 
@@ -30671,110 +31310,77 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const pairs = buildPairs(context.chat);
       const manifest = await loadManifest(context.scope, pairs.length);
       const sourceMemoryRefs = listMemoryRefs(manifest).filter(ref => ref?.key);
-      const sourceMemories = await mapWithConcurrency(sourceMemoryRefs, ref => loadMemoryRef(ref), 12);
-      const invalidMemoryRefs = sourceMemoryRefs.filter((ref, index) => {
-        const memory = sourceMemories[index];
-        if (!memory || memory.status !== 'committed') return true;
-        if (ref.memoryId && string(memory.memoryId) !== string(ref.memoryId)) return true;
-        if (Number(ref.revision || 0) > 0 && Number(memory.revision || 0) !== Number(ref.revision || 0)) return true;
-        if (ref.sourceDigest && string(memory.sourceDigest) !== string(ref.sourceDigest)) return true;
-        return false;
-      });
-      if (invalidMemoryRefs.length) {
-        throw new Error(`LIBRA handoff source integrity failed: ${invalidMemoryRefs.map(ref => string(ref.memoryId || ref.key)).join(', ')}`);
-      }
-      const memoryRefs = sourceMemoryRefs.map((ref, index) => {
-        const memory = sourceMemories[index];
-        return {
-          key: string(ref.key), memoryId: string(memory.memoryId || ref.memoryId), revision: Number(memory.revision || ref.revision || 0),
-          sourceDigest: string(memory.sourceDigest || ref.sourceDigest || ''), sessionEpoch: memoryRefSessionEpoch(memory),
-          turnRange: clone(memory.turnRange || ref.turnRange || {}), runId: string(memory.runId || ref.runId || ''),
-          recordDigest: digest(memory)
-        };
-      });
-      const activeRunIds = new Set(sourceMemories
-        .filter(memory => memory?.status === 'committed' && memory?.runId)
-        .map(memory => string(memory.runId)));
+      const archive = await ensureLibraSharedArchive(context, manifest, sourceMemoryRefs);
+      const memoryRefs = archive.memoryRefs;
+      const activeRunIds = new Set(sourceMemoryRefs.map(ref => string(ref?.runId || '')).filter(Boolean));
       const worldAdditionalRefs = [];
       for (const itemId of manifest.worldAdditionalIds) {
         const item = await loadWorldItem(context.scope, itemId);
         if (!item || !['eligible', 'injected'].includes(string(item.status))) continue;
         if (item.sourceRunId && !activeRunIds.has(string(item.sourceRunId))) continue;
-        worldAdditionalRefs.push({
-          itemId: string(item.itemId || itemId),
-          key: key.worldAdditional(context.scope, itemId),
-          recordDigest: digest(item),
-          record: clone(item)
-        });
+        worldAdditionalRefs.push({ itemId: string(item.itemId || itemId), key: key.worldAdditional(context.scope, itemId), recordDigest: digest(item), record: clone(item) });
       }
-      const expectedRecords = options.expectedRecords == null
-        ? memoryRefs.length
-        : Math.max(0, Number(options.expectedRecords || 0) || 0);
-      const expectedWorldAdditional = options.expectedWorldAdditional == null
-        ? worldAdditionalRefs.length
-        : Math.max(0, Number(options.expectedWorldAdditional || 0) || 0);
-      if (expectedRecords !== memoryRefs.length || expectedWorldAdditional !== worldAdditionalRefs.length) {
-        throw new Error('LIBRA handoff source count changed before preparation.');
-      }
+      const expectedRecords = options.expectedRecords == null ? memoryRefs.length : Math.max(0, Number(options.expectedRecords || 0) || 0);
+      const expectedWorldAdditional = options.expectedWorldAdditional == null ? worldAdditionalRefs.length : Math.max(0, Number(options.expectedWorldAdditional || 0) || 0);
+      if (expectedRecords !== memoryRefs.length || expectedWorldAdditional !== worldAdditionalRefs.length) throw new Error('LIBRA handoff source count changed before preparation.');
       const preparedAt = nowIso();
       const packageValue = {
         schema: LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA,
+        archiveContract: LIBRA_SHARED_ARCHIVE_REF_SCHEMA,
         transferId,
         source: { scope: clone(context.scope), identity: context.identity },
+        archiveRef: archive.archiveRef,
         memoryRefs,
         worldAdditionalRefs,
         expectedRecords,
         expectedWorldAdditional,
+        physicalMemoryCopies: 0,
         preparedAt,
         expiresAt: new Date(Date.now() + LIBRA_SESSION_HANDOFF_TTL_MS).toISOString()
       };
-      packageValue.packageDigest = digest({
-        transferId: packageValue.transferId,
-        source: packageValue.source,
-        memoryRefs: packageValue.memoryRefs,
-        worldAdditionalRefs: packageValue.worldAdditionalRefs,
-        expectedRecords: packageValue.expectedRecords,
-        expectedWorldAdditional: packageValue.expectedWorldAdditional,
-        preparedAt: packageValue.preparedAt,
-        expiresAt: packageValue.expiresAt
-      });
+      packageValue.packageDigest = digest({ ...packageValue, packageDigest: undefined });
       await storage.setJson(key.handoffPackage(transferId), packageValue);
       const durablePackage = await storage.getJson(key.handoffPackage(transferId), null);
-      const durable = durablePackage?.schema === LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA
-        && string(durablePackage.transferId || '') === transferId
-        && asArray(durablePackage.memoryRefs).length === expectedRecords
-        && asArray(durablePackage.worldAdditionalRefs).length === expectedWorldAdditional
-        && string(durablePackage.packageDigest || '') === string(packageValue.packageDigest)
-        && digest({
-          transferId: durablePackage.transferId,
-          source: durablePackage.source,
-          memoryRefs: durablePackage.memoryRefs,
-          worldAdditionalRefs: durablePackage.worldAdditionalRefs,
-          expectedRecords: durablePackage.expectedRecords,
-          expectedWorldAdditional: durablePackage.expectedWorldAdditional,
-          preparedAt: durablePackage.preparedAt,
-          expiresAt: durablePackage.expiresAt
-        }) === string(durablePackage.packageDigest || '');
-      if (!durable) throw new Error('LIBRA handoff package durable readback failed.');
+      if (!durablePackage || durablePackage.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA
+        || string(durablePackage.transferId || '') !== transferId
+        || string(durablePackage.packageDigest || '') !== string(packageValue.packageDigest)
+        || digest({ ...durablePackage, packageDigest: undefined }) !== string(durablePackage.packageDigest || '')) {
+        throw new Error('LIBRA handoff package durable readback failed.');
+      }
       return clone({
         schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
         action: 'prepared', transferId, prepared: true, durable: true, sourceScope: context.scope,
         records: memoryRefs.length, expectedRecords,
         worldAdditional: worldAdditionalRefs.length, expectedWorldAdditional,
+        archiveId: archive.archiveRef.archiveId,
+        archiveGeneration: archive.archiveRef.generation,
+        archiveDigest: archive.archiveRef.digest,
+        archiveRecordCount: archive.archiveRef.recordCount,
+        physicalMemoryCopies: 0,
         preparedAt, expiresAt: packageValue.expiresAt
       });
     };
 
-    const inheritedMemoryRefForTransfer = (memory, memoryKey, transferId, sourceScope) => ({
-      ...memoryRefFromStoredMemory(memory, memoryKey, [], memory.createdAt || nowIso()),
-      status: 'committed',
-      sessionEpoch: Number(memory.sessionEpoch || -1),
-      inheritedSessionHistory: true,
-      authorityClass: 'permanent_predecessor',
-      handoffTransferId: transferId,
-      sourceSessionChatId: string(sourceScope?.chatId || memory.sourceSessionChatId || ''),
-      sourceSessionScopeKey: string(sourceScope?.scopeKey || memory.sourceSessionScopeKey || '')
-    });
+    const inheritedMemoryRefForTransfer = (ref, transferId, sourceScope, headGeneration = 1) => {
+      const archiveGeneration = Math.max(1, Number(ref?.archiveGeneration || headGeneration || 1) || 1);
+      const archiveBaseSessionEpoch = Number.isFinite(Number(ref?.archiveBaseSessionEpoch))
+        ? Number(ref.archiveBaseSessionEpoch)
+        : Math.min(-1, Number(ref?.sessionEpoch || -1));
+      const sessionEpoch = archiveBaseSessionEpoch - Math.max(0, Number(headGeneration || archiveGeneration) - archiveGeneration);
+      return {
+        ...clone(ref),
+        status: 'committed',
+        sessionEpoch,
+        archiveGeneration,
+        archiveBaseSessionEpoch,
+        inheritedSessionHistory: true,
+        authorityClass: 'permanent_predecessor',
+        handoffTransferId: transferId,
+        sourceSessionChatId: string(sourceScope?.chatId || ref.sourceSessionChatId || ''),
+        sourceSessionScopeKey: string(sourceScope?.scopeKey || ref.sourceSessionScopeKey || ''),
+        archiveShared: true
+      };
+    };
 
     const verifySessionHandoff = async (options = {}) => {
       const transferId = normalizeHandoffTransferId(options.transferId || '');
@@ -30783,139 +31389,65 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const target = await waitForTargetContextForHandoff(targetChatId);
       const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
       const refs = asArray(manifest.inheritedMemories).filter(ref => ref?.status === 'committed' && string(ref.handoffTransferId) === transferId);
+      const expectedRecords = options.expectedRecords == null ? refs.length : Math.max(0, Number(options.expectedRecords) || 0);
       let readable = 0;
       let vectorsReady = 0;
       for (const ref of refs) {
         const memory = await loadMemoryRef(ref);
         if (!memory) continue;
         readable += 1;
-        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey) {
-          const vector = await storage.getJson(memory.embedding.vectorKey, null);
-          if (vector) vectorsReady += 1;
-        }
+        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey && projectionHasVectorPayload(await storage.getJson(memory.embedding.vectorKey, null))) vectorsReady += 1;
       }
-      const expectedRaw = options.expectedRecords;
-      const expectedRecords = expectedRaw === undefined || expectedRaw === null || expectedRaw === ''
-        ? refs.length
-        : Math.max(0, Number(expectedRaw) || 0);
-      const expectedWorldRaw = options.expectedWorldAdditional;
-      const priorReceipt = await storage.getJson(key.handoffReceipt(transferId), null);
-      const receiptMatchesTransfer = priorReceipt?.schema === LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA
-        && string(priorReceipt?.transferId || '') === transferId
-        && string(priorReceipt?.targetChatId || '') === targetChatId
-        && priorReceipt?.verified === true
-        && priorReceipt?.durable === true;
-      const expectedWorldAdditional = expectedWorldRaw === undefined || expectedWorldRaw === null || expectedWorldRaw === ''
-        ? Math.max(0, Number(
-          manifest.lastSessionHandoff?.transferId === transferId
-            ? manifest.lastSessionHandoff?.worldAdditional
-            : receiptMatchesTransfer ? priorReceipt?.expectedWorldAdditional : 0
-        ) || 0)
-        : Math.max(0, Number(expectedWorldRaw) || 0);
-      const markerMatchesTransfer = manifest.lastSessionHandoff?.transferId === transferId;
-      const markerWorldIds = markerMatchesTransfer
-        ? asArray(manifest.lastSessionHandoff?.worldAdditionalIds).map(itemId => string(itemId)).filter(Boolean)
-        : [];
-      const receiptWorldIds = receiptMatchesTransfer
-        ? asArray(priorReceipt?.worldAdditionalIds).map(itemId => string(itemId)).filter(Boolean)
-        : [];
-      const knownWorldIds = markerMatchesTransfer ? markerWorldIds : receiptWorldIds;
-      const candidateWorldIds = knownWorldIds.length || expectedWorldAdditional === 0
-        ? knownWorldIds
-        : asArray(manifest.worldAdditionalIds);
-      const loadedWorldItems = await mapWithConcurrency(
-        candidateWorldIds,
-        itemId => loadWorldItem(target.scope, itemId),
-        12
-      );
-      const missingWorldAdditionalIds = candidateWorldIds
-        .filter((itemId, index) => !loadedWorldItems[index] && itemId)
-        .map(itemId => string(itemId));
-      const transferredWorldAdditional = loadedWorldItems.filter(item => (
-        item && string(item.handoffTransferId || '') === transferId
-      ));
-      const worldAdditionalReadable = transferredWorldAdditional.length;
-      const transferKnown = markerMatchesTransfer || receiptMatchesTransfer;
-      const verified = transferKnown
-        && readable === refs.length
-        && readable === expectedRecords
-        && missingWorldAdditionalIds.length === 0
-        && worldAdditionalReadable === expectedWorldAdditional;
+      const expectedWorldAdditional = options.expectedWorldAdditional == null
+        ? Math.max(0, Number(manifest.lastSessionHandoff?.transferId === transferId ? manifest.lastSessionHandoff?.worldAdditional : 0) || 0)
+        : Math.max(0, Number(options.expectedWorldAdditional) || 0);
+      const worldIds = manifest.lastSessionHandoff?.transferId === transferId ? asArray(manifest.lastSessionHandoff.worldAdditionalIds) : [];
+      const worldItems = await mapWithConcurrency(worldIds, itemId => loadWorldItem(target.scope, itemId), 12);
+      const worldAdditionalReadable = worldItems.filter(item => item && string(item.handoffTransferId || '') === transferId).length;
+      const archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
+      const archive = await readLibraSharedArchive(archiveRef);
+      const verified = manifest.lastSessionHandoff?.transferId === transferId
+        && readable === refs.length && readable === expectedRecords
+        && worldAdditionalReadable === expectedWorldAdditional
+        && archive.verified === true && archive.memoryRefs.length === expectedRecords;
       return clone({
         schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
         action: 'verified', transferId, targetChatId, targetScope: target.scope,
         verified, durable: verified, records: readable, expectedRecords,
-        worldAdditional: worldAdditionalReadable,
-        expectedWorldAdditional,
-        worldAdditionalIds: transferredWorldAdditional.map(item => string(item.itemId)).filter(Boolean),
-        missingWorldAdditionalIds,
-        vectorsReady, reason: verified ? 'libra_handoff_durable' : 'libra_handoff_readback_mismatch'
+        worldAdditional: worldAdditionalReadable, expectedWorldAdditional,
+        worldAdditionalIds: worldIds,
+        vectorsReady,
+        archiveId: archiveRef?.archiveId || '',
+        archiveGeneration: archiveRef?.generation || 0,
+        archiveDigest: archiveRef?.digest || '',
+        archiveRecordCount: archiveRef?.recordCount || 0,
+        physicalMemoryCopies: 0,
+        reason: verified ? 'libra_archive_handoff_durable' : 'libra_archive_handoff_readback_mismatch'
       });
     };
 
     const adoptSessionHandoff = async (options = {}) => {
       const transferId = normalizeHandoffTransferId(options.transferId || '');
       const targetChatId = string(options.targetChatId || '').trim();
-      const requestedExpectedRecords = options.expectedRecords == null
-        ? null
-        : Math.max(0, Number(options.expectedRecords || 0) || 0);
-      const requestedExpectedWorldAdditional = options.expectedWorldAdditional == null
-        ? null
-        : Math.max(0, Number(options.expectedWorldAdditional || 0) || 0);
+      const requestedExpectedRecords = options.expectedRecords == null ? null : Math.max(0, Number(options.expectedRecords || 0) || 0);
+      const requestedExpectedWorldAdditional = options.expectedWorldAdditional == null ? null : Math.max(0, Number(options.expectedWorldAdditional || 0) || 0);
       if (!targetChatId) throw new Error('LIBRA handoff 채택에는 transferId와 targetChatId가 필요합니다.');
       const packageValue = await storage.getJson(key.handoffPackage(transferId), null);
       if (!packageValue || packageValue.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA) {
         const prior = await storage.getJson(key.handoffReceipt(transferId), null);
-        if (prior?.targetChatId === targetChatId
-          && prior?.transferId === transferId
-          && prior?.verified === true
-          && prior?.durable === true
-          && (requestedExpectedRecords == null || (
-            Object.prototype.hasOwnProperty.call(prior, 'records')
-            && Object.prototype.hasOwnProperty.call(prior, 'expectedRecords')
-            && Number.isInteger(Number(prior.records))
-            && Number.isInteger(Number(prior.expectedRecords))
-            && Number(prior.records) === requestedExpectedRecords
-            && Number(prior.expectedRecords) === requestedExpectedRecords
-          ))
-          && (requestedExpectedWorldAdditional == null || (
-            Object.prototype.hasOwnProperty.call(prior, 'worldAdditional')
-            && Object.prototype.hasOwnProperty.call(prior, 'expectedWorldAdditional')
-            && Number.isInteger(Number(prior.worldAdditional))
-            && Number.isInteger(Number(prior.expectedWorldAdditional))
-            && Number(prior.worldAdditional) === requestedExpectedWorldAdditional
-            && Number(prior.expectedWorldAdditional) === requestedExpectedWorldAdditional
-          ))) return clone(prior);
+        if (prior?.targetChatId === targetChatId && prior?.transferId === transferId && prior?.verified === true && prior?.durable === true) return clone(prior);
         throw new Error('준비된 LIBRA handoff package를 찾지 못했습니다.');
       }
       if (Date.parse(string(packageValue.expiresAt || '')) && Date.parse(string(packageValue.expiresAt)) <= Date.now()) {
         await storage.remove(key.handoffPackage(transferId));
         throw new Error('LIBRA handoff package가 만료되었습니다. 다시 다음 세션 전환을 실행하세요.');
       }
-      if (string(packageValue.transferId || '') !== transferId || !string(packageValue.packageDigest || '')) {
-        throw new Error('LIBRA handoff package identity verification failed.');
-      }
-      const computedPackageDigest = digest({
-        transferId: packageValue.transferId,
-        source: packageValue.source,
-        memoryRefs: packageValue.memoryRefs,
-        worldAdditionalRefs: packageValue.worldAdditionalRefs,
-        expectedRecords: packageValue.expectedRecords,
-        expectedWorldAdditional: packageValue.expectedWorldAdditional,
-        preparedAt: packageValue.preparedAt,
-        expiresAt: packageValue.expiresAt
-      });
-      if (computedPackageDigest !== string(packageValue.packageDigest)) {
-        throw new Error('LIBRA handoff package integrity verification failed.');
-      }
-      const packageRecords = asArray(packageValue.memoryRefs).length;
+      if (digest({ ...packageValue, packageDigest: undefined }) !== string(packageValue.packageDigest || '')) throw new Error('LIBRA handoff package integrity verification failed.');
+      const archiveRef = normalizeLibraArchiveRef(packageValue.archiveRef);
+      const archive = await readLibraSharedArchive(archiveRef);
+      if (!archive.verified) throw new Error('LIBRA shared archive verification failed.');
+      const packageRecords = archive.memoryRefs.length;
       const packageWorldAdditional = asArray(packageValue.worldAdditionalRefs).length;
-      if (!Number.isInteger(Number(packageValue.expectedRecords))
-        || !Number.isInteger(Number(packageValue.expectedWorldAdditional))
-        || Number(packageValue.expectedRecords) !== packageRecords
-        || Number(packageValue.expectedWorldAdditional) !== packageWorldAdditional) {
-        throw new Error('LIBRA handoff package declared counts do not match its records.');
-      }
       if ((requestedExpectedRecords != null && requestedExpectedRecords !== packageRecords)
         || (requestedExpectedWorldAdditional != null && requestedExpectedWorldAdditional !== packageWorldAdditional)) {
         throw new Error('LIBRA handoff package count does not match the requested transfer.');
@@ -30923,83 +31455,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const target = await waitForTargetContextForHandoff(targetChatId);
       if (string(packageValue.source?.scope?.chatId) === targetChatId) throw new Error('LIBRA handoff 대상이 원본 채팅과 같습니다.');
       const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
-      manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => string(ref.handoffTransferId) !== transferId);
-      const copiedRefs = [];
       const sourceScope = packageValue.source?.scope || {};
-      for (let index = 0; index < asArray(packageValue.memoryRefs).length; index += 1) {
-        const sourceRef = packageValue.memoryRefs[index];
-        const sourceMemory = await storage.getJson(sourceRef?.key, null);
-        if (!sourceMemory || sourceMemory.status !== 'committed') throw new Error(`LIBRA 원본 정본을 읽지 못했습니다: ${string(sourceRef?.memoryId || sourceRef?.key)}`);
-        if (sourceRef?.memoryId && string(sourceMemory.memoryId) !== string(sourceRef.memoryId)) {
-          throw new Error(`LIBRA handoff source identity changed: ${string(sourceRef.memoryId)}`);
-        }
-        if (Number(sourceRef?.revision || 0) > 0 && Number(sourceMemory.revision || 0) !== Number(sourceRef.revision || 0)) {
-          throw new Error(`LIBRA handoff source revision changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
-        }
-        if (sourceRef?.sourceDigest && string(sourceMemory.sourceDigest) !== string(sourceRef.sourceDigest)) {
-          throw new Error(`LIBRA handoff source transcript digest changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
-        }
-        if (sourceRef?.recordDigest && digest(sourceMemory) !== string(sourceRef.recordDigest)) {
-          throw new Error(`LIBRA handoff source record changed after preparation: ${string(sourceRef.memoryId || sourceRef.key)}`);
-        }
-        const sourceEpoch = Number.isFinite(Number(sourceMemory.sessionEpoch)) ? Number(sourceMemory.sessionEpoch) : 0;
-        const inheritedEpoch = Math.min(-1, sourceEpoch - 1);
-        const predecessorLineage = {
-          sourceScopeKey: string(sourceScope.scopeKey || ''), sourceChatId: string(sourceScope.chatId || ''),
-          sourceMemoryId: string(sourceMemory.memoryId || ''), sourceRevision: Number(sourceMemory.revision || 0),
-          sourceRunId: string(sourceMemory.runId || ''), sourceSessionEpoch: sourceEpoch,
-          prior: clone(sourceMemory.predecessorLineage || null)
-        };
-        const inheritedId = `prev_${stableDraftHash(`${transferId}|${index}|${sourceMemory.memoryId}|${sourceMemory.revision}`)}`;
-        const memory = clone(sourceMemory);
-        Object.assign(memory, {
-          memoryId: inheritedId,
-          scopeKey: target.scope.scopeKey,
-          status: 'committed',
-          sessionEpoch: inheritedEpoch,
-          inheritedSessionHistory: true,
-          authorityClass: 'permanent_predecessor',
-          handoffTransferId: transferId,
-          sourceSessionChatId: string(sourceScope.chatId || ''),
-          sourceSessionScopeKey: string(sourceScope.scopeKey || ''),
-          predecessorLineage,
-          createdAt: memory.createdAt || nowIso(),
-          updatedAt: nowIso()
-        });
-        const memoryKey = key.predecessorMemory(target.scope, transferId, index, inheritedId, memory.revision);
-        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey) {
-          const sourceVector = await storage.getJson(memory.embedding.vectorKey, null);
-          if (sourceVector) {
-            const profileId = string(sourceVector.profileId || memory.embedding.profileId || 'profile');
-            const targetVectorKey = key.predecessorVector(target.scope, transferId, index, inheritedId, memory.revision, profileId);
-            const targetVector = { ...clone(sourceVector), scopeKey: target.scope.scopeKey, memoryId: inheritedId, createdAt: nowIso() };
-            await storage.setJson(targetVectorKey, targetVector);
-            memory.embedding = { ...memory.embedding, vectorKey: targetVectorKey };
-          } else {
-            memory.embedding = { ...memory.embedding, status: 'retry_pending', reason: 'handoff_source_vector_missing' };
-          }
-        }
-        await storage.setJson(memoryKey, memory);
-        copiedRefs.push(inheritedMemoryRefForTransfer(memory, memoryKey, transferId, sourceScope));
-      }
-      manifest.inheritedMemories.push(...copiedRefs);
+      manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => string(ref.handoffTransferId) !== transferId);
+      const linkedRefs = archive.memoryRefs.map(ref => inheritedMemoryRefForTransfer(ref, transferId, sourceScope, archiveRef.generation));
+      manifest.inheritedMemories.push(...linkedRefs);
+      manifest.archiveRef = archiveRef;
       const copiedWorldIds = [];
       for (let index = 0; index < asArray(packageValue.worldAdditionalRefs).length; index += 1) {
         const sourceItemRef = packageValue.worldAdditionalRefs[index];
-        const sourceItem = sourceItemRef?.record && typeof sourceItemRef.record === 'object'
-          ? clone(sourceItemRef.record)
-          : await storage.getJson(sourceItemRef?.key, null);
+        const sourceItem = sourceItemRef?.record && typeof sourceItemRef.record === 'object' ? clone(sourceItemRef.record) : await storage.getJson(sourceItemRef?.key, null);
         if (!sourceItem) throw new Error(`LIBRA source World Additional item is missing: ${string(sourceItemRef?.itemId || sourceItemRef?.key)}`);
-        if (sourceItemRef?.recordDigest && digest(sourceItem) !== string(sourceItemRef.recordDigest)) {
-          throw new Error(`LIBRA handoff World Additional record changed: ${string(sourceItemRef.itemId || sourceItemRef.key)}`);
-        }
+        if (sourceItemRef?.recordDigest && digest(sourceItem) !== string(sourceItemRef.recordDigest)) throw new Error(`LIBRA handoff World Additional record changed: ${string(sourceItemRef.itemId || sourceItemRef.key)}`);
         const itemId = `prevwa_${stableDraftHash(`${transferId}|${index}|${sourceItem.itemId || sourceItemRef.itemId}`)}`;
-        const item = {
-          ...clone(sourceItem), itemId, scopeKey: target.scope.scopeKey,
-          status: 'eligible', injectedAt: '', updatedAt: nowIso(), createdAt: sourceItem.createdAt || nowIso(),
-          inheritedSessionHistory: true, authorityClass: 'permanent_predecessor', handoffTransferId: transferId,
-          sourceSessionChatId: string(sourceScope.chatId || ''), sourceSessionScopeKey: string(sourceScope.scopeKey || '')
-        };
+        const item = { ...clone(sourceItem), itemId, scopeKey: target.scope.scopeKey, status: 'eligible', injectedAt: '', updatedAt: nowIso(), createdAt: sourceItem.createdAt || nowIso(), inheritedSessionHistory: true, authorityClass: 'permanent_predecessor', handoffTransferId: transferId, sourceSessionChatId: string(sourceScope.chatId || ''), sourceSessionScopeKey: string(sourceScope.scopeKey || '') };
         await storage.setJson(key.worldAdditional(target.scope, itemId), item);
         copiedWorldIds.push(itemId);
       }
@@ -31008,45 +31476,17 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       manifest.lastSessionHandoff = {
         schema: LIBRA_SESSION_HANDOFF_MARKER_SCHEMA, transferId,
         sourceChatId: string(sourceScope.chatId || ''), sourceScopeKey: string(sourceScope.scopeKey || ''),
-        targetChatId, targetScopeKey: target.scope.scopeKey, records: copiedRefs.length,
-        worldAdditional: copiedWorldIds.length, worldAdditionalIds: copiedWorldIds.slice(), adoptedAt: nowIso()
+        targetChatId, targetScopeKey: target.scope.scopeKey, records: linkedRefs.length,
+        worldAdditional: copiedWorldIds.length, worldAdditionalIds: copiedWorldIds.slice(),
+        archiveId: archiveRef.archiveId, archiveGeneration: archiveRef.generation, archiveDigest: archiveRef.digest,
+        physicalMemoryCopies: 0, adoptedAt: nowIso()
       };
       await saveManifest(target.scope, manifest);
-      const verification = await verifySessionHandoff({
-        transferId,
-        targetChatId,
-        expectedRecords: packageRecords,
-        expectedWorldAdditional: packageWorldAdditional
-      });
-      const receipt = {
-        ...verification,
-        action: 'adopted', adopted: verification.verified === true,
-        sourceScope: clone(sourceScope), adoptedAt: nowIso()
-      };
+      const verification = await verifySessionHandoff({ transferId, targetChatId, expectedRecords: packageRecords, expectedWorldAdditional: packageWorldAdditional });
+      const receipt = { ...verification, action: 'adopted', adopted: verification.verified === true, sourceScope: clone(sourceScope), adoptedAt: nowIso() };
       await storage.setJson(key.handoffReceipt(transferId), receipt);
       const persistedReceipt = await storage.getJson(key.handoffReceipt(transferId), null);
-      const receiptPersisted = persistedReceipt?.schema === LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA
-        && persistedReceipt?.action === 'adopted'
-        && persistedReceipt?.adopted === true
-        && persistedReceipt?.verified === true
-        && persistedReceipt?.durable === true
-        && string(persistedReceipt?.transferId || '') === transferId
-        && string(persistedReceipt?.targetChatId || '') === targetChatId
-        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'records')
-        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'expectedRecords')
-        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'worldAdditional')
-        && Object.prototype.hasOwnProperty.call(persistedReceipt, 'expectedWorldAdditional')
-        && Number.isInteger(Number(persistedReceipt.records))
-        && Number.isInteger(Number(persistedReceipt.expectedRecords))
-        && Number.isInteger(Number(persistedReceipt.worldAdditional))
-        && Number.isInteger(Number(persistedReceipt.expectedWorldAdditional))
-        && Number(persistedReceipt.records) === packageRecords
-        && Number(persistedReceipt.expectedRecords) === packageRecords
-        && Number(persistedReceipt.worldAdditional) === packageWorldAdditional
-        && Number(persistedReceipt.expectedWorldAdditional) === packageWorldAdditional;
-      if (!receiptPersisted) {
-        throw new Error('LIBRA handoff receipt durable readback failed.');
-      }
+      if (!persistedReceipt?.verified || !persistedReceipt?.durable) throw new Error('LIBRA handoff receipt durable readback failed.');
       if (verification.verified) await storage.remove(key.handoffPackage(transferId));
       if (string((await resolveContext()).scope?.chatId) === targetChatId) await refreshSnapshot(target);
       return clone(persistedReceipt);
@@ -31138,7 +31578,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       getEmbeddingSettings: () => clone(state.embeddingSettings || DEFAULT_EMBEDDING),
       getEmbeddingRebuildState: () => clone(state.embeddingRebuild || defaultEmbeddingRebuildState()),
       peekEmbeddingRebuildState: () => state.embeddingRebuild || defaultEmbeddingRebuildState(),
-      getLastRecall: () => clone(state.lastRecall)
+      getLastRecall: () => clone(state.lastRecall),
+      getLocalVectorStorageStats: () => clone({ mode: LOCAL_VECTOR_STORAGE_MODE, cacheEntries: state.localVectorCache.size, ...state.localVectorStats }),
+      debugProjectionHasVectorPayload: projectionHasVectorPayload,
+      debugPackProjectionForLocalStorage: packProjectionForLocalStorage,
+      debugDecodeLocalProjectionPayload: decodeLocalProjectionPayload
     });
   })();
 
@@ -37306,7 +37750,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     async getMemoryRuns() { return (await LibraMemoryCore.refreshSnapshot(undefined, { suppressGuiSchedule: true })).runs; },
     async getWorldAdditional() { return (await LibraMemoryCore.refreshSnapshot(undefined, { suppressGuiSchedule: true })).worldAdditional; },
     getRetraceCapabilities() { return LibraMemoryCore.retraceCapabilities(); },
-    async inspectForRetrace() { return await LibraMemoryCore.inspectForRetrace(); },
+    async inspectForRetrace(options = {}) { return await LibraMemoryCore.inspectForRetrace(options); },
     async prepareSessionHandoff(options = {}) { return await LibraMemoryCore.prepareSessionHandoff(options); },
     async adoptSessionHandoff(options = {}) { return await LibraMemoryCore.adoptSessionHandoff(options); },
     async verifySessionHandoff(options = {}) { return await LibraMemoryCore.verifySessionHandoff(options); },
@@ -37462,7 +37906,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       let error = '';
       try {
         if (action === 'ping' || action === 'capabilities') result = LibraMemoryCore.retraceCapabilities();
-        else if (action === 'inspect') result = await LibraMemoryCore.inspectForRetrace();
+        else if (action === 'inspect') result = await LibraMemoryCore.inspectForRetrace(request.payload || {});
         else if (action === 'prepare_session_handoff') result = await LibraMemoryCore.prepareSessionHandoff(request.payload || {});
         else if (action === 'adopt_session_handoff') result = await LibraMemoryCore.adoptSessionHandoff(request.payload || {});
         else if (action === 'verify_session_handoff') result = await LibraMemoryCore.verifySessionHandoff(request.payload || {});
