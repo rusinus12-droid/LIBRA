@@ -1,7 +1,7 @@
 //@name libra
-//@display-name LIBRA v1.0.27
+//@display-name LIBRA v1.0.28
 //@api 3.0
-//@version 1.0.27
+//@version 1.0.28
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,6 +63,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.28
+ * v1.0.28 restricts automatic memory fallback scans to exact model requests, strips unsupported temperature from official OpenAI GPT-5.6 Chat Completions even when presets/extra body request it, scope-binds memory-injection diagnostics and clears stale cross-chat injection previews, and treats startup native-copy context absence as a benign deferred probe instead of a runtime warning.
+ *
  * LIBRA v1.0.27
  * v1.0.27 hardens automatic five-turn memory triggering on hosts without addRisuChatListener: beforeRequest captures the exact request scope, afterRequest schedules a scope-bound fallback regardless of host request-type spelling, delayed context acquisition is retried without enabling historical backfill, startup native-copy probing retries boundedly, and debug export records scan scheduling/results plus real memory-pipeline attempt counts.
  *
@@ -1616,6 +1619,8 @@
     migratedFrom: null,
     migration: null,
     lastInjection: '',
+    lastMemoryInjectionMeta: null,
+    lastMemoryInjectionClear: null,
     lastFinalOverlayMeta: null,
     stageTrace: [],
     lastProviderRequest: null,
@@ -11722,7 +11727,12 @@ function mergeAgentCbsWarnings(...warningLists) {
 
     if (providerAllowsServiceTier(provider, preset) && preset.service_tier && preset.service_tier !== 'off') body.service_tier = preset.service_tier;
     if (body.stream && ['openai', 'openrouter'].includes(provider)) body.stream_options = { include_usage: true };
-    return applyPresetExtraBody(body, preset);
+    const finalBody = applyPresetExtraBody(body, preset);
+    // Official OpenAI GPT-5.6 Chat Completions accepts only its default sampling
+    // temperature. Omit the field entirely so saved presets or llm_extra_body_json
+    // cannot turn a valid memory-stage request into HTTP 400.
+    if (provider === 'openai' && isGpt56Model(preset.model)) delete finalBody.temperature;
+    return finalBody;
   };
 
 
@@ -17811,6 +17821,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 
   const injectSystemMessage = (messages, content, settings) => {
     Runtime.lastInjection = text(content);
+    if (!Runtime.lastInjection.includes('[LIBRA 장기기억 — 관련 기억만 시간순으로 제공됨]')) Runtime.lastMemoryInjectionMeta = null;
     const systemMessage = { role: 'system', content };
     const copy = messages.slice();
     if (settings.injectionPosition === 'system_prefix_end') {
@@ -18035,6 +18046,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     }
     const preserveDebug = !!details.preserveDebug;
     Runtime.lastInjection = '';
+    Runtime.lastMemoryInjectionMeta = null;
     Runtime.lastFinalOverlayMeta = null;
     Runtime.lastSafeStage = null;
     Runtime.finalDraft = '';
@@ -21134,6 +21146,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 if (isOpenAIReasoningChatModel(modelName))
                     delete body.temperature;
             }
+            if (provider === 'openai' && isGpt56Model(modelName))
+                delete body.temperature;
             if (provider === 'heroku-us' || provider === 'heroku-eu' || provider.startsWith('xiaomi-mimo')) {
                 body.max_completion_tokens = body.max_completion_tokens || body.max_tokens || tokenBudget.providerMaxTokens;
                 delete body.max_tokens;
@@ -30271,11 +30285,38 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return block.length <= charCeiling ? block : compactMiddle(block, charCeiling);
     };
 
+    const memoryInjectionScopeMatches = (left, right) => {
+      const a = asObject(left);
+      const b = asObject(right);
+      if (!string(a.scopeKey) || !string(b.scopeKey)) return false;
+      return string(a.scopeKey) === string(b.scopeKey)
+        && (!string(a.characterId) || !string(b.characterId) || string(a.characterId) === string(b.characterId))
+        && (!string(a.chatId) || !string(b.chatId) || string(a.chatId) === string(b.chatId));
+    };
+
+    const clearStaleMemoryInjectionDebug = (nextScope, reason = 'scope_changed') => {
+      const meta = asObject(Runtime.lastMemoryInjectionMeta);
+      const previousScope = asObject(meta.scope);
+      if (!Runtime.lastInjection || !string(previousScope.scopeKey) || !string(asObject(nextScope).scopeKey)) return false;
+      if (memoryInjectionScopeMatches(previousScope, nextScope)) return false;
+      Runtime.lastMemoryInjectionClear = {
+        at: Date.now(),
+        reason: string(reason || 'scope_changed'),
+        previousScope: clone(previousScope),
+        nextScope: clone(asObject(nextScope)),
+        previousChars: Runtime.lastInjection.length
+      };
+      Runtime.lastInjection = '';
+      Runtime.lastMemoryInjectionMeta = null;
+      return true;
+    };
+
     const beforeRequest = async (messages, type) => {
       try {
         if (!isMainNarrativeRequest(type) || (await loadMemorySettings()).enabled === false) return messages;
         if ((Array.isArray(messages) ? messages : []).some(item => contentToText(item?.content ?? item?.data ?? '').includes(MEMORY_INJECTION_MARKER))) return messages;
         const context = await resolveContext();
+        clearStaleMemoryInjectionDebug(context.scope, 'before_request_scope_changed');
         state.lastRequestScope = {
           at: Date.now(),
           requestType: normalizeRequestType(type) || 'missing',
@@ -30298,8 +30339,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         Runtime.lastInjection = block;
         Runtime.lastMemoryInjectionMeta = {
           at: Date.now(),
+          requestType: normalizeRequestType(type) || 'missing',
           role: 'system',
           position: 'system_prefix_end',
+          scope: clone(context.scope),
+          scopeKey: string(context.scope?.scopeKey || ''),
+          characterId: string(context.scope?.characterId || ''),
+          chatId: string(context.scope?.chatId || ''),
           chars: block.length,
           charCeiling: Number(settings.recallMaxChars || 8000),
           selectedMemories: Number(result?.memories?.length || 0),
@@ -30329,19 +30375,23 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         fallbackActive,
         requestScopeAgeMs: Number.isFinite(requestScopeAgeMs) ? requestScopeAgeMs : -1,
         expectedScope: expectedScope ? clone(expectedScope) : null,
-        scheduled: false
+        scheduled: false,
+        blockedReason: ''
       };
-      // The output listener is optional across RisuAI hosts. When it is unavailable,
-      // every afterRequest is only a debounce signal to inspect the authoritative chat.
-      // scan() itself still enforces the exact five-turn live-batch gate and never
-      // turns this path into implicit historical cold-start/backfill.
-      if (fallbackActive) {
+      // Only an exact main model request may trigger automatic memory analysis.
+      // Auxiliary RisuAI requests (otherax, translation, image/tool helpers, etc.)
+      // must never retry or advance a five-turn memory batch.
+      if (fallbackActive && mainNarrativeType) {
         state.lastAfterRequest.scheduled = scheduleScan({
           delay: 140,
           reason: 'afterRequest_fallback',
           requestType,
           expectedScope: expectedScope ? clone(expectedScope) : undefined
         });
+      } else if (!mainNarrativeType) {
+        state.lastAfterRequest.blockedReason = `non_model_request:${requestType}`;
+      } else if (!fallbackActive) {
+        state.lastAfterRequest.blockedReason = state.settings?.autoAnalyze === false ? 'auto_analyze_disabled' : 'output_listener_active';
       }
       return response;
     };
@@ -30356,6 +30406,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       let context = suppliedContext || null;
       try {
         context = context || await resolveContext();
+        clearStaleMemoryInjectionDebug(context.scope, 'snapshot_scope_changed');
         if (options.skipNativeCopyAdoption !== true) {
           try { await ensureNativeChatCopyAdopted(context); }
           catch (error) {
@@ -31703,6 +31754,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     Runtime.migration = marker;
     Runtime.migratedFrom = marker.source;
     Runtime.lastInjection = '';
+    Runtime.lastMemoryInjectionMeta = null;
     Runtime.lastFinalOverlayMeta = null;
     Runtime.loreContinuity = { scopes: {} };
     Runtime.writerControl = null;
@@ -35595,6 +35647,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       token: Runtime.settings.backendHosting.token ? '[REDACTED]' : ''
     } : null,
     lastInjection: Runtime.lastInjection,
+    lastMemoryInjectionMeta: Runtime.lastMemoryInjectionMeta ? JSON.parse(JSON.stringify(Runtime.lastMemoryInjectionMeta)) : null,
+    lastMemoryInjectionClear: Runtime.lastMemoryInjectionClear ? JSON.parse(JSON.stringify(Runtime.lastMemoryInjectionClear)) : null,
     lastFinalOverlayMeta: Runtime.lastFinalOverlayMeta,
     lastSafeStage: Runtime.lastSafeStage,
     lastRisuContext: Runtime.lastRisuContext,
@@ -37703,6 +37757,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       LibraMemoryCore.state.lastAfterRequest = null;
       LibraMemoryCore.state.lastScanSchedule = null;
       LibraMemoryCore.state.lastScheduledScanResult = null;
+      Runtime.lastMemoryInjectionMeta = null;
+      Runtime.lastMemoryInjectionClear = null;
       LoreJaccardTokenSimilarityCache.clear();
     };
     try {
@@ -37736,11 +37792,11 @@ html,body{width:100%;height:100%;overflow:hidden}
           const finalAttempt = attempt + 1 >= nativeCopyStartupRetryDelays.length;
           Runtime.lastNativeChatCopyCheck = {
             at: Date.now(), phase: 'startup_retry', attempt: attempt + 1,
-            reason: finalAttempt ? 'native_copy_startup_retry_failed' : 'native_copy_startup_retry_pending',
-            error: compact(error?.message || error, 500)
+            reason: finalAttempt ? 'native_copy_startup_context_deferred' : 'native_copy_startup_retry_pending',
+            error: compact(error?.message || error, 500),
+            benign: finalAttempt
           };
-          if (finalAttempt) warn('LIBRA native chat-copy startup probe failed after retries; later request/snapshot probes remain active.', error);
-          else scheduleNativeCopyStartupRetry(attempt + 1);
+          if (!finalAttempt) scheduleNativeCopyStartupRetry(attempt + 1);
         }
       }, delay);
       LibraMemoryCore.state.timers.set(timerKey, timer);
