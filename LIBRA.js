@@ -1,9 +1,9 @@
 //@name libra
-//@display-name LIBRA v1.0.31
+//@display-name LIBRA v1.0.32
 //@api 3.0
-//@version 1.0.31
+//@version 1.0.32
 
-/* v1.0.31 preserves RE:TRACE summary-only runtime fallback options so a failed IPC probe cannot silently hydrate every canonical memory; v1.0.30 keeps canonical memory metadata in pluginStorage while moving rebuildable dense projection payloads into SafeLocalPluginStorage as packed Float32 sidecars. */
+/* v1.0.32 hardens long-memory completion: Ariadne/ito retry budgets never regress after a provider length expansion, Gemini memory stages prefer visible output with thinking minimized, Ariadne can continue a truncated canonical draft instead of restarting it, and provider token/thinking diagnostics are exported. v1.0.31 preserves RE:TRACE summary-only runtime fallback options so a failed IPC probe cannot silently hydrate every canonical memory. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -65,6 +65,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.32
+ * v1.0.32 prevents Ariadne/ito output-budget regression after MAX_TOKENS retries, adds bounded Ariadne continuation recovery for truncated canonical drafts, minimizes Gemini memory-stage thinking so visible memory text receives the output budget, and records provider prompt/candidate/thought/total token diagnostics.
+ *
  * LIBRA v1.0.28
  * v1.0.28 restricts automatic memory fallback scans to exact model requests, strips unsupported temperature from official OpenAI GPT-5.6 Chat Completions even when presets/extra body request it, scope-binds memory-injection diagnostics and clears stale cross-chat injection previews, and treats startup native-copy context absence as a benign deferred probe instead of a runtime warning.
  *
@@ -214,7 +217,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.31';
+  const PLUGIN_VERSION = '1.0.32';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -10731,6 +10734,54 @@ function mergeAgentCbsWarnings(...warningLists) {
     return { chars: body.length, preview: compact(body, 180) };
   };
 
+  const providerUsageDiagnostics = (usage = null) => {
+    const data = usage && typeof usage === 'object' ? usage : {};
+    const promptDetails = data.prompt_tokens_details || data.input_tokens_details || {};
+    const completionDetails = data.completion_tokens_details || data.output_tokens_details || {};
+    const promptTokens = Number(
+      data.promptTokenCount
+      ?? data.prompt_token_count
+      ?? data.prompt_tokens
+      ?? data.input_tokens
+      ?? 0
+    ) || 0;
+    const candidateTokens = Number(
+      data.candidatesTokenCount
+      ?? data.candidates_token_count
+      ?? data.completion_tokens
+      ?? data.output_tokens
+      ?? 0
+    ) || 0;
+    const thoughtsTokens = Number(
+      data.thoughtsTokenCount
+      ?? data.thoughts_token_count
+      ?? completionDetails.reasoning_tokens
+      ?? data.reasoning_tokens
+      ?? data.reasoningTokens
+      ?? 0
+    ) || 0;
+    const cachedTokens = Number(
+      data.cachedContentTokenCount
+      ?? data.cached_content_token_count
+      ?? promptDetails.cached_tokens
+      ?? data.cache_read_input_tokens
+      ?? 0
+    ) || 0;
+    const totalTokens = Number(
+      data.totalTokenCount
+      ?? data.total_token_count
+      ?? data.total_tokens
+      ?? 0
+    ) || (promptTokens + candidateTokens + thoughtsTokens);
+    return {
+      promptTokens,
+      candidateTokens,
+      thoughtsTokens,
+      cachedTokens,
+      totalTokens
+    };
+  };
+
   const summarizeProviderBody = (body) => {
     const obj = body && typeof body === 'object' ? body : {};
     const messageLike = Array.isArray(obj.messages)
@@ -10747,6 +10798,9 @@ function mergeAgentCbsWarnings(...warningLists) {
       stream: !!obj.stream,
       think: obj.think ?? obj.options?.think ?? null,
       thinkingType: typeof obj.thinking === 'object' ? (obj.thinking?.type ?? null) : (obj.thinking ?? null),
+      thinkingLevel: obj.generationConfig?.thinkingConfig?.thinkingLevel ?? obj.generation_config?.thinking_config?.thinking_level ?? null,
+      thinkingBudget: obj.generationConfig?.thinkingConfig?.thinkingBudget ?? obj.generation_config?.thinking_config?.thinking_budget ?? null,
+      includeThoughts: obj.generationConfig?.thinkingConfig?.includeThoughts ?? obj.generation_config?.thinking_config?.include_thoughts ?? null,
       reasoningEffort: obj.reasoning_effort ?? obj.reasoning?.effort ?? null,
       reasoningEnabled: obj.reasoning?.enabled ?? null,
       temperature: obj.temperature ?? obj.generationConfig?.temperature ?? obj.options?.temperature ?? null,
@@ -10783,11 +10837,16 @@ function mergeAgentCbsWarnings(...warningLists) {
   };
 
   const rememberProviderResponse = (meta, response, data) => {
+    const usage = data && typeof data === 'object'
+      ? (data?.usageMetadata || data?.usage_metadata || data?.usage || null)
+      : null;
     Runtime.lastProviderResponse = {
       at: Date.now(),
       ...providerMeta(meta),
       ok: response?.ok !== false,
       status: response?.status || null,
+      finishReason: data && typeof data === 'object' ? providerFinishReason(data) : '',
+      usage: providerUsageDiagnostics(usage),
       dataPreview: compact(data, 1600)
     };
   };
@@ -12347,6 +12406,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       maxTokens: options.maxTokens || stageOutputTokenBudget(settings, stageName, systemPrompt, preset, options),
       promptCacheDecision
     };
+    const effectiveOutputBudget = resolveProviderOutputBudget(preset, effectiveOptions).providerMaxTokens;
     // Native structured-output/tool schemas become part of the provider-side prefix on GPT/Claude.
     // When the same five-turn evidence is explicitly cached across ito stages, prompt-enforced JSON
     // keeps that prefix stable; LIBRA already validates and retries malformed JSON patches.
@@ -12446,12 +12506,12 @@ function mergeAgentCbsWarnings(...warningLists) {
       const expandedMaxTokens = Math.min(
         configuredCap,
         Math.max(
-          effectiveOptions.maxTokens + 1024,
-          Math.ceil(effectiveOptions.maxTokens * 1.5),
+          effectiveOutputBudget + 1024,
+          Math.ceil(effectiveOutputBudget * 1.5),
           options.jsonMode === true ? MIN_JSON_LENGTH_RETRY_TOKENS : 0
         )
       );
-      if (expandedMaxTokens > effectiveOptions.maxTokens) {
+      if (expandedMaxTokens > effectiveOutputBudget) {
         const warningKind = lengthLimit.unreported ? 'provider_unreported_json_truncation_retry' : 'provider_length_retry';
         const warningText = lengthLimit.unreported
           ? `${stageName}: provider reported ${result.finishReason || 'stop/unknown'} but returned ${lengthLimit.reason}; retrying once with ${expandedMaxTokens} output tokens`
@@ -12481,6 +12541,8 @@ function mergeAgentCbsWarnings(...warningLists) {
         provider,
         model: result.model || preset.model,
         usage: result.usage || null,
+        usageDiagnostics: providerUsageDiagnostics(result.usage || null),
+        outputBudgetTokens: effectiveOutputBudget,
         cache: normalizePromptCacheUsage(provider, result.usage || null, result.promptCacheDecision || promptCacheDecision, result.promptCacheMeta || null),
         finishReason: result.finishReason || '',
         effectiveSystemPrompt: result.effectiveSystemPrompt || systemPrompt,
@@ -12524,6 +12586,9 @@ function mergeAgentCbsWarnings(...warningLists) {
         presetName: name,
         provider,
         model: result.model || preset.model,
+        usage: result.usage || null,
+        usageDiagnostics: providerUsageDiagnostics(result.usage || null),
+        outputBudgetTokens: effectiveOutputBudget,
         cache: normalizePromptCacheUsage(provider, result.usage || null, result.promptCacheDecision || promptCacheDecision, result.promptCacheMeta || null),
         effectiveSystemPrompt: result.effectiveSystemPrompt || systemPrompt,
         effectiveUserPrompt: result.effectiveUserPrompt || userPrompt,
@@ -12539,6 +12604,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       provider,
       presetName: name,
       usage: result.usage || null,
+      usageDiagnostics: providerUsageDiagnostics(result.usage || null),
+      outputBudgetTokens: effectiveOutputBudget,
       cache,
       finishReason: result.finishReason || '',
       streamMeta: result.streamMeta || null,
@@ -25373,8 +25440,13 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
   const callTask = async (routeKey, systemPrompt, userPrompt, options = {}) => {
     const settings = await loadSettings();
     const stageName = resolveTaskStage(routeKey);
+    const resolved = resolvePreset(settings, stageName);
+    const providerMode = modeForProvider(canonicalProvider(resolved?.preset?.provider || 'custom'));
+    const memoryRoute = ['ariadne', 'character_ito', 'world_ito', 'plot_ito'].includes(String(routeKey || '').trim());
+    const preferVisibleMemoryOutput = memoryRoute && (providerMode === 'gemini' || providerMode === 'vertex_gemini');
     const result = await callLLMWithPreset(settings, stageName, systemPrompt, userPrompt, {
       ...options,
+      forceNoThinking: options.forceNoThinking === undefined ? preferVisibleMemoryOutput : options.forceNoThinking,
       label: options.label || `LIBRA ${routeKey}`,
       domain: options.domain || 'libra_memory',
       featureDomain: options.featureDomain || routeKey
@@ -28116,6 +28188,89 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return { valid: errors.length === 0, errors, warnings, chars: source.length, sectionCount: found.length, text: source };
     };
 
+    const ARIADNE_REQUIRED_HEADINGS = Object.freeze([
+      '# 종합 기억',
+      '## 시간순 사건',
+      '## 인물과 관계',
+      '## 세계와 장면',
+      '## 내러티브와 미해결 문제',
+      '## 확정 사실과 불확실 정보',
+      '## 회상 키워드'
+    ]);
+    const ARIADNE_INITIAL_OUTPUT_TOKENS = 6000;
+    const ARIADNE_CORRECTION_MIN_OUTPUT_TOKENS = 7000;
+    const ARIADNE_CONTINUATION_MIN_OUTPUT_TOKENS = 9000;
+    const ARIADNE_CONTINUATION_MAX_PASSES = 2;
+    const ARIADNE_CONTINUATION_TAIL_CHARS = 14000;
+
+    const providerOutputWasTruncated = result => /^provider_output_truncated(?:_unreported)?:/i.test(string(result?.reason || ''));
+
+    const missingAriadneHeadings = value => {
+      const source = stripFence(value || '');
+      return ARIADNE_REQUIRED_HEADINGS.filter(heading => !source.includes(heading));
+    };
+
+    const mergeAriadneContinuation = (baseText, continuationText) => {
+      const left = stripFence(baseText || '').trimEnd();
+      const right = stripFence(continuationText || '').trimStart();
+      if (!left) return right;
+      if (!right) return left;
+      const maxOverlap = Math.min(8000, left.length, right.length);
+      for (let size = maxOverlap; size >= 32; size -= 1) {
+        if (right.startsWith(left.slice(-size))) {
+          return `${left}${right.slice(size)}`.trim();
+        }
+      }
+      const lastLine = left.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1) || '';
+      if (lastLine.length >= 24 && right.startsWith(lastLine)) {
+        return `${left}\n${right.slice(lastLine.length).trimStart()}`.trim();
+      }
+      return `${left}\n${right}`.trim();
+    };
+
+    const ariadneAttemptDiagnostic = result => ({
+      ok: result?.ok === true,
+      reason: string(result?.reason || ''),
+      provider: string(result?.provider || ''),
+      model: string(result?.model || ''),
+      presetName: string(result?.presetName || ''),
+      finishReason: string(result?.finishReason || ''),
+      outputBudgetTokens: Number(result?.outputBudgetTokens || 0),
+      usage: clone(result?.usage || {}),
+      usageDiagnostics: clone(result?.usageDiagnostics || {}),
+      chars: string(result?.content || '').length
+    });
+
+    const buildAriadneContinuationPrompts = (prompts, combinedDraft, pass, missingHeadings) => {
+      const source = stripFence(combinedDraft || '');
+      const tail = source.slice(-ARIADNE_CONTINUATION_TAIL_CHARS);
+      const present = ARIADNE_REQUIRED_HEADINGS.filter(heading => source.includes(heading));
+      return {
+        system: [
+          prompts.system,
+          '',
+          'CONTINUATION RECOVERY: The previous Ariadne memory draft was cut off by the provider output limit.',
+          'The host has already preserved every visible character from that partial draft. Do NOT restart, summarize again, rewrite earlier sections, or repeat completed headings.',
+          'Continue only from the exact end of the preserved draft and finish the same canonical memory.',
+          'Return only text that should be appended to the preserved draft.',
+          'Complete every still-missing required heading. If the current heading was cut mid-sentence, finish that sentence first.',
+          'Do not add commentary about truncation, retries, token limits, or recovery.'
+        ].join('\n'),
+        user: [
+          prompts.user,
+          '',
+          `[ARIADNE CONTINUATION PASS ${pass}]`,
+          `[ALREADY PRESENT HEADINGS] ${present.join(' | ') || 'none'}`,
+          `[STILL MISSING HEADINGS] ${asArray(missingHeadings).join(' | ') || 'none'}`,
+          '[PRESERVED DRAFT TAIL — continue after its final character]',
+          tail,
+          '[END PRESERVED DRAFT TAIL]',
+          '',
+          'Return only the continuation text to append. Do not repeat the preserved draft.'
+        ].join('\n')
+      };
+    };
+
     const ARIADNE_REFERENCE_SCHEMA = 'libra.ariadne_reference_context.v1';
     const ARIADNE_REFERENCE_MAX_HYPA = 12;
 
@@ -28855,27 +29010,137 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       const prompts = ariadnePrompts(batch, referenceContext);
       const startedAt = Date.now();
-      let result = await callMemoryProvider('ariadne', prompts.system, prompts.user, { temp: 0.2, maxTokens: 6000, cacheBatch: batch });
+      const attempts = [];
+
+      const recoverTruncatedDraft = async seedResult => {
+        let current = seedResult;
+        let combinedDraft = string(current?.content || '');
+        if (!providerOutputWasTruncated(current) || !combinedDraft) return current;
+
+        const initialReason = string(current?.reason || '');
+        const initialBudget = Number(current?.outputBudgetTokens || 0);
+        const continuationBudget = Math.max(
+          ARIADNE_CONTINUATION_MIN_OUTPUT_TOKENS,
+          ARIADNE_INITIAL_OUTPUT_TOKENS,
+          initialBudget
+        );
+        const continuationMeta = {
+          attempted: true,
+          recovered: false,
+          passes: 0,
+          initialReason,
+          initialBudget,
+          continuationBudget,
+          missingHeadingsBefore: missingAriadneHeadings(combinedDraft),
+          missingHeadingsAfter: [],
+          attempts: []
+        };
+
+        for (let pass = 1; pass <= ARIADNE_CONTINUATION_MAX_PASSES; pass += 1) {
+          const missingBefore = missingAriadneHeadings(combinedDraft);
+          const continuationPrompts = buildAriadneContinuationPrompts(prompts, combinedDraft, pass, missingBefore);
+          const continuation = await callMemoryProvider(
+            'ariadne',
+            continuationPrompts.system,
+            continuationPrompts.user,
+            {
+              temp: 0.1,
+              maxTokens: continuationBudget,
+              cacheBatch: batch
+            }
+          );
+          const continuationDiagnostic = ariadneAttemptDiagnostic(continuation);
+          attempts.push({ type: `continuation_${pass}`, ...continuationDiagnostic });
+          continuationMeta.attempts.push(continuationDiagnostic);
+          continuationMeta.passes = pass;
+
+          combinedDraft = mergeAriadneContinuation(combinedDraft, continuation?.content || '');
+          const combinedValidation = validateMemoryText(combinedDraft);
+          const missingAfter = missingAriadneHeadings(combinedDraft);
+          continuationMeta.missingHeadingsAfter = missingAfter;
+
+          current = {
+            ...continuation,
+            content: combinedDraft,
+            ariadneContinuation: clone(continuationMeta)
+          };
+
+          if (continuation?.ok === true && combinedValidation.valid && missingAfter.length === 0) {
+            continuationMeta.recovered = true;
+            current = {
+              ...current,
+              ok: true,
+              reason: '',
+              content: combinedValidation.text,
+              ariadneContinuation: clone(continuationMeta)
+            };
+            warn('ariadne_continuation_recovered', `Ariadne: truncated canonical memory recovered in ${pass} continuation pass(es) without restarting the draft`);
+            return current;
+          }
+
+          if (continuation?.ok !== true && !providerOutputWasTruncated(continuation)) break;
+        }
+
+        current.ariadneContinuation = clone(continuationMeta);
+        return current;
+      };
+
+      let result = await callMemoryProvider(
+        'ariadne',
+        prompts.system,
+        prompts.user,
+        { temp: 0.2, maxTokens: ARIADNE_INITIAL_OUTPUT_TOKENS, cacheBatch: batch }
+      );
+      attempts.push({ type: 'initial', ...ariadneAttemptDiagnostic(result) });
+      result = await recoverTruncatedDraft(result);
       let validation = validateMemoryText(result?.content || '');
-      if (result?.ok !== true || !validation.valid) {
+
+      if ((result?.ok !== true || !validation.valid) && result?.ariadneContinuation?.attempted !== true) {
+        const retryBudget = Math.max(
+          ARIADNE_CORRECTION_MIN_OUTPUT_TOKENS,
+          ARIADNE_INITIAL_OUTPUT_TOKENS,
+          Number(result?.outputBudgetTokens || 0)
+        );
         const retrySystem = `${prompts.system}\n\nCORRECTION: The previous result was missing, too short, or not a memory. Return one complete natural-language memory now with all required headings.`;
         const retryUser = `${prompts.user}\n\nReturn only the complete memory. Do not explain the correction.`;
-        result = await callMemoryProvider('ariadne', retrySystem, retryUser, { temp: 0.15, maxTokens: 7000, lengthLimitRetry: true, cacheBatch: batch });
+        result = await callMemoryProvider(
+          'ariadne',
+          retrySystem,
+          retryUser,
+          {
+            temp: 0.15,
+            maxTokens: retryBudget,
+            cacheBatch: batch
+          }
+        );
+        attempts.push({ type: 'correction', ...ariadneAttemptDiagnostic(result) });
+        result = await recoverTruncatedDraft(result);
         validation = validateMemoryText(result?.content || '');
       }
+
       if (result?.ok !== true || !validation.valid) {
         const reason = result?.reason || validation.errors.join(',') || 'ariadne_invalid_memory';
         recordStageTrace({
           stage: 'ariadne', ok: false, reason, memoryMode: true,
           provider: result?.provider || '', presetName: result?.presetName || '', model: result?.model || '',
           elapsedMs: Date.now() - startedAt, systemPrompt: prompts.system, userPrompt: prompts.user,
-          rawResponse: result?.content || result?.raw || '', parsed: null, referenceMeta: clone(referenceContext.meta)
+          rawResponse: result?.content || result?.raw || '', parsed: null, referenceMeta: clone(referenceContext.meta),
+          usage: clone(result?.usage || {}), usageDiagnostics: clone(result?.usageDiagnostics || {}),
+          finishReason: result?.finishReason || '', outputBudgetTokens: Number(result?.outputBudgetTokens || 0),
+          continuation: clone(result?.ariadneContinuation || {}), attempts: clone(attempts)
         });
         throw new Error(`Ariadne 실패: ${reason}`);
       }
+
       const draft = validation.text;
       const stage = stageObject('ariadne', draft, { ...result, elapsedMs: Date.now() - startedAt }, {
-        analysis: { summary: 'Ariadne가 5턴 전체와 읽기 전용 참고 자료를 구분하여 종합 메모리 초안을 작성했습니다.', constraints: [], risks: validation.warnings },
+        analysis: {
+          summary: result?.ariadneContinuation?.recovered === true
+            ? 'Ariadne가 출력 제한으로 잘린 종합 메모리를 기존 초안을 보존한 continuation 방식으로 완성했습니다.'
+            : 'Ariadne가 5턴 전체와 읽기 전용 참고 자료를 구분하여 종합 메모리 초안을 작성했습니다.',
+          constraints: [],
+          risks: validation.warnings
+        },
         referenceMeta: referenceContext.meta
       });
       recordStageTrace({
@@ -28883,14 +29148,20 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         provider: result.provider || '', presetName: result.presetName || '', model: result.model || '',
         elapsedMs: stage.elapsedMs, systemPrompt: result.effectiveSystemPrompt || prompts.system,
         userPrompt: result.effectiveUserPrompt || prompts.user, rawResponse: result.content || '', parsed: stage,
-        usage: result.usage || null, cache: clone(result.cache || {}), finishReason: result.finishReason || ''
+        usage: result.usage || null, usageDiagnostics: clone(result.usageDiagnostics || {}),
+        cache: clone(result.cache || {}), finishReason: result.finishReason || '',
+        outputBudgetTokens: Number(result.outputBudgetTokens || 0),
+        continuation: clone(result.ariadneContinuation || {}), attempts: clone(attempts)
       });
       return {
         stage,
         receipt: {
           stage: 'ariadne', label: STAGE_LABELS.ariadne, status: 'complete', outputType: 'full_draft',
           output: draft, rawResponse: result.content || '', provider: result.provider || '', presetName: result.presetName || '',
-          model: result.model || '', durationMs: stage.elapsedMs, usage: clone(result.usage || {}), cache: clone(result.cache || {}), validation,
+          model: result.model || '', durationMs: stage.elapsedMs, usage: clone(result.usage || {}),
+          usageDiagnostics: clone(result.usageDiagnostics || {}), cache: clone(result.cache || {}), validation,
+          outputBudgetTokens: Number(result.outputBudgetTokens || 0),
+          continuation: clone(result.ariadneContinuation || {}), attempts: clone(attempts),
           referenceMeta: clone(referenceContext.meta)
         }
       };
@@ -28912,11 +29183,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       let patch = result?.ok === true ? normalizeAidePatchResult(stageName, result.content) : null;
       if (!patch) {
         const issue = itoPatchContractIssue(stageName, result?.content || '');
+        const retryBudget = Math.max(4200, 3600, Number(result?.outputBudgetTokens || 0));
         result = await callMemoryProvider(
           stageName,
           `${prompts.system}\n\nCORRECTION: Return the exact JSON patch object. Contract issue: ${issue || result?.reason || 'invalid_patch'}.`,
           `${prompts.user}\n\nDo not return prose outside the JSON object. Copy block hashes exactly.`,
-          { temp: 0.1, maxTokens: 4200, jsonMode: true, lengthLimitRetry: true, cacheBatch: batch }
+          { temp: 0.1, maxTokens: retryBudget, jsonMode: true, cacheBatch: batch }
         );
         patch = result?.ok === true ? normalizeAidePatchResult(stageName, result.content) : null;
       }
@@ -28926,7 +29198,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stage: stageName, ok: false, reason, memoryMode: true, patchMode: true,
           provider: result?.provider || '', presetName: result?.presetName || '', model: result?.model || '',
           elapsedMs: Date.now() - startedAt, systemPrompt: prompts.system, userPrompt: prompts.user,
-          rawResponse: result?.content || result?.raw || '', parsed: null, referenceMeta: clone(loreContext.meta)
+          rawResponse: result?.content || result?.raw || '', parsed: null, referenceMeta: clone(loreContext.meta),
+          usage: clone(result?.usage || {}), usageDiagnostics: clone(result?.usageDiagnostics || {}),
+          finishReason: result?.finishReason || '', outputBudgetTokens: Number(result?.outputBudgetTokens || 0)
         });
         throw new Error(`${STAGE_LABELS[stageName]} 실패: ${reason}`);
       }
@@ -28941,11 +29215,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const skippedSummary = asArray(applied?.skipped)
           .map(item => `${item.target || '?'}:${item.skipReason || 'not_applicable'}${item.expectedHash ? `:${item.expectedHash}` : ''}`)
           .join(', ');
+        const structuralRetryBudget = Math.max(4200, Number(result?.outputBudgetTokens || 0));
         result = await callMemoryProvider(
           stageName,
           `${prompts.system}\n\nCORRECTION: Your JSON parsed, but none of its requested edits could be applied to the current draft. Return a corrected JSON patch for the SAME draft. Copy block IDs and hashes exactly from the authoritative list. If no edit is actually needed, return an empty edits array.`,
           `${prompts.user}\n\n[CURRENT AUTHORITATIVE BLOCK HASHES]\n${authoritativeHashes}\n\n[PREVIOUS APPLICATION ISSUE]\n${skippedSummary || 'no_applicable_edits'}\n\nReturn only the corrected JSON object.`,
-          { temp: 0.05, maxTokens: 4200, jsonMode: true, lengthLimitRetry: true, cacheBatch: batch }
+          { temp: 0.05, maxTokens: structuralRetryBudget, jsonMode: true, cacheBatch: batch }
         );
         patch = result?.ok === true ? normalizeAidePatchResult(stageName, result.content) : null;
         applied = patch ? applyDraftPatchOperations(prompts.document, patch.edits) : null;
@@ -28956,7 +29231,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stage: stageName, ok: false, reason, memoryMode: true, patchMode: true,
           provider: result?.provider || '', presetName: result?.presetName || '', model: result?.model || '',
           elapsedMs: Date.now() - startedAt, systemPrompt: prompts.system, userPrompt: prompts.user,
-          rawResponse: result?.content || '', parsed: patch, referenceMeta: clone(loreContext.meta)
+          rawResponse: result?.content || '', parsed: patch, referenceMeta: clone(loreContext.meta),
+          usage: clone(result?.usage || {}), usageDiagnostics: clone(result?.usageDiagnostics || {}),
+          finishReason: result?.finishReason || '', outputBudgetTokens: Number(result?.outputBudgetTokens || 0)
         });
         throw new Error(`${STAGE_LABELS[stageName]} 실패: ${reason}`);
       }
@@ -28984,7 +29261,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         stage: stageName, ok: true, reason: stage.reason, memoryMode: true, patchMode: true,
         provider: result.provider || '', presetName: result.presetName || '', model: result.model || '', elapsedMs,
         systemPrompt: result.effectiveSystemPrompt || prompts.system, userPrompt: result.effectiveUserPrompt || prompts.user,
-        rawResponse: result.content || '', parsed: stage, usage: result.usage || null, cache: clone(result.cache || {}), finishReason: result.finishReason || '',
+        rawResponse: result.content || '', parsed: stage, usage: result.usage || null, usageDiagnostics: clone(result.usageDiagnostics || {}),
+        cache: clone(result.cache || {}), finishReason: result.finishReason || '', outputBudgetTokens: Number(result.outputBudgetTokens || 0),
         referenceMeta: clone(loreContext.meta)
       });
       return {
@@ -28994,7 +29272,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           stage: stageName, label: STAGE_LABELS[stageName], status: 'complete', outputType: 'patch',
           patch: clone(patch), changeSummary: clone(stage.change_log), preview: validation.text,
           rawResponse: result.content || '', provider: result.provider || '', presetName: result.presetName || '',
-          model: result.model || '', durationMs: elapsedMs, usage: clone(result.usage || {}), cache: clone(result.cache || {}), validation,
+          model: result.model || '', durationMs: elapsedMs, usage: clone(result.usage || {}), usageDiagnostics: clone(result.usageDiagnostics || {}),
+          outputBudgetTokens: Number(result.outputBudgetTokens || 0), cache: clone(result.cache || {}), validation,
           referenceMeta: clone(loreContext.meta)
         }
       };
