@@ -1,9 +1,9 @@
 //@name libra
-//@display-name LIBRA v1.0.32
+//@display-name LIBRA v1.0.33
 //@api 3.0
-//@version 1.0.32
+//@version 1.0.33
 
-/* v1.0.32 hardens long-memory completion: Ariadne/ito retry budgets never regress after a provider length expansion, Gemini memory stages prefer visible output with thinking minimized, Ariadne can continue a truncated canonical draft instead of restarting it, and provider token/thinking diagnostics are exported. v1.0.31 preserves RE:TRACE summary-only runtime fallback options so a failed IPC probe cannot silently hydrate every canonical memory. */
+/* v1.0.33 retries one live five-turn analysis after a source-digest branch discard and omits invalid persona message boundaries from canonical reference headers. v1.0.32 hardens long-memory completion: Ariadne/ito retry budgets never regress after a provider length expansion, Gemini memory stages prefer visible output with thinking minimized, Ariadne can continue a truncated canonical draft instead of restarting it, and provider token/thinking diagnostics are exported. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -65,6 +65,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.33
+ * v1.0.33 keeps the stale-branch commit barrier fail-closed while scheduling one bounded live retry for the current source digest, and serializes a reference boundary only when messageIndex is a valid non-negative integer.
+ *
  * LIBRA v1.0.32
  * v1.0.32 prevents Ariadne/ito output-budget regression after MAX_TOKENS retries, adds bounded Ariadne continuation recovery for truncated canonical drafts, minimizes Gemini memory-stage thinking so visible memory text receives the output budget, and records provider prompt/candidate/thought/total token diagnostics.
  *
@@ -217,7 +220,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.32';
+  const PLUGIN_VERSION = '1.0.33';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -8927,12 +8930,13 @@ function mergeAgentCbsWarnings(...warningLists) {
     : '';
 
   const serializeCanonicalReferenceItem = item => {
+    const hasMessageBoundary = Number.isInteger(item.messageIndex) && item.messageIndex >= 0;
     const meta = [
       item.label,
       item.activationRoute ? `route=${item.activationRoute}` : '',
       item.position ? `position=${item.position}${item.depth ? `:${item.depth}` : ''}` : '',
       item.role && item.role !== 'system' ? `role=${item.role}` : '',
-      item.messageIndex !== null ? `through=${item.messageIndex}` : ''
+      hasMessageBoundary ? `through=${item.messageIndex}` : ''
     ].filter(Boolean).join(' | ');
     return [`[${meta || item.id}]`, item.content].join('\n');
   };
@@ -30010,6 +30014,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const scanMode = string(options.mode || options.reason || 'live').toLowerCase();
         const allowHistoricalBackfill = options.allowHistoricalBackfill === true
           || ['manual_cold_start', 'manual_cold_start_retry', 'historical_reanalysis'].includes(scanMode);
+        const automaticLiveScan = !allowHistoricalBackfill
+          && ['afterrequest_fallback', 'risu_output'].includes(scanMode);
+        const sourceStabilityDelay = automaticLiveScan
+          ? clamp(options.sourceStabilityDelay, 120, 2000, 350)
+          : 0;
         const currentCompletedStart = pairs.length >= BATCH_SIZE && pairs.length % BATCH_SIZE === 0
           ? pairs.length - BATCH_SIZE + 1
           : 0;
@@ -30018,6 +30027,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         let processed = 0;
         let partialCommitted = 0;
         let staleDiscarded = 0;
+        const staleDiscards = [];
         const failedBatches = [];
 
         for (const ref of Object.values(manifest.memories)) {
@@ -30052,11 +30062,38 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             }
             continue;
           }
+          if (sourceStabilityDelay > 0 && startTurn === currentCompletedStart) {
+            await new Promise(resolve => setTimeout(resolve, sourceStabilityDelay));
+            const stability = await verifyBatchStillCurrent(context, startTurn, sourceHash);
+            if (!stability.ok) {
+              if (stability.reason === 'runtime_disposed' || state.disposed) {
+                return { ok: true, skipped: true, reason: 'runtime_disposed' };
+              }
+              const stale = {
+                startTurn,
+                reason: string(stability.reason || 'unknown'),
+                expectedSourceDigest: sourceHash,
+                currentSourceDigest: string(stability.currentDigest || ''),
+                preflight: true
+              };
+              staleDiscarded += 1;
+              staleDiscards.push(stale);
+              state.lastScan = { at: Date.now(), ok: true, staleDiscarded: true, ...stale };
+              Runtime.lastBranchGuard = clone(state.lastScan);
+              continue;
+            }
+          }
           try {
             const committedMemory = await processBatch(context, manifest, pairs, startTurn, { ...options, mode: scanMode });
             if (committedMemory?.runtimeDisposed || state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
             if (committedMemory?.staleDiscarded) {
               staleDiscarded += 1;
+              staleDiscards.push({
+                startTurn: Number(committedMemory.startTurn || startTurn),
+                reason: string(committedMemory.reason || 'unknown'),
+                expectedSourceDigest: string(committedMemory.expectedSourceDigest || sourceHash),
+                currentSourceDigest: string(committedMemory.currentSourceDigest || '')
+              });
               continue;
             }
             if (committedMemory) {
@@ -30104,7 +30141,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           ok: failedBatches.length === 0,
           skipped: eligibleStarts.length === 0 && failedBatches.length === 0,
           reason: noEligibleReason,
-          processed, partialCommitted, staleDiscarded, failed: failedBatches.length, failedBatches,
+          processed, partialCommitted, staleDiscarded, staleDiscards, failed: failedBatches.length, failedBatches,
           observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn, currentCompletedStart, inFlightStart,
           mode: scanMode, historicalBackfill: allowHistoricalBackfill, eligibleBatches: eligibleStarts.length, eligibleStarts: eligibleStarts.slice(), totalCompleteBatches: starts.length
         };
@@ -30127,6 +30164,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const boundScope = string(suppliedScope.scopeKey) ? clone(suppliedScope) : null;
       const contextRetryDelays = [180, 420, 900, 1600];
       const settleRetryDelays = [260, 700, 1400];
+      const staleBranchRetryDelays = [650];
       const baseDiagnostic = {
         at: Date.now(),
         serial: scheduleSerial,
@@ -30138,7 +30176,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       let resolvedScope = boundScope ? clone(boundScope) : null;
       state.lastScanSchedule = { ...baseDiagnostic, phase: 'scheduled', contextAttempt: 0 };
 
-      const executeScan = async (contextAttempt = 0, settleAttempt = 0) => {
+      const executeScan = async (contextAttempt = 0, settleAttempt = 0, staleRetryAttempt = 0) => {
         if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
         let expectedScope = resolvedScope ? clone(resolvedScope) : null;
         if (!expectedScope?.scopeKey) {
@@ -30157,7 +30195,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               };
               const retryTimer = setTimeout(() => {
                 if (state.timers.get(timerKey) === retryTimer) state.timers.delete(timerKey);
-                void executeScan(contextAttempt + 1, settleAttempt);
+                void executeScan(contextAttempt + 1, settleAttempt, staleRetryAttempt);
               }, retryDelay);
               state.timers.set(timerKey, retryTimer);
               return;
@@ -30176,16 +30214,34 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
         if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
         state.lastScanSchedule = {
-          ...baseDiagnostic, phase: 'executing', contextAttempt, settleAttempt, expectedScope: clone(expectedScope), startedAt: Date.now()
+          ...baseDiagnostic, phase: 'executing', contextAttempt, settleAttempt, staleRetryAttempt, expectedScope: clone(expectedScope), startedAt: Date.now()
         };
         try {
           const result = await scan({ ...scheduledOptions, expectedScope: clone(expectedScope) });
           if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
           state.lastScheduledScanResult = {
             at: Date.now(), scheduleSerial, trigger: baseDiagnostic.reason, requestType: baseDiagnostic.requestType,
-            expectedScope: clone(expectedScope), settleAttempt, result: clone(result)
+            expectedScope: clone(expectedScope), settleAttempt, staleRetryAttempt, result: clone(result)
           };
           const observedTurns = Number(result?.observedTurns || 0);
+          const staleSourceChanged = result?.historicalBackfill !== true
+            && asArray(result?.staleDiscards).some(item => string(item?.reason || '') === 'source_digest_changed');
+          const shouldRetryStaleBranch = staleSourceChanged
+            && staleRetryAttempt < staleBranchRetryDelays.length;
+          if (shouldRetryStaleBranch) {
+            const staleRetryDelay = staleBranchRetryDelays[staleRetryAttempt];
+            state.lastScanSchedule = {
+              ...state.lastScanSchedule, phase: 'stale_branch_retry', finishedAt: Date.now(), result: clone(result),
+              staleRetryAttempt: staleRetryAttempt + 1, staleRetryDelay,
+              staleDiscards: clone(result?.staleDiscards || [])
+            };
+            const staleRetryTimer = setTimeout(() => {
+              if (state.timers.get(timerKey) === staleRetryTimer) state.timers.delete(timerKey);
+              void executeScan(0, 0, staleRetryAttempt + 1);
+            }, staleRetryDelay);
+            state.timers.set(timerKey, staleRetryTimer);
+            return;
+          }
           const shouldSettleRetry = result?.historicalBackfill !== true
             && Number(result?.eligibleBatches || 0) === 0
             && observedTurns > 0
@@ -30199,7 +30255,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             };
             const settleTimer = setTimeout(() => {
               if (state.timers.get(timerKey) === settleTimer) state.timers.delete(timerKey);
-              void executeScan(0, settleAttempt + 1);
+              void executeScan(0, settleAttempt + 1, staleRetryAttempt);
             }, settleDelay);
             state.timers.set(timerKey, settleTimer);
             return;
@@ -30223,7 +30279,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
       const timer = setTimeout(() => {
         if (state.timers.get(timerKey) === timer) state.timers.delete(timerKey);
-        void executeScan(0, 0);
+        void executeScan(0, 0, 0);
       }, delay);
       state.timers.set(timerKey, timer);
       return true;
@@ -31685,10 +31741,28 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const worldAdditionalReadable = worldItems.filter(item => item && string(item.handoffTransferId || '') === transferId).length;
       const archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
       const archive = await readLibraSharedArchive(archiveRef);
-      const verified = manifest.lastSessionHandoff?.transferId === transferId
+      const handoffMarker = manifest.lastSessionHandoff && typeof manifest.lastSessionHandoff === 'object'
+        ? manifest.lastSessionHandoff
+        : {};
+      const expectedArchiveId = string(options.expectedArchiveId || '').trim();
+      const expectedArchiveDigest = string(options.expectedArchiveDigest || '').trim();
+      const expectedArchiveGeneration = Math.max(0, Number(options.expectedArchiveGeneration || 0) || 0);
+      const markerMatches = handoffMarker.schema === LIBRA_SESSION_HANDOFF_MARKER_SCHEMA
+        && string(handoffMarker.transferId || '') === transferId
+        && string(handoffMarker.targetChatId || '') === targetChatId
+        && Number(handoffMarker.records || 0) === expectedRecords
+        && Number(handoffMarker.worldAdditional || 0) === expectedWorldAdditional
+        && string(handoffMarker.archiveId || '') === string(archiveRef?.archiveId || '')
+        && Number(handoffMarker.archiveGeneration || 0) === Number(archiveRef?.generation || 0)
+        && string(handoffMarker.archiveDigest || '') === string(archiveRef?.digest || '');
+      const requestedArchiveMatches = (!expectedArchiveId || expectedArchiveId === string(archiveRef?.archiveId || ''))
+        && (!expectedArchiveDigest || expectedArchiveDigest === string(archiveRef?.digest || ''))
+        && (!expectedArchiveGeneration || expectedArchiveGeneration === Number(archiveRef?.generation || 0));
+      const verified = markerMatches
         && readable === refs.length && readable === expectedRecords
         && worldAdditionalReadable === expectedWorldAdditional
-        && archive.verified === true && archive.memoryRefs.length === expectedRecords;
+        && archive.verified === true && archive.memoryRefs.length === expectedRecords
+        && requestedArchiveMatches;
       return clone({
         schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
         action: 'verified', transferId, targetChatId, targetScope: target.scope,
@@ -31714,7 +31788,65 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const packageValue = await storage.getJson(key.handoffPackage(transferId), null);
       if (!packageValue || packageValue.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA) {
         const prior = await storage.getJson(key.handoffReceipt(transferId), null);
-        if (prior?.targetChatId === targetChatId && prior?.transferId === transferId && prior?.verified === true && prior?.durable === true) return clone(prior);
+        const integerFieldMatches = (field, expected = null) => Object.prototype.hasOwnProperty.call(prior || {}, field)
+          && Number.isInteger(Number(prior[field]))
+          && (expected == null || Number(prior[field]) === Number(expected));
+        const priorRecords = Number(prior?.records);
+        const priorWorldAdditional = Number(prior?.worldAdditional);
+        const priorStructurallyValid = prior?.schema === LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA
+          && prior?.action === 'adopted'
+          && prior?.adopted === true
+          && prior?.verified === true
+          && prior?.durable === true
+          && string(prior?.targetChatId || '') === targetChatId
+          && string(prior?.transferId || '') === transferId
+          && integerFieldMatches('records')
+          && integerFieldMatches('expectedRecords', priorRecords)
+          && integerFieldMatches('worldAdditional')
+          && integerFieldMatches('expectedWorldAdditional', priorWorldAdditional)
+          && integerFieldMatches('archiveRecordCount', priorRecords)
+          && integerFieldMatches('archiveGeneration')
+          && Number(prior.archiveGeneration) >= 1
+          && integerFieldMatches('physicalMemoryCopies', 0)
+          && string(prior?.archiveId || '').trim().length > 0
+          && string(prior?.archiveDigest || '').trim().length > 0
+          && (requestedExpectedRecords == null || requestedExpectedRecords === priorRecords)
+          && (requestedExpectedWorldAdditional == null || requestedExpectedWorldAdditional === priorWorldAdditional);
+        if (priorStructurallyValid) {
+          const verification = await verifySessionHandoff({
+            transferId,
+            targetChatId,
+            expectedRecords: priorRecords,
+            expectedWorldAdditional: priorWorldAdditional,
+            expectedArchiveId: string(prior.archiveId),
+            expectedArchiveGeneration: Number(prior.archiveGeneration),
+            expectedArchiveDigest: string(prior.archiveDigest)
+          });
+          const currentDurableReadbackMatches = verification?.schema === LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA
+            && verification?.action === 'verified'
+            && verification?.verified === true
+            && verification?.durable === true
+            && string(verification?.targetChatId || '') === targetChatId
+            && string(verification?.transferId || '') === transferId
+            && Number(verification?.records) === priorRecords
+            && Number(verification?.expectedRecords) === priorRecords
+            && Number(verification?.worldAdditional) === priorWorldAdditional
+            && Number(verification?.expectedWorldAdditional) === priorWorldAdditional
+            && string(verification?.archiveId || '') === string(prior.archiveId)
+            && Number(verification?.archiveGeneration || 0) === Number(prior.archiveGeneration)
+            && string(verification?.archiveDigest || '') === string(prior.archiveDigest)
+            && Number(verification?.archiveRecordCount || 0) === priorRecords;
+          if (currentDurableReadbackMatches) {
+            return clone({
+              ...verification,
+              action: 'adopted',
+              adopted: true,
+              sourceScope: clone(prior.sourceScope || {}),
+              adoptedAt: string(prior.adoptedAt || nowIso()),
+              reason: 'libra_archive_handoff_already_durable'
+            });
+          }
+        }
         throw new Error('준비된 LIBRA handoff package를 찾지 못했습니다.');
       }
       if (Date.parse(string(packageValue.expiresAt || '')) && Date.parse(string(packageValue.expiresAt)) <= Date.now()) {
