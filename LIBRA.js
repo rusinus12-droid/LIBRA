@@ -1,9 +1,9 @@
 //@name libra
-//@display-name LIBRA v1.0.33
+//@display-name LIBRA v1.0.34
 //@api 3.0
-//@version 1.0.33
+//@version 1.0.34
 
-/* v1.0.33 retries one live five-turn analysis after a source-digest branch discard and omits invalid persona message boundaries from canonical reference headers. v1.0.32 hardens long-memory completion: Ariadne/ito retry budgets never regress after a provider length expansion, Gemini memory stages prefer visible output with thinking minimized, Ariadne can continue a truncated canonical draft instead of restarting it, and provider token/thinking diagnostics are exported. */
+/* v1.0.34 gives host fetches a real Promise deadline and moves optional World Additional generation behind the durable canonical-memory commit, with its own bounded background job. v1.0.33 retries one live five-turn analysis after a source-digest branch discard and omits invalid persona message boundaries from canonical reference headers. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -65,6 +65,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.34
+ * v1.0.34 prevents a host nativeFetch implementation that ignores AbortSignal from hanging forever, and queues optional World Additional generation only after the canonical memory and manifest are durably committed.
+ *
  * LIBRA v1.0.33
  * v1.0.33 keeps the stale-branch commit barrier fail-closed while scheduling one bounded live retry for the current source digest, and serializes a reference boundary only when messageIndex is a valid non-negative integer.
  *
@@ -220,7 +223,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.33';
+  const PLUGIN_VERSION = '1.0.34';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -1851,8 +1854,9 @@
     };
     const storageApi = () => hostCandidates().find(candidate => candidate?.pluginStorage) || API;
     const nativeFetch = async (url, init = {}, timeoutMs = 120000) => {
+      const effectiveTimeoutMs = Math.max(1, Number(timeoutMs || 120000) || 120000);
       let requestUrl = url;
-      let requestInit = { ...init, requestTimeoutMs: timeoutMs };
+      let requestInit = { ...init, requestTimeoutMs: effectiveTimeoutMs };
       if (shouldRouteThroughBackendBridge(url, requestInit)) {
         const hosting = activeBackendHosting();
         const stream = (() => {
@@ -1872,9 +1876,9 @@
             headers: headersToPlainObject(requestInit.headers || {}),
             bodyEncoding: encoded.bodyEncoding,
             body: encoded.body,
-            timeoutMs
+            timeoutMs: effectiveTimeoutMs
           }),
-          requestTimeoutMs: timeoutMs,
+          requestTimeoutMs: effectiveTimeoutMs,
           backendBridge: false
         };
         Runtime.lastBackendBridge = {
@@ -1894,12 +1898,26 @@
         if (typeof AbortController !== 'undefined' && !requestInit.signal) {
           controller = new AbortController();
           requestInit.signal = controller.signal;
-          timer = setTimeout(() => controller.abort(), timeoutMs);
         }
         const fetchApi = hostCandidates().find(candidate => typeof candidate?.nativeFetch === 'function' || typeof candidate?.risuFetch === 'function');
-        if (typeof fetchApi?.nativeFetch === 'function') return await fetchApi.nativeFetch(requestUrl, requestInit);
-        if (typeof fetchApi?.risuFetch === 'function') return await fetchApi.risuFetch(requestUrl, requestInit);
-        throw new Error('RisuAI nativeFetch/risuFetch API is unavailable; browser fetch fallback is disabled for API v3 storage/fetch compliance.');
+        const requestPromise = typeof fetchApi?.nativeFetch === 'function'
+          ? fetchApi.nativeFetch(requestUrl, requestInit)
+          : typeof fetchApi?.risuFetch === 'function'
+            ? fetchApi.risuFetch(requestUrl, requestInit)
+            : Promise.reject(new Error('RisuAI nativeFetch/risuFetch API is unavailable; browser fetch fallback is disabled for API v3 storage/fetch compliance.'));
+        const timeoutPromise = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            try { controller?.abort(); } catch (_) {}
+            const error = new Error(`RisuAI nativeFetch timed out after ${effectiveTimeoutMs}ms.`);
+            error.name = 'TimeoutError';
+            error.code = 'NATIVE_FETCH_TIMEOUT';
+            reject(error);
+          }, effectiveTimeoutMs);
+        });
+        // Some RisuAI hosts accept AbortSignal but do not settle nativeFetch when it
+        // aborts. The independent rejection is therefore the actual deadline; abort
+        // remains a best-effort resource cleanup signal for compliant hosts.
+        return await Promise.race([requestPromise, timeoutPromise]);
       } finally {
         if (timer) clearTimeout(timer);
       }
@@ -12395,9 +12413,12 @@ function mergeAgentCbsWarnings(...warningLists) {
       if (settings.debugLog && rendered.warnings?.length) log('rag_cbs_warnings', rendered.warnings);
     }
     const resolved = resolvePreset(settings, stageName);
-    const timeoutOverride = settings?.stageOptions?.[stageName]
-      ? stageExecutionOptions(settings, stageName).timeoutMs
-      : 0;
+    const explicitTimeoutMs = Number(options.timeoutMs ?? options.timeout_ms ?? 0);
+    const timeoutOverride = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0
+      ? clampInt(explicitTimeoutMs, 5000, 300000, DEFAULT_STAGE_TIMEOUT_MS)
+      : settings?.stageOptions?.[stageName]
+        ? stageExecutionOptions(settings, stageName).timeoutMs
+        : 0;
     const name = resolved.name;
     const preset = timeoutOverride ? sanitizePreset({ ...resolved.preset, timeout_ms: timeoutOverride }) : resolved.preset;
     if (!providerConfigured(preset)) return { ok: false, skipped: true, reason: `preset_unconfigured:${name}`, presetName: name };
@@ -25574,6 +25595,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const WORLD_ADDITIONAL_REINJECT_COOLDOWN_TURNS = 3;
     const WORLD_ADDITIONAL_CANDIDATE_TTL_TURNS = 20;
     const WORLD_ADDITIONAL_APPLIED_RETENTION_TURNS = 10;
+    const WORLD_ADDITIONAL_PROVIDER_DEADLINE_MS = 30000;
     const MEMORY_INJECTION_MARKER = '[LIBRA 장기기억 — 관련 기억만 시간순으로 제공됨]';
     const RETRIEVAL_PROJECTION_VERSION = 'libra.retrieval_projection.v2';
     const EMBEDDING_PROJECTION_SCHEMA = 'libra.embedding_projection.v2';
@@ -29517,7 +29539,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const createWorldAdditional = async (scope, manifest, memory, request, run) => {
       const settings = await loadMemorySettings();
-      if (!settings.worldAdditionalEnabled || !request?.needed) return [];
+      if (!settings.worldAdditionalEnabled || !request?.needed) {
+        run.worldAdditional = { status: 'skipped', reason: settings.worldAdditionalEnabled ? 'not_requested' : 'disabled' };
+        return [];
+      }
       const currentTurn = Math.max(0, Number(memory?.turnRange?.end || 0) || 0);
       await pruneWorldAdditionalLifecycle(scope, manifest, currentTurn);
       const activeRunIds = await activeCanonicalRunIds(scope, manifest);
@@ -29545,8 +29570,37 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         ? existingActive.map(item => `- ${item.title}: ${compact(item.content, 360)}`).join('\n')
         : '(none)';
       const user = `[정본 메모리]\n${memory.text}\n\n[생성 이유]\n${request.reason || '(none)'}\n\n[초점]\n${request.focus.join(', ') || '(none)'}\n\n[이미 존재하는 활성 후보 — 중복 금지]\n${existing}`;
-      const result = await LibraProviderBridge.callTask('world_additional', system, user, { temp: 0.35, maxTokens: 1400, jsonMode: true, forceNonStreaming: true, domain: 'world_additional', featureDomain: 'world_additional' });
-      if (!result?.ok) return [];
+      let deadlineTimer = null;
+      const providerPromise = LibraProviderBridge.callTask('world_additional', system, user, {
+        temp: 0.35, maxTokens: 1400, jsonMode: true, forceNonStreaming: true,
+        domain: 'world_additional', featureDomain: 'world_additional',
+        timeoutMs: WORLD_ADDITIONAL_PROVIDER_DEADLINE_MS,
+        // World Additional is optional and must not extend its deadline with the
+        // generic transient-provider retry.
+        transientRetry: true
+      });
+      let result;
+      try {
+        result = await Promise.race([
+          providerPromise,
+          new Promise((_, reject) => {
+            deadlineTimer = setTimeout(() => reject(new LIBRAError(
+              `World Additional provider deadline exceeded (${WORLD_ADDITIONAL_PROVIDER_DEADLINE_MS}ms).`,
+              'WORLD_ADDITIONAL_TIMEOUT'
+            )), WORLD_ADDITIONAL_PROVIDER_DEADLINE_MS);
+          })
+        ]);
+      } finally {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+      }
+      if (!result?.ok) {
+        run.worldAdditional = {
+          status: 'skipped', reason: string(result?.reason || 'provider_returned_no_content'),
+          provider: result?.provider || '', presetName: result?.presetName || '', model: result?.model || ''
+        };
+        return [];
+      }
+      if (state.disposed) return [];
       const parsed = relaxedJsonParse(result.content);
       const proposals = asArray(parsed?.proposals).slice(0, Math.min(WORLD_ADDITIONAL_MAX_CREATE_PER_BATCH, availableSlots));
       const created = [];
@@ -29882,8 +29936,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
         const worldStage = work.stageObjects[2] || null;
         const worldRequest = worldAdditionalRequestFromStage(worldStage);
-        try { await createWorldAdditional(context.scope, manifest, memory, worldRequest, run); }
-        catch (worldError) { run.errors.push({ stage: 'world_additional', message: compact(worldError?.message || worldError, 500), at: nowIso() }); }
+        const worldAdditionalEnabled = (await loadMemorySettings()).worldAdditionalEnabled === true;
+        const shouldQueueWorldAdditional = worldAdditionalEnabled && worldRequest.needed === true;
+        run.worldAdditional = shouldQueueWorldAdditional
+          ? { status: 'queued', queuedAt: nowIso(), sourceMemoryId: memory.memoryId }
+          : { status: 'skipped', reason: worldAdditionalEnabled ? 'not_requested' : 'disabled' };
 
         run.status = pipelineStatus === 'partial' ? 'complete_with_warnings' : 'complete';
         run.finishedAt = nowIso();
@@ -29908,6 +29965,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           ? `TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 메모리 저장 완료 · ${failedItoStages.map(item => item.label).join(', ')} 보정 실패는 건너뜀`
           : `TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 종합 메모리 저장 완료`;
         await finishPipelineWorkStatus(completionMessage, true, pipelineStatus === 'partial' ? 3500 : 2000, pipelineStatus === 'partial' ? 'completed_with_warnings' : 'completed');
+        if (shouldQueueWorldAdditional) {
+          queueWorldAdditional({ context, memory, request: worldRequest, runId: run.runId });
+        }
         scheduleGuiTraceRefresh();
         return memory;
       } catch (error) {
@@ -29978,6 +30038,47 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       });
       state.queues.set(scopeKey, next);
       return next;
+    };
+
+    const queueWorldAdditional = ({ context, memory, request, runId }) => {
+      const scope = clone(context?.scope || {});
+      if (state.disposed || !string(scope.scopeKey) || !request?.needed || !string(runId)) return false;
+      const job = enqueue(scope.scopeKey, async () => {
+        if (state.disposed || state.deletingScopes.has(scope.scopeKey)) return { skipped: true, reason: 'runtime_unavailable' };
+        const manifest = await loadManifest(scope, Math.max(0, Number(memory?.turnRange?.end || 0) || 0));
+        const run = await loadRun(scope, runId);
+        if (!run) return { skipped: true, reason: 'run_missing' };
+        const activeRef = memoryRefForStart(manifest, Number(memory?.turnRange?.start || 0));
+        const sourceStillActive = activeRef?.status === 'committed'
+          && string(activeRef.sourceDigest) === string(memory?.sourceDigest)
+          && string(activeRef.runId) === string(runId);
+        if (!sourceStillActive) {
+          run.worldAdditional = { status: 'skipped', reason: 'source_memory_not_active', finishedAt: nowIso() };
+          await storage.setJson(key.run(scope, runId), run);
+          return { skipped: true, reason: 'source_memory_not_active' };
+        }
+
+        run.worldAdditional = { status: 'running', startedAt: nowIso(), sourceMemoryId: memory.memoryId };
+        await storage.setJson(key.run(scope, runId), run);
+        try {
+          await createWorldAdditional(scope, manifest, memory, request, run);
+        } catch (error) {
+          if (state.disposed) return { skipped: true, reason: 'runtime_disposed' };
+          const message = compact(error?.message || error, 500);
+          run.errors = [
+            ...asArray(run.errors).filter(item => item?.stage !== 'world_additional'),
+            { stage: 'world_additional', message, at: nowIso(), optional: true }
+          ];
+          run.worldAdditional = { status: 'failed_optional', message, finishedAt: nowIso() };
+        }
+        if (state.disposed) return { skipped: true, reason: 'runtime_disposed' };
+        await storage.setJson(key.run(scope, runId), run);
+        await saveManifest(scope, manifest);
+        await refreshSnapshot(undefined, { skipNativeCopyAdoption: true, suppressGuiSchedule: false });
+        return { ok: true, status: run.worldAdditional?.status || 'complete' };
+      });
+      void job.catch(error => warn('LIBRA optional World Additional background job failed.', error));
+      return true;
     };
 
     const scan = async (options = {}) => {
