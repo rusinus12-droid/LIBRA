@@ -1,9 +1,9 @@
 //@name libra
-//@display-name LIBRA v1.0.34
+//@display-name LIBRA v1.0.35
 //@api 3.0
-//@version 1.0.34
+//@version 1.0.35
 
-/* v1.0.34 gives host fetches a real Promise deadline and moves optional World Additional generation behind the durable canonical-memory commit, with its own bounded background job. v1.0.33 retries one live five-turn analysis after a source-digest branch discard and omits invalid persona message boundaries from canonical reference headers. */
+/* v1.0.35 adds an exact beforeRequest recovery trigger for hosts that silently omit output/afterRequest callbacks, without enabling automatic historical cold-start. v1.0.34 gives host fetches a real Promise deadline and moves optional World Additional generation behind the durable canonical-memory commit, with its own bounded background job. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -65,6 +65,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.35
+ * v1.0.35 adds a third automatic memory trigger: when output and afterRequest callbacks are silently absent, the next main beforeRequest may recover only the exact just-completed five-turn boundary previously observed by LIBRA. The recovery is scope-bound, turn-count-bound, source-digest-bound, and never enables automatic historical backfill.
+ *
  * LIBRA v1.0.34
  * v1.0.34 prevents a host nativeFetch implementation that ignores AbortSignal from hanging forever, and queues optional World Additional generation only after the canonical memory and manifest are durably committed.
  *
@@ -223,7 +226,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.34';
+  const PLUGIN_VERSION = '1.0.35';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -25756,6 +25759,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       },
       snapshotRefreshSerial: 0,
       scheduledScanSerial: 0,
+      scheduledRecoveryScanSerial: 0,
       guiSnapshotLimits: { ...LIBRA_SNAPSHOT_PAGE_LIMITS },
       outputListenerRegistered: false,
       outputListener: null,
@@ -25766,6 +25770,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       lastScanSchedule: null,
       lastAfterRequest: null,
       lastRequestScope: null,
+      lastBeforeRequestRecovery: null,
       memoryRunCount: 0,
       currentRun: null,
       nativeCopyChecks: new Map(),
@@ -30116,12 +30121,18 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const allowHistoricalBackfill = options.allowHistoricalBackfill === true
           || ['manual_cold_start', 'manual_cold_start_retry', 'historical_reanalysis'].includes(scanMode);
         const automaticLiveScan = !allowHistoricalBackfill
-          && ['afterrequest_fallback', 'risu_output'].includes(scanMode);
+          && ['afterrequest_fallback', 'risu_output', 'beforerequest_recovery'].includes(scanMode);
         const sourceStabilityDelay = automaticLiveScan
           ? clamp(options.sourceStabilityDelay, 120, 2000, 350)
           : 0;
         const currentCompletedStart = pairs.length >= BATCH_SIZE && pairs.length % BATCH_SIZE === 0
           ? pairs.length - BATCH_SIZE + 1
+          : 0;
+        const requestedRecoveryStart = Math.max(0, Number(options.liveRecoveryStartTurn || 0) || 0);
+        const requestedRecoveryDigest = string(options.liveRecoverySourceDigest || '');
+        const liveRecoveryStart = requestedRecoveryStart && starts.includes(requestedRecoveryStart) && requestedRecoveryDigest
+          && sourceDigest(batchForStart(pairs, requestedRecoveryStart)) === requestedRecoveryDigest
+          ? requestedRecoveryStart
           : 0;
         const inFlightStart = Number(manifest.inFlight?.startTurn || 0);
         const inFlightMode = string(manifest.inFlight?.mode || manifest.inFlight?.scanMode || '').toLowerCase();
@@ -30144,6 +30155,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           const batch = batchForStart(pairs, startTurn);
           const ref = memoryRefForStart(manifest, startTurn);
           if (ref) return true;
+          if (liveRecoveryStart && startTurn === liveRecoveryStart) return true;
           if (currentCompletedStart && startTurn === currentCompletedStart) return true;
           return inFlightStart === startTurn && !!inFlightMode && !['manual_cold_start', 'manual_cold_start_retry', 'historical_reanalysis'].includes(inFlightMode);
         });
@@ -30163,7 +30175,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             }
             continue;
           }
-          if (sourceStabilityDelay > 0 && startTurn === currentCompletedStart) {
+          if (sourceStabilityDelay > 0 && startTurn === (liveRecoveryStart || currentCompletedStart)) {
             await new Promise(resolve => setTimeout(resolve, sourceStabilityDelay));
             const stability = await verifyBatchStillCurrent(context, startTurn, sourceHash);
             if (!stability.ok) {
@@ -30243,7 +30255,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           skipped: eligibleStarts.length === 0 && failedBatches.length === 0,
           reason: noEligibleReason,
           processed, partialCommitted, staleDiscarded, staleDiscards, failed: failedBatches.length, failedBatches,
-          observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn, currentCompletedStart, inFlightStart,
+          observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn, currentCompletedStart, liveRecoveryStart, inFlightStart,
           mode: scanMode, historicalBackfill: allowHistoricalBackfill, eligibleBatches: eligibleStarts.length, eligibleStarts: eligibleStarts.slice(), totalCompleteBatches: starts.length
         };
       });
@@ -30252,8 +30264,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const scheduleScan = (options = {}) => {
       if (state.disposed) return false;
       const scheduledOptions = { ...options };
-      const scheduleSerial = ++state.scheduledScanSerial;
-      const timerKey = 'current';
+      const exactRecovery = string(scheduledOptions.reason || '').toLowerCase() === 'beforerequest_recovery'
+        && Number(scheduledOptions.liveRecoveryStartTurn || 0) > 0
+        && !!string(scheduledOptions.liveRecoverySourceDigest || '');
+      const scheduleSerial = exactRecovery
+        ? ++state.scheduledRecoveryScanSerial
+        : ++state.scheduledScanSerial;
+      const timerKey = exactRecovery ? 'recovery' : 'current';
+      const serialIsCurrent = () => scheduleSerial === (exactRecovery ? state.scheduledRecoveryScanSerial : state.scheduledScanSerial);
       const existing = state.timers.get(timerKey);
       if (existing) {
         clearTimeout(existing);
@@ -30269,6 +30287,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const baseDiagnostic = {
         at: Date.now(),
         serial: scheduleSerial,
+        channel: exactRecovery ? 'recovery' : 'current',
         reason: string(scheduledOptions.reason || scheduledOptions.mode || 'live'),
         requestType: string(scheduledOptions.requestType || state.lastAfterRequest?.requestType || ''),
         delay,
@@ -30278,7 +30297,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       state.lastScanSchedule = { ...baseDiagnostic, phase: 'scheduled', contextAttempt: 0 };
 
       const executeScan = async (contextAttempt = 0, settleAttempt = 0, staleRetryAttempt = 0) => {
-        if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+        if (state.disposed || !serialIsCurrent()) return;
         let expectedScope = resolvedScope ? clone(resolvedScope) : null;
         if (!expectedScope?.scopeKey) {
           try {
@@ -30286,7 +30305,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             expectedScope = clone(context.scope);
             resolvedScope = clone(context.scope);
           } catch (error) {
-            if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+            if (state.disposed || !serialIsCurrent()) return;
             const message = compact(error?.message || error, 500);
             if (contextAttempt < contextRetryDelays.length) {
               const retryDelay = contextRetryDelays[contextAttempt];
@@ -30313,13 +30332,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           }
         }
 
-        if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+        if (state.disposed || !serialIsCurrent()) return;
         state.lastScanSchedule = {
           ...baseDiagnostic, phase: 'executing', contextAttempt, settleAttempt, staleRetryAttempt, expectedScope: clone(expectedScope), startedAt: Date.now()
         };
         try {
           const result = await scan({ ...scheduledOptions, expectedScope: clone(expectedScope) });
-          if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+          if (state.disposed || !serialIsCurrent()) return;
           state.lastScheduledScanResult = {
             at: Date.now(), scheduleSerial, trigger: baseDiagnostic.reason, requestType: baseDiagnostic.requestType,
             expectedScope: clone(expectedScope), settleAttempt, staleRetryAttempt, result: clone(result)
@@ -30365,7 +30384,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             ...state.lastScanSchedule, phase: 'complete', finishedAt: Date.now(), result: clone(result)
           };
         } catch (error) {
-          if (state.disposed || scheduleSerial !== state.scheduledScanSerial) return;
+          if (state.disposed || !serialIsCurrent()) return;
           const message = compact(error?.message || error, 700);
           state.lastScheduledScanResult = {
             at: Date.now(), scheduleSerial, trigger: baseDiagnostic.reason, requestType: baseDiagnostic.requestType,
@@ -31339,22 +31358,92 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return true;
     };
 
+    const scheduleBeforeRequestRecovery = async ({ context, settings, previousRequestScope, completedPairs }) => {
+      const scope = asObject(context?.scope);
+      const previous = asObject(previousRequestScope);
+      const pairs = asArray(completedPairs);
+      const observedTurns = pairs.length;
+      const previousObservedTurns = Number(previous.observedTurns);
+      const previousRequestAt = Number(previous.at || 0);
+      const sameScope = !!string(previous.scope?.scopeKey)
+        && memoryInjectionScopeMatches(previous.scope, scope);
+      const exactOneTurnAdvance = Number.isInteger(previousObservedTurns)
+        && previousObservedTurns >= 0
+        && observedTurns === previousObservedTurns + 1;
+      const atFiveTurnBoundary = observedTurns >= BATCH_SIZE && observedTurns % BATCH_SIZE === 0;
+      const startTurn = atFiveTurnBoundary ? observedTurns - BATCH_SIZE + 1 : 0;
+      const batch = startTurn ? batchForStart(pairs, startTurn) : [];
+      const recoveryDigest = batch.length === BATCH_SIZE ? sourceDigest(batch) : '';
+      const diagnostic = {
+        at: Date.now(),
+        previousRequestAt: previousRequestAt || 0,
+        previousRequestType: string(previous.requestType || ''),
+        previousObservedTurns: Number.isInteger(previousObservedTurns) ? previousObservedTurns : null,
+        observedTurns,
+        exactOneTurnAdvance,
+        atFiveTurnBoundary,
+        startTurn,
+        scope: clone(scope),
+        previousScope: previous.scope ? clone(previous.scope) : null,
+        sameScope,
+        scheduled: false,
+        reason: '',
+        sourceDigest: recoveryDigest
+      };
+      const finish = reason => {
+        diagnostic.reason = reason;
+        state.lastBeforeRequestRecovery = diagnostic;
+        return false;
+      };
+      if (settings?.autoAnalyze === false) return finish('auto_analyze_disabled');
+      if (!previousRequestAt || normalizeRequestType(previous.requestType) !== 'model') return finish('no_previous_model_request');
+      if (!sameScope) return finish('previous_request_scope_mismatch');
+      if (!Number.isInteger(previousObservedTurns)) return finish('previous_turn_count_unknown');
+      if (!exactOneTurnAdvance) return finish('not_exactly_one_completed_turn_since_previous_request');
+      if (!atFiveTurnBoundary || batch.length !== BATCH_SIZE || !recoveryDigest) return finish('not_five_turn_boundary');
+
+      const manifest = await loadManifest(scope, observedTurns);
+      const ref = memoryRefForStart(manifest, startTurn);
+      if (ref?.status === 'committed' && string(ref.sourceDigest) === recoveryDigest) return finish('boundary_already_committed');
+      if (Number(manifest.inFlight?.startTurn || 0) === startTurn || state.queues.has(string(scope.scopeKey))) {
+        return finish('boundary_analysis_already_active');
+      }
+      if (state.timers.get('current') || state.timers.get('recovery')) return finish('memory_scan_already_scheduled');
+
+      diagnostic.scheduled = scheduleScan({
+        delay: 40,
+        reason: 'beforeRequest_recovery',
+        requestType: 'model',
+        expectedScope: clone(scope),
+        liveRecoveryStartTurn: startTurn,
+        liveRecoverySourceDigest: recoveryDigest,
+        recoveredPreviousRequestAt: previousRequestAt
+      });
+      diagnostic.reason = diagnostic.scheduled ? 'missing_post_response_trigger_recovered' : 'recovery_schedule_rejected';
+      state.lastBeforeRequestRecovery = diagnostic;
+      return diagnostic.scheduled;
+    };
+
     const beforeRequest = async (messages, type) => {
       try {
         if (!isMainNarrativeRequest(type) || (await loadMemorySettings()).enabled === false) return messages;
         if ((Array.isArray(messages) ? messages : []).some(item => contentToText(item?.content ?? item?.data ?? '').includes(MEMORY_INJECTION_MARKER))) return messages;
         const context = await resolveContext();
+        const previousRequestScope = state.lastRequestScope ? clone(state.lastRequestScope) : null;
+        const completedPairs = buildPairs(context.chat);
         clearStaleMemoryInjectionDebug(context.scope, 'before_request_scope_changed');
         state.lastRequestScope = {
           at: Date.now(),
           requestType: normalizeRequestType(type) || 'missing',
-          scope: clone(context.scope)
+          scope: clone(context.scope),
+          observedTurns: completedPairs.length
         };
         await ensureNativeChatCopyAdopted(context);
         const settings = await loadMemorySettings();
         // Branch guard runs before recall so a rollback cannot inject future memories and
         // a reroll cannot feed the discarded assistant branch into its replacement.
         await reconcileCanonicalBranchBeforeRecall(context, { reason: 'before_request' });
+        await scheduleBeforeRequestRecovery({ context, settings, previousRequestScope, completedPairs });
         const queryBundle = buildQueryBundle(messages, context, settings);
         if (!queryBundle.currentText) return messages;
         const result = await recall(context, queryBundle);
@@ -32010,10 +32099,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       state.deletingScopes.add(scopeKey);
       try {
         state.scheduledScanSerial += 1;
-        const scheduled = state.timers.get('current');
-        if (scheduled) {
+        state.scheduledRecoveryScanSerial += 1;
+        for (const timerKey of ['current', 'recovery']) {
+          const scheduled = state.timers.get(timerKey);
+          if (!scheduled) continue;
           clearTimeout(scheduled);
-          state.timers.delete('current');
+          state.timers.delete(timerKey);
         }
         const queued = state.queues.get(scopeKey);
         if (queued) { try { await queued; } catch (_) {} }
@@ -36587,6 +36678,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     lastNativeChatCopyCheck: Runtime.lastNativeChatCopyCheck || LibraMemoryCore.state.lastNativeCopyCheck || null,
     memoryRunCount: Number(LibraMemoryCore.state.memoryRunCount || 0),
     lastMemoryRequestScope: LibraMemoryCore.state.lastRequestScope ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastRequestScope)) : null,
+    lastMemoryBeforeRequestRecovery: LibraMemoryCore.state.lastBeforeRequestRecovery ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastBeforeRequestRecovery)) : null,
     lastMemoryAfterRequest: LibraMemoryCore.state.lastAfterRequest ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastAfterRequest)) : null,
     lastMemoryScanSchedule: LibraMemoryCore.state.lastScanSchedule ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastScanSchedule)) : null,
     lastMemoryScheduledScanResult: LibraMemoryCore.state.lastScheduledScanResult ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastScheduledScanResult)) : null,
@@ -38620,6 +38712,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       // leaves only inert callbacks, and local timers cannot repopulate UI or storage.
       LibraMemoryCore.state.disposed = true;
       LibraMemoryCore.state.scheduledScanSerial += 1;
+      LibraMemoryCore.state.scheduledRecoveryScanSerial += 1;
       for (const timer of LibraMemoryCore.state.timers.values()) clearTimeout(timer);
       LibraMemoryCore.state.timers.clear();
       LibraMemoryCore.state.outputListenerRegistered = false;
@@ -38710,6 +38803,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       LibraMemoryCore.state.nativeCopyInFlight?.clear?.();
       LibraMemoryCore.state.lastNativeCopyCheck = null;
       LibraMemoryCore.state.lastRequestScope = null;
+      LibraMemoryCore.state.lastBeforeRequestRecovery = null;
       LibraMemoryCore.state.lastAfterRequest = null;
       LibraMemoryCore.state.lastScanSchedule = null;
       LibraMemoryCore.state.lastScheduledScanResult = null;
