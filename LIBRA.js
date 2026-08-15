@@ -1,9 +1,9 @@
 //@name libra
-//@display-name LIBRA v1.0.45
+//@display-name LIBRA v1.0.46
 //@api 3.0
-//@version 1.0.45
+//@version 1.0.46
 
-/* v1.0.45 extends LIBRA's absolute live-recall watchdog from 8 seconds to 30 seconds while preserving the existing per-step and query-embedding timeouts, giving slow RisuAI context/pluginStorage environments enough total time to finish fallback retrieval without weakening individual-operation fail-open guards. v1.0.44 aligns live recall current-input resolution with HAYAKU/Flashback provenance+wrapper rules, rejects prompt/meta rows from legacy fallback, and removes nonessential manifest-stat writes from the bounded request path so a completed recall is never discarded by bookkeeping timeout. v1.0.43 fixes the Home/current-turn recall GUI scope regression by keeping recall-view helpers inside the GUI scope instead of referencing LIBRA memory-core private helpers. v1.0.42 removes World Additional completely from active LIBRA memory creation, storage, recall, handoff, and GUI paths; World ito now records unresolved setting gaps as explicitly unknown/undecided rather than generating future canon proposals. v1.0.41 auto-migrates compatible legacy vectors into portable pluginStorage without re-embedding and lets same-space legacy profile IDs remain dense-recall compatible while migration finishes. v1.0.40 fixes embedding-timeout fallback, unifies embedding-space signatures, makes pluginStorage the durable Float32 vector source of truth, separates exact strong anchors from lexical terms, and adds two-stage catalog-to-hydration recall with intent-aware tail forcing. */
+/* v1.0.46 makes recall excerpts context-safe: semantic paragraph/list boundaries are preserved, character excerpts retain their identity lead (for example `이유민:`), chronology excerpts retain the event lead, and sentence-radius expansion can no longer cross into a different character/event block. v1.0.45 extends LIBRA's absolute live-recall watchdog from 8 seconds to 30 seconds while preserving the existing per-step and query-embedding timeouts, giving slow RisuAI context/pluginStorage environments enough total time to finish fallback retrieval without weakening individual-operation fail-open guards. v1.0.44 aligns live recall current-input resolution with HAYAKU/Flashback provenance+wrapper rules, rejects prompt/meta rows from legacy fallback, and removes nonessential manifest-stat writes from the bounded request path so a completed recall is never discarded by bookkeeping timeout. v1.0.43 fixes the Home/current-turn recall GUI scope regression by keeping recall-view helpers inside the GUI scope instead of referencing LIBRA memory-core private helpers. v1.0.42 removes World Additional completely from active LIBRA memory creation, storage, recall, handoff, and GUI paths; World ito now records unresolved setting gaps as explicitly unknown/undecided rather than generating future canon proposals. v1.0.41 auto-migrates compatible legacy vectors into portable pluginStorage without re-embedding and lets same-space legacy profile IDs remain dense-recall compatible while migration finishes. v1.0.40 fixes embedding-timeout fallback, unifies embedding-space signatures, makes pluginStorage the durable Float32 vector source of truth, separates exact strong anchors from lexical terms, and adds two-stage catalog-to-hydration recall with intent-aware tail forcing. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -65,6 +65,9 @@
 //@arg embed_timeout int Embedding timeout alternate argument
 
 /*
+ * LIBRA v1.0.46
+ * v1.0.46 replaces flat sentence-window recall excerpts with semantic-group excerpts. Character/relationship excerpts preserve the owning character lead, chronology excerpts preserve the event lead, bullet items remain atomic, and expansion never crosses paragraph/entity boundaries; this prevents subjectless fragments such as a trait being injected without the character name.
+ *
  * LIBRA v1.0.45
  * v1.0.45 raises only the absolute live-recall watchdog from 8,000ms to 30,000ms. Per-step storage/host timeouts and the query-embedding timeout remain bounded, so one stalled dependency still fails soft while the full recall pipeline has enough wall-clock budget to finish fallback retrieval and candidate hydration on slower hosts.
  *
@@ -245,7 +248,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.45';
+  const PLUGIN_VERSION = '1.0.46';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -31091,31 +31094,119 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return Math.min(1, lexical * 0.58 + anchors.score * 0.30 + scene * queryBundle.sceneWeight * 0.12);
     };
 
-    const bestSectionExcerpt = (sectionText, queryBundle, settings, maxChars = 1200) => {
-      const units = sentenceUnits(sectionText);
+    // Recall excerpts are evidence, so semantic ownership must survive compression.
+    // Flat sentence windows could select "댄스 동아리 소속..." while dropping the
+    // preceding "이유민:" sentence, leaving the final model unable to know whose
+    // trait it was. Build bounded semantic groups first and never expand across them.
+    const recallExcerptGroups = (sectionText, sectionKey = '') => {
+      const source = String(sectionText || '').replace(/\r\n/g, '\n').trim();
+      if (!source) return [];
+      const paragraphs = source.split(/\n{2,}/).map(value => value.trim()).filter(Boolean);
+      const groups = [];
+      const pushGroup = (raw, kind = 'paragraph') => {
+        const body = String(raw || '').trim();
+        if (!body) return;
+        const units = sentenceUnits(body);
+        if (!units.length) return;
+        let anchorText = '';
+        let anchorIndex = -1;
+        if (sectionKey === 'characters_relations') {
+          const identityLead = body.match(/^((?:\*\*)?[^:\n]{1,96}(?:\*\*)?\s*:\s*[^.!?。！？\n]*[.!?。！？]?)/);
+          anchorText = String(identityLead?.[1] || units[0] || '').trim();
+          anchorIndex = 0;
+        } else if (sectionKey === 'chronology') {
+          // The first sentence establishes who/when/where owns later clauses in the
+          // event paragraph; preserve it even when the strongest hit is later.
+          anchorText = String(units[0] || '').trim();
+          anchorIndex = 0;
+        }
+        groups.push({
+          index: groups.length,
+          kind,
+          raw: body,
+          units,
+          anchorText,
+          anchorIndex
+        });
+      };
+
+      for (const paragraph of paragraphs) {
+        const lines = paragraph.split(/\n/).map(line => line.trim()).filter(Boolean);
+        const bulletLines = lines.filter(line => /^[-*+]\s+/.test(line));
+        if (bulletLines.length && (sectionKey === 'narrative_open_threads' || sectionKey === 'facts_uncertainty')) {
+          // Each list item is an atomic evidence unit. Do not let a sentence radius
+          // spill into the next bullet, which can belong to a different person/event.
+          for (const line of bulletLines) pushGroup(line, 'list_item');
+          const proseLines = lines.filter(line => !/^[-*+]\s+/.test(line));
+          for (const line of proseLines) {
+            if (/^(?:확정 사실|불확실 정보|confirmed facts?|uncertain(?:ty)?|unknown)\s*[:：]?$/i.test(line)) continue;
+            pushGroup(line, 'paragraph');
+          }
+          continue;
+        }
+        pushGroup(paragraph, 'paragraph');
+      }
+      return groups;
+    };
+
+    const renderRecallExcerptGroup = (group, bestUnitIndex, radius, maxChars) => {
+      const units = asArray(group?.units);
       if (!units.length) return '';
+      const targetIndex = Math.max(0, Math.min(units.length - 1, Number(bestUnitIndex || 0)));
+      const start = Math.max(0, targetIndex - radius);
+      const end = Math.min(units.length - 1, targetIndex + radius);
+      const core = units.slice(start, end + 1).join(' ').trim();
+      const anchorText = string(group?.anchorText || '');
+      const anchorOutsideWindow = anchorText && Number(group?.anchorIndex ?? -1) >= 0 && (Number(group.anchorIndex) < start || Number(group.anchorIndex) > end);
+      if (!anchorOutsideWindow) return compact(core, maxChars);
+
+      // Reserve space for both the ownership anchor and the relevant hit. If space is
+      // tight, shorten each side separately rather than truncating away the subject.
+      const separator = '\n…\n';
+      const room = Math.max(80, Number(maxChars || 0) - separator.length);
+      const anchorBudget = Math.min(420, Math.max(72, Math.floor(room * 0.38)));
+      const safeAnchor = compact(anchorText, anchorBudget);
+      const coreBudget = Math.max(72, room - safeAnchor.length);
+      const safeCore = compact(core, coreBudget);
+      return `${safeAnchor}${separator}${safeCore}`.trim();
+    };
+
+    const bestSectionExcerpt = (sectionText, queryBundle, settings, maxChars = 1200, sectionKey = '') => {
+      const groups = recallExcerptGroups(sectionText, sectionKey);
+      if (!groups.length) return '';
       const radius = Math.max(0, Number(settings.excerptSentenceWindow || 0));
-      const scored = units.map((unit, index) => ({ index, score: scoreRecallSegment(unit, queryBundle) }))
-        .sort((a, b) => b.score - a.score || a.index - b.index);
-      const bestScore = Number(scored[0]?.score || 0);
+      const scoredGroups = groups.map(group => {
+        const unitScores = group.units.map((unit, index) => ({ index, score: scoreRecallSegment(unit, queryBundle) }))
+          .sort((a, b) => b.score - a.score || a.index - b.index);
+        const best = unitScores[0] || { index: 0, score: 0 };
+        const wholeScore = scoreRecallSegment(group.raw, queryBundle);
+        return {
+          group,
+          bestUnitIndex: best.index,
+          score: Math.max(Number(best.score || 0), Number(wholeScore || 0) * 0.82)
+        };
+      }).sort((a, b) => b.score - a.score || a.group.index - b.group.index);
+      const bestScore = Number(scoredGroups[0]?.score || 0);
       const maxSpans = maxChars >= 2200 ? 3 : maxChars >= 1100 ? 2 : 1;
       const chosen = [];
-      const occupied = new Set();
-      for (const candidate of scored) {
-        // Do not fill the cap with weakly related text merely because space exists.
+      for (const candidate of scoredGroups) {
         if (chosen.length && candidate.score < Math.max(0.025, bestScore * 0.34)) break;
-        const start = Math.max(0, candidate.index - radius);
-        const end = Math.min(units.length - 1, candidate.index + radius);
-        let overlaps = false;
-        for (let i = start; i <= end; i += 1) if (occupied.has(i)) { overlaps = true; break; }
-        if (overlaps) continue;
-        chosen.push({ start, end, score: candidate.score });
-        for (let i = start; i <= end; i += 1) occupied.add(i);
+        chosen.push(candidate);
         if (chosen.length >= maxSpans) break;
       }
-      if (!chosen.length) chosen.push({ start: Math.max(0, scored[0].index - radius), end: Math.min(units.length - 1, scored[0].index + radius), score: bestScore });
-      chosen.sort((a, b) => a.start - b.start);
-      const pieces = chosen.map(span => units.slice(span.start, span.end + 1).join(' ')).filter(Boolean);
+      if (!chosen.length) chosen.push(scoredGroups[0]);
+      chosen.sort((a, b) => a.group.index - b.group.index);
+
+      let remaining = Math.max(80, Number(maxChars || 1200));
+      const pieces = [];
+      for (let index = 0; index < chosen.length && remaining >= 72; index += 1) {
+        const left = chosen.length - index;
+        const pieceBudget = Math.max(72, Math.floor(remaining / Math.max(1, left)));
+        const piece = renderRecallExcerptGroup(chosen[index].group, chosen[index].bestUnitIndex, radius, pieceBudget);
+        if (!piece) continue;
+        pieces.push(piece);
+        remaining = Math.max(0, remaining - piece.length - 3);
+      }
       return compact(pieces.join('\n…\n'), maxChars);
     };
 
@@ -31148,7 +31239,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             ? Math.min(1900, Math.max(700, Math.floor(remaining * 0.38)))
             : Math.min(1300, Math.max(420, Math.floor(remaining / Math.max(1, left))));
         const budget = Math.max(180, Math.min(remaining, preferred));
-        const excerptText = bestSectionExcerpt(item.body, queryBundle, settings, budget);
+        const excerptText = bestSectionExcerpt(item.body, queryBundle, settings, budget, item.sectionKey);
         if (!excerptText) continue;
         const label = RETRIEVAL_SECTION_LABELS[item.sectionKey] || item.sectionKey;
         excerpts.push({ sectionKey: item.sectionKey, label, text: excerptText, score: item.score });
@@ -31520,6 +31611,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         blockChars: 0,
         charCeiling: Math.max(1000, Number(result?.effectiveRecallMaxChars || settings.recallMaxChars || result?.recallMaxChars || 8000)),
         blockCompacted: false,
+        excerptContextMode: 'semantic_group_v2',
         rows: selectedMemories.map((row, index) => {
           const memory = asObject(row?.memory);
           return {
