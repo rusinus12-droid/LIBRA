@@ -1,9 +1,11 @@
 //@name libra
-//@display-name LIBRA v1.0.46
+//@display-name LIBRA v1.0.58
 //@api 3.0
-//@version 1.0.46
+//@version 1.0.58
 
-/* v1.0.46 makes recall excerpts context-safe: semantic paragraph/list boundaries are preserved, character excerpts retain their identity lead (for example `이유민:`), chronology excerpts retain the event lead, and sentence-radius expansion can no longer cross into a different character/event block. v1.0.45 extends LIBRA's absolute live-recall watchdog from 8 seconds to 30 seconds while preserving the existing per-step and query-embedding timeouts, giving slow RisuAI context/pluginStorage environments enough total time to finish fallback retrieval without weakening individual-operation fail-open guards. v1.0.44 aligns live recall current-input resolution with HAYAKU/Flashback provenance+wrapper rules, rejects prompt/meta rows from legacy fallback, and removes nonessential manifest-stat writes from the bounded request path so a completed recall is never discarded by bookkeeping timeout. v1.0.43 fixes the Home/current-turn recall GUI scope regression by keeping recall-view helpers inside the GUI scope instead of referencing LIBRA memory-core private helpers. v1.0.42 removes World Additional completely from active LIBRA memory creation, storage, recall, handoff, and GUI paths; World ito now records unresolved setting gaps as explicitly unknown/undecided rather than generating future canon proposals. v1.0.41 auto-migrates compatible legacy vectors into portable pluginStorage without re-embedding and lets same-space legacy profile IDs remain dense-recall compatible while migration finishes. v1.0.40 fixes embedding-timeout fallback, unifies embedding-space signatures, makes pluginStorage the durable Float32 vector source of truth, separates exact strong anchors from lexical terms, and adds two-stage catalog-to-hydration recall with intent-aware tail forcing. */
+/* v1.0.58 ports FLASHBACK-style native chat-copy continuity into LIBRA: copy detection can reuse the immediately previous resolved chat when the host chat list is incomplete, canonical-memory validation uses message-id-independent U+A content identity, cloned current memories are rebound to the copied chat's new message IDs/sourceDigest without re-embedding, and durable readback verifies every copied canonical memory/vector before the copy is marked complete. RE:TRACE handoff remains separate and source-immutable. */
+/* v1.0.57 makes WebRisu credential persistence update-safe by mirroring provider-preset secrets, active LLM/embedding provider secrets, and the hosting token into verified pluginStorage backups while retaining localPluginStorage; active llm_key/embedding_key/hosting-token arguments are also repaired when host argument writes are available, and startup reads reconcile surviving copies back into missing stores without changing provider/model selection. */
+/* v1.0.56 aligns LIBRA with RE:TRACE peer-compatibility v1 and makes next-session preparation strictly source-immutable: shared archives are detached transport layers, prepare no longer annotates source memory refs or source manifest archive metadata, source memory/vector fingerprints are proven unchanged across prepare/adopt, and compatibility is negotiated by stable protocol/features instead of exact plugin versions. v1.0.55 raises the common live-recall step budget from 1,500ms to 20,000ms while preserving v1.0.54 cache-first embedding-settings resolution and fail-soft dense fallback, so transiently slow host/pluginStorage reads get substantially more time without reintroducing whole-recall aborts for embedding-settings timeouts. v1.0.54 makes live recall resilient to slow embedding-settings initialization: recall now uses the already-loaded provider runtime cache first, bounds any cache-miss settings load as a non-fatal dense-retrieval dependency, continues sparse/exact/temporal recall when embedding settings are temporarily unavailable, and distinguishes per-step timeout diagnostics from the true 30-second request deadline. v1.0.53 repairs RE:TRACE next-session interoperability without restoring World Additional: the handoff inspection exposes an archive-metadata-independent canonical state hash, prepare/verify/adopt receipts include deprecated zero-only World Additional counters for older bridge builds, capabilities advertise canonical-memory-only handoff, and handoff verification reads inherited memory/vector records with bounded concurrency for large histories. v1.0.52 hardens long-term-memory integrity and scaling: high-risk unsupported canonical claims trigger one bounded evidence-repair pass and otherwise fall back to the latest evidence-safe stage; branch batch fingerprints are persisted in the manifest so reloads can detect changed historical batches without a full live-path audit; and automatic memory scans process only the new/current, changed, in-flight, recovery, or bounded embedding-retry batches instead of rechecking every existing five-turn memory. v1.0.51 removes avoidable live-input stalls: request-local chat pairs are parsed once and shared across branch/query/recall, branch validation uses change-targeted fast checks with yielded deep audits, native-copy/recovery maintenance leaves the normal live path, input-assist OFF bypasses full settings loading, and legacy recall catalogs are served immediately while v3/256D upgrades rebuild in the background. v1.0.50 hardens embedding correctness end-to-end: provider-aware long-input splitting occurs before per-part query/document formatting, silent truncation is disabled for Vertex/Cohere, Gemini Embedding 2 uses prompt prefixes instead of task_type, Voyage Context separates global from shared section context groups, and the recall catalog uses a 256D hashed sketch rebuilt from existing full vectors without re-embedding. v1.0.49 caps the maximum dynamic recall block at 12,000 characters across normalization, runtime budgeting, and GUI input while retaining v1.0.48 dynamic token budgeting. v1.0.48 removes the fixed recallMaxTokens bottleneck: recall character budget is resolved first from prompt pressure, then an effective token ceiling is derived per request/tier from that character budget and the observed CJK/text mix, with candidate text able to raise the ceiling when its token density is higher. v1.0.47 completes HAYAKU/Flashback current-input compatibility by filtering peer runtime/evidence carriers both as standalone prompt rows and inside rendered current-input wrappers, while keeping the resolver fully local and dependency-free. v1.0.46 makes recall excerpts context-safe: semantic paragraph/list boundaries are preserved, character excerpts retain their identity lead (for example `이유민:`), chronology excerpts retain the event lead, and sentence-radius expansion can no longer cross into a different character/event block. v1.0.45 extends LIBRA's absolute live-recall watchdog from 8 seconds to 30 seconds while preserving the existing per-step and query-embedding timeouts, giving slow RisuAI context/pluginStorage environments enough total time to finish fallback retrieval without weakening individual-operation fail-open guards. v1.0.44 aligns live recall current-input resolution with HAYAKU/Flashback provenance+wrapper rules, rejects prompt/meta rows from legacy fallback, and removes nonessential manifest-stat writes from the bounded request path so a completed recall is never discarded by bookkeeping timeout. v1.0.43 fixes the Home/current-turn recall GUI scope regression by keeping recall-view helpers inside the GUI scope instead of referencing LIBRA memory-core private helpers. v1.0.42 removes World Additional completely from active LIBRA memory creation, storage, recall, handoff, and GUI paths; World ito now records unresolved setting gaps as explicitly unknown/undecided rather than generating future canon proposals. v1.0.41 auto-migrates compatible legacy vectors into portable pluginStorage without re-embedding and lets same-space legacy profile IDs remain dense-recall compatible while migration finishes. v1.0.40 fixes embedding-timeout fallback, unifies embedding-space signatures, makes pluginStorage the durable Float32 vector source of truth, separates exact strong anchors from lexical terms, and adds two-stage catalog-to-hydration recall with intent-aware tail forcing. */
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/LIBRA/refs/heads/main/LIBRA.js
 //@allowed-ipc flashback_hayaku_bridge
 //@arg enable_gui string true|false
@@ -63,9 +65,22 @@
 //@arg embed_key string Embedding key alternate argument
 //@arg embed_model string Embedding model alternate argument
 //@arg embed_timeout int Embedding timeout alternate argument
+//@arg backend_hosting_token string Hosting bridge token backup; normally managed by the LIBRA GUI
 
 /*
- * LIBRA v1.0.46
+ * LIBRA v1.0.52
+ * v1.0.52 adds a selective canonical evidence gate, persistent branch batch fingerprints, and fully incremental automatic scans. Only high-risk unsupported state-change claims invoke one Ariadne evidence-repair call; unresolved output falls back to the latest evidence-safe stage or fails closed for retry. Persisted branch fingerprints survive reloads, while legacy scopes temporarily recall only synchronously verified live batches until the yielded full audit establishes a trusted baseline. Automatic scans now target only the completed/current, changed, recovery, in-flight, and bounded embedding-retry batches.
+ *
+ * LIBRA v1.0.51
+ * v1.0.51 keeps recall accuracy while reducing send-time stalls: one request-local U+A parse is reused throughout recall, branch checks inspect only changed/tail batches on the live path and periodically deep-audit in yielded background work, normal native-copy/recovery maintenance is deferred, input-assist OFF is a fast bypass, legacy v2 recall catalogs remain immediately usable while v3/256D indexes upgrade asynchronously, and query embedding overlaps catalog loading.
+ * v1.0.50 makes embedding transport loss-resistant: known provider limits are split before role formatting so every chunk keeps the correct query/document semantics; Vertex/Cohere silent truncation is disabled; Gemini Embedding 2 uses its required prompt-role format; Voyage Context no longer duplicates the global projection inside the shared section context; and shortlist sketches move to a 256D hashed projection rebuilt from stored full vectors. Providers whose embedding semantics changed are marked rebuild-required but are never re-embedded automatically.
+ *
+ * LIBRA v1.0.49
+ * v1.0.49 makes 12,000 characters the absolute maximum dynamic recall block. Persisted/settings values above 12,000 are clamped, runtime budget planning defensively clamps again, and the GUI cannot enter a higher value. Dynamic token budgeting remains derived from the resulting character budget.
+ * v1.0.48 makes recall token budgeting fully dynamic. Prompt pressure determines the character budget first; the effective token ceiling is then derived from that evidence-character budget and the observed CJK/text token density, and can expand within a bounded safety ceiling when selected evidence is denser than the query sample. The legacy fixed recallMaxTokens setting is ignored and removed from normalized settings, so it can no longer silently cap otherwise-valid 8k/12k character recall.
+ *
+ * LIBRA v1.0.47
+ * v1.0.47 fully aligns current-input peer-payload rejection with HAYAKU/Flashback: HAYAKU runtime/packet/state carriers and Flashback evidence carriers are stripped from rendered wrappers and rejected as standalone current-input candidates, without reading either plugin API or storage.
  * v1.0.46 replaces flat sentence-window recall excerpts with semantic-group excerpts. Character/relationship excerpts preserve the owning character lead, chronology excerpts preserve the event lead, bullet items remain atomic, and expansion never crosses paragraph/entity boundaries; this prevents subjectless fragments such as a trait being injected without the character name.
  *
  * LIBRA v1.0.45
@@ -159,7 +174,7 @@
  * v1.0.7 makes World Additional scarce and lifecycle-bound: World ito may request it only for concrete reusable canon gaps, generation is deduplicated/capped, recall injects at most one strongly relevant candidate with cooldown/retry limits, actual post-injection manifestation becomes an “적용 완료” tombstone, and applied/stale candidates are automatically removed after bounded turn windows.
  * v1.0.6 makes RE:TRACE discovery explicit and cheap: the IPC listener is registered before slower hooks, a zero-storage ping/capabilities action is exposed, and RE:TRACE inspection loads canonical memories/world-additional records in parallel without rereading every memory to derive active run IDs.
  *
- * v1.0.5 makes candidateLimit a real precision-load ceiling through a persistent incremental recall catalog with compact semantic vector sketches, fixes Korean query-type precedence/false continuation matches, removes the unused recentQueryMessages setting, and enforces recallMaxTokens as a true hard cap by shrinking excerpt budgets before selection.
+ * v1.0.5 made candidateLimit a real precision-load ceiling through a persistent incremental recall catalog with compact semantic vector sketches, fixed Korean query-type precedence/false continuation matches, removed the unused recentQueryMessages setting, and at that time enforced recallMaxTokens as a hard cap; v1.0.48 later replaces that fixed token cap with dynamic budgeting.
  *
  * v1.0.4 adds the RE:TRACE IPC contract, a read-only canonical-memory viewer feed, and durable next-session predecessor-memory handoff without legacy lorebook/World Manager transport.
  *
@@ -248,7 +263,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.46';
+  const PLUGIN_VERSION = '1.0.58';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -261,6 +276,9 @@
   const LIBRA_SHARED_ARCHIVE_SCHEMA = 'libra.shared_archive.v1';
   const LIBRA_SHARED_ARCHIVE_REF_SCHEMA = 'libra.shared_archive_ref.v1';
   const LIBRA_SHARED_ARCHIVE_MAX_DEPTH = 256;
+  const RETRACE_PEER_COMPATIBILITY_SCHEMA = 'retrace.peer_compatibility.v1';
+  const RETRACE_PEER_PROTOCOL_MAJOR = 1;
+  const LIBRA_SESSION_HANDOFF_CONTRACT = 'libra.handoff_immutable_source.v1';
   const LIBRA_SNAPSHOT_PAGE_LIMITS = Object.freeze({ memories: 20, runs: 10 });
   const LIBRA_SESSION_HANDOFF_TTL_MS = 30 * 60 * 1000;
   const INJECTION_HEADER = '[LIBRA LONG-TERM MEMORY]';
@@ -282,6 +300,11 @@
   const LOCAL_PROVIDER_SECRETS_KEY = 'libra:v1:provider-secrets';
   const LOCAL_PROVIDER_CONFIG_SECRETS_KEY = 'libra:v1:provider-config-secrets';
   const LOCAL_BACKEND_HOSTING_TOKEN_KEY = 'libra:v1:backend-hosting-token';
+  const SYNCED_PROVIDER_SECRETS_KEY = 'libra:v1:provider-secrets-synced:v1';
+  const SYNCED_PROVIDER_CONFIG_SECRETS_KEY = 'libra:v1:provider-config-secrets-synced:v1';
+  const SYNCED_BACKEND_HOSTING_TOKEN_KEY = 'libra:v1:backend-hosting-token-synced:v1';
+  const CREDENTIAL_BACKUP_SCHEMA = 'libra.credential_backup.v1';
+  const CREDENTIAL_BACKUP_VERSION = 1;
   const SETTINGS_UI_ID = 'libra-v1-settings';
   const PIPELINE_WORK_PANEL_ID = 'serial-gradation-agents-for-rp-pipeline-status';
   const INPUT_ASSIST_RUNTIME_RESPONSE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
@@ -1664,6 +1687,8 @@
     inFlight: false,
     settings: null,
     settingsLoadedAt: 0,
+    inputAssistFastMode: 'unknown',
+    inputAssistFastModeLoadedAt: 0,
     providerPresets: {},
     secretStorage: 'unknown',
     migratedFrom: null,
@@ -1874,6 +1899,41 @@
     const hasValue = value !== undefined && value !== null && value !== '';
     ArgumentCache.set(key, { at: Date.now(), hasValue, value: hasValue ? value : undefined });
     return hasValue ? value : fallback;
+  };
+
+  const setPluginArgumentValue = async (name, value) => {
+    const key = text(name || '').trim();
+    const clean = value == null ? '' : String(value);
+    if (!key) return { ok: false, verified: false, attempted: false, reason: 'argument_name_missing' };
+    const candidates = [];
+    const push = api => { if (api && !candidates.includes(api)) candidates.push(api); };
+    try { push(getLiveApi(['setArgument'])); } catch (_) {}
+    try { push(getLiveApi(['setArg'])); } catch (_) {}
+    try { push(getLiveApi()); } catch (_) {}
+    let attempted = false;
+    let lastError = '';
+    for (const api of candidates) {
+      const writers = [];
+      if (typeof api?.setArgument === 'function') writers.push({ name: 'setArgument', fn: api.setArgument.bind(api) });
+      if (typeof api?.setArg === 'function' && api.setArg !== api.setArgument) writers.push({ name: 'setArg', fn: api.setArg.bind(api) });
+      for (const writer of writers) {
+        try {
+          attempted = true;
+          const result = await writer.fn(key, clean);
+          if (result === false) continue;
+          clearArgumentCache();
+          const readback = text(await getArgument(key, '') || '').trim();
+          const verified = clean ? readback === clean.trim() : !readback;
+          if (verified) return { ok: true, verified: true, attempted: true, method: writer.name, reason: clean ? 'argument_saved_and_verified' : 'argument_cleared_and_verified' };
+        } catch (error) {
+          lastError = compact(error?.message || error, 300);
+        }
+      }
+    }
+    clearArgumentCache();
+    const current = text(await getArgument(key, '') || '').trim();
+    const verified = clean ? current === clean.trim() : !current;
+    return { ok: verified, verified, attempted, reason: verified ? 'argument_already_matches' : 'argument_write_unavailable_or_failed', error: lastError };
   };
 
   const RisuCompat = (() => {
@@ -2227,9 +2287,80 @@
 
   const writeObject = async (key, value) => await RisuCompat.setItem(key, JSON.stringify(value ?? {}, null, 2));
 
+  const credentialClone = value => {
+    try { return JSON.parse(JSON.stringify(value ?? null)); }
+    catch (_) { return value; }
+  };
+  const credentialBackupEnvelope = value => ({
+    schema: CREDENTIAL_BACKUP_SCHEMA,
+    version: CREDENTIAL_BACKUP_VERSION,
+    savedAt: Date.now(),
+    value: credentialClone(value)
+  });
+  const credentialBackupState = raw => {
+    let parsed = raw;
+    if (typeof raw === 'string') parsed = tryJsonParse(raw, raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.schema === CREDENTIAL_BACKUP_SCHEMA) {
+      return { present: parsed.value !== undefined && parsed.value !== null, value: credentialClone(parsed.value), savedAt: Math.max(0, Number(parsed.savedAt || 0) || 0), legacy: false };
+    }
+    const present = parsed !== undefined && parsed !== null && parsed !== '';
+    return { present, value: present ? credentialClone(parsed) : null, savedAt: 0, legacy: present };
+  };
+  const credentialBackupEqual = (left, right) => {
+    try { return JSON.stringify(left ?? null) === JSON.stringify(right ?? null); }
+    catch (_) { return false; }
+  };
+  const readDurableCredential = async (localKey, syncedKey, fallback = null) => {
+    let local = credentialBackupState(await RisuCompat.localGetItem(localKey).catch(() => null));
+    let synced = credentialBackupState(await RisuCompat.getItem(syncedKey).catch(() => null));
+    let chosen = null;
+    if (local.present && synced.present) {
+      if (credentialBackupEqual(local.value, synced.value)) chosen = local.savedAt >= synced.savedAt ? local : synced;
+      else if (local.savedAt && synced.savedAt) chosen = local.savedAt >= synced.savedAt ? local : synced;
+      else chosen = synced.savedAt > 0 ? synced : local;
+    } else chosen = local.present ? local : (synced.present ? synced : null);
+    if (!chosen) return credentialClone(fallback);
+    const envelope = credentialBackupEnvelope(chosen.value);
+    if (!local.present || !credentialBackupEqual(local.value, chosen.value)) {
+      await RisuCompat.localSetItem(localKey, envelope).catch(() => false);
+    }
+    if (!synced.present || !credentialBackupEqual(synced.value, chosen.value)) {
+      await RisuCompat.setItem(syncedKey, JSON.stringify(envelope)).catch(() => false);
+    }
+    return credentialClone(chosen.value);
+  };
+  const writeDurableCredential = async (localKey, syncedKey, value) => {
+    const empty = value === undefined || value === null || value === ''
+      || (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
+    if (empty) {
+      await Promise.all([
+        RisuCompat.localRemoveItem(localKey).catch(() => false),
+        RisuCompat.removeItem(syncedKey).catch(() => false)
+      ]);
+      const [localRaw, syncedRaw] = await Promise.all([
+        RisuCompat.localGetItem(localKey).catch(() => null),
+        RisuCompat.getItem(syncedKey).catch(() => null)
+      ]);
+      const localVerified = !credentialBackupState(localRaw).present;
+      const syncedVerified = !credentialBackupState(syncedRaw).present;
+      return { ok: syncedVerified, durable: syncedVerified, localVerified, syncedVerified, cleared: true };
+    }
+    const envelope = credentialBackupEnvelope(value);
+    const [localWrite, syncedWrite] = await Promise.all([
+      RisuCompat.localSetItem(localKey, envelope).catch(() => false),
+      RisuCompat.setItem(syncedKey, JSON.stringify(envelope)).catch(() => false)
+    ]);
+    const [localRaw, syncedRaw] = await Promise.all([
+      RisuCompat.localGetItem(localKey).catch(() => null),
+      RisuCompat.getItem(syncedKey).catch(() => null)
+    ]);
+    const localVerified = credentialBackupState(localRaw).present && credentialBackupEqual(credentialBackupState(localRaw).value, value);
+    const syncedVerified = credentialBackupState(syncedRaw).present && credentialBackupEqual(credentialBackupState(syncedRaw).value, value);
+    return { ok: syncedVerified, durable: syncedVerified, localVerified, syncedVerified, localWrite: !!localWrite, syncedWrite: !!syncedWrite, cleared: false };
+  };
+
   const readProviderSecrets = async () => {
-    const raw = await RisuCompat.localGetItem(LOCAL_PROVIDER_SECRETS_KEY);
-    const parsed = typeof raw === 'string' ? tryJsonParse(raw, {}) : raw;
+    const parsed = await readDurableCredential(LOCAL_PROVIDER_SECRETS_KEY, SYNCED_PROVIDER_SECRETS_KEY, {});
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   };
 
@@ -2240,19 +2371,21 @@
       const secret = text(value || '').trim();
       if (key && secret) clean[key] = secret;
     }
-    if (!Object.keys(clean).length) {
-      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
-      return true;
-    }
-    return await RisuCompat.localSetItem(LOCAL_PROVIDER_SECRETS_KEY, clean);
+    const persisted = await writeDurableCredential(LOCAL_PROVIDER_SECRETS_KEY, SYNCED_PROVIDER_SECRETS_KEY, clean);
+    return persisted.durable === true;
   };
 
 
-  const readBackendHostingToken = async () => text(await RisuCompat.localGetItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY) || '').trim();
+  const readBackendHostingToken = async () => {
+    const stored = text(await readDurableCredential(LOCAL_BACKEND_HOSTING_TOKEN_KEY, SYNCED_BACKEND_HOSTING_TOKEN_KEY, '') || '').trim();
+    if (stored) return stored;
+    return text(await getArgument('backend_hosting_token', '') || '').trim();
+  };
   const writeBackendHostingToken = async (token = '') => {
     const clean = text(token || '').trim();
-    if (!clean) return await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
-    return await RisuCompat.localSetItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY, clean);
+    const persisted = await writeDurableCredential(LOCAL_BACKEND_HOSTING_TOKEN_KEY, SYNCED_BACKEND_HOSTING_TOKEN_KEY, clean);
+    const argument = await setPluginArgumentValue('backend_hosting_token', clean).catch(() => ({ verified: false }));
+    return clean ? (persisted.durable === true || argument?.verified === true) : (persisted.syncedVerified === true && (!argument?.attempted || argument?.verified === true));
   };
 
   const stripPresetSecret = (preset) => {
@@ -2467,6 +2600,10 @@
       delete settings.backendHosting.token;
       delete settings.backendHosting.backendToken;
       delete settings.backendHosting.backend_hosting_token;
+    }
+    if (Object.prototype.hasOwnProperty.call(settings, 'input_assist_mode')) {
+      Runtime.inputAssistFastMode = normalizeChoice(settings.input_assist_mode || 'off', INPUT_ASSIST_MODES, 'off');
+      Runtime.inputAssistFastModeLoadedAt = Date.now();
     }
     return await writeObject(STORAGE_RUNTIME_SETTINGS_KEY, { version: 3, savedAt: new Date().toISOString(), settings });
   };
@@ -3267,6 +3404,7 @@
     const body = text(value).trim();
     if (!body) return true;
     if (isSgaInjectionText(body)) return true;
+    if (isSgaPeerTransientPayload(body)) return true;
     if (/<\s*Past\s+Events\s+Summary\b/i.test(body)) return true;
     if (/^(---|<\/?(?:Lore|Others Info|Last output|Past conversations|Image Commands|information)>|#\s*(?:Final Check|Tags|Expansion|Annotation Feature)|###\s*Status Interface)/i.test(body)) return true;
     if (/^system\s*:/i.test(body)) return true;
@@ -3291,6 +3429,41 @@
     { name: 'Writing Cue', source: 'Writing\\s+Cue' },
     { name: 'current_message', source: 'current_message' }
   ]);
+
+
+  // HAYAKU/Flashback current-input compatibility: peer runtime/evidence carriers are
+  // transport metadata, never the user's current input. Keep these rules local so LIBRA
+  // does not read or depend on either peer plugin's API/storage.
+  const SGA_HAYAKU_BACKSTAGE_PAYLOAD_RE = /\[HAYAKU [A-Z0-9][A-Z0-9 -]{1,100}\]/i;
+  const SGA_HAYAKU_STATE_PACKET_MARKER_RE = /HAYAKU_STATE_PACKET_(?:START|END)/i;
+  const SGA_FLASHBACK_EVIDENCE_MARKER_RE = /\[(?:VECTOR RAG MEMORY|FLASHBACK EVIDENCE(?: CONTRACT)?)\]/i;
+  const SGA_PEER_META_MARKER_RE = /\[(?:FLASHBACK EVIDENCE(?: CONTRACT)?|VECTOR RAG MEMORY|HAYAKU (?:CONTINUITY CONTEXT|RAW SOURCE (?:ATTACHMENT|TIMELINE)|IMMUTABLE CORE|SIDE-WRITE FINAL REMINDER|RECALL KERNEL|PACKET MEMORY|PACKET WRITE))\]|HAYAKU_STATE_PACKET_(?:START|END)/i;
+  const isSgaPeerTransientPayload = value => {
+    const body = text(value || '');
+    return SGA_PEER_META_MARKER_RE.test(body)
+      || SGA_HAYAKU_BACKSTAGE_PAYLOAD_RE.test(body)
+      || SGA_HAYAKU_STATE_PACKET_MARKER_RE.test(body)
+      || SGA_FLASHBACK_EVIDENCE_MARKER_RE.test(body);
+  };
+  const stripSgaPeerRuntimeArtifacts = value => text(value || '')
+    .replace(/\[FLASHBACK EVIDENCE CONTRACT\][\s\S]*?\[\/FLASHBACK EVIDENCE CONTRACT\]/gi, ' ')
+    .replace(/\[FLASHBACK EVIDENCE\][\s\S]*?\[\/FLASHBACK EVIDENCE\]/gi, ' ')
+    .replace(/\[VECTOR RAG MEMORY\][\s\S]*?\[\/VECTOR RAG MEMORY\]/gi, ' ')
+    .replace(/\[FLASHBACK EVIDENCE CONTRACT\][\s\S]*$/gi, ' ')
+    .replace(/\[FLASHBACK EVIDENCE\][\s\S]*$/gi, ' ')
+    .replace(/\[VECTOR RAG MEMORY\][\s\S]*$/gi, ' ')
+    .replace(/\[HAYAKU CONTINUITY CONTEXT\][\s\S]*?\[\/HAYAKU CONTINUITY CONTEXT\]/gi, ' ')
+    .replace(/\[HAYAKU RAW SOURCE (?:ATTACHMENT|TIMELINE)\][\s\S]*?\[\/HAYAKU RAW SOURCE (?:ATTACHMENT|TIMELINE)\]/gi, ' ')
+    .replace(/\[HAYAKU IMMUTABLE CORE\][\s\S]*?\[\/HAYAKU IMMUTABLE CORE\]/gi, ' ')
+    .replace(/\[HAYAKU RECALL KERNEL\][\s\S]*?\[\/HAYAKU RECALL KERNEL\]/gi, ' ')
+    .replace(/\[HAYAKU PACKET MEMORY\][\s\S]*?\[\/HAYAKU PACKET MEMORY\]/gi, ' ')
+    .replace(/\[HAYAKU PACKET WRITE\][\s\S]*?\[\/HAYAKU PACKET WRITE\]/gi, ' ')
+    .replace(/\[HAYAKU PACKET MEMORY\][\s\S]*$/gi, ' ')
+    .replace(/\[HAYAKU PACKET WRITE\][\s\S]*$/gi, ' ')
+    .replace(/\[HAYAKU SIDE-WRITE FINAL REMINDER\][\s\S]*$/gi, ' ')
+    .replace(/(?:<!--\s*HAYAKU_STATE_PACKET_START\b[\s\S]*?HAYAKU_STATE_PACKET_END\s*-->|<<<\s*HAYAKU_STATE_PACKET_START\s*>>>[\s\S]*?<<<\s*HAYAKU_STATE_PACKET_END\s*>>>|HAYAKU_STATE_PACKET_START\b[\s\S]*?\bHAYAKU_STATE_PACKET_END)/gi, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 
   const hasSgaChatProvenance = (message) => {
     if (!message || typeof message !== 'object') return false;
@@ -3330,7 +3503,7 @@
   );
 
   const stripCurrentInputWrapper = (value) => {
-    let body = text(value || '');
+    let body = stripSgaPeerRuntimeArtifacts(value);
     for (const tag of SGA_CURRENT_INPUT_TAGS) {
       body = body
         .replace(new RegExp(`<\\s*${tag.source}\\b[^>]*>`, 'gi'), '')
@@ -3340,6 +3513,7 @@
     if (fence) body = fence[1];
     body = body.replace(/^```(?:[a-zA-Z0-9_-]+)?\s*/gm, '').replace(/\s*```$/gm, '');
     body = body.replace(/Take my current input as inspiration[\s\S]*$/i, '');
+    body = stripSgaPeerRuntimeArtifacts(body);
     return compact(body, 6000);
   };
 
@@ -3349,7 +3523,7 @@
   const latestSgaCurrentInputRange = (messages) => {
     const source = Array.isArray(messages) ? messages : [];
     for (let start = source.length - 1; start >= 0; start -= 1) {
-      const startBody = rawCurrentTurnBody(source[start]);
+      const startBody = stripSgaPeerRuntimeArtifacts(rawCurrentTurnBody(source[start]));
       if (!startBody) continue;
       for (const tag of SGA_CURRENT_INPUT_TAGS) {
         const openRe = new RegExp(`<\\s*${tag.source}\\b[^>]*>`, 'i');
@@ -3367,7 +3541,9 @@
         for (let end = start + 1; end < source.length; end += 1) {
           const next = source[end];
           if (currentTurnRole(next) === 'assistant') break;
-          const body = rawCurrentTurnBody(next);
+          const rawBody = rawCurrentTurnBody(next);
+          const body = stripSgaPeerRuntimeArtifacts(rawBody);
+          if (!body && isSgaPeerTransientPayload(rawBody)) continue;
           const closeIndex = body.search(closeRe);
           if (closeIndex >= 0) {
             parts.push(body.slice(0, closeIndex));
@@ -3416,6 +3592,7 @@
         ['user', 'assistant'].includes(currentTurnRole(item))
         && hasSgaChatProvenance(item)
         && !isSgaInjectionText(rawCurrentTurnBody(item))
+        && !isSgaPeerTransientPayload(rawCurrentTurnBody(item))
       );
       if (!laterChatTurn) return i;
     }
@@ -3423,7 +3600,7 @@
   };
 
   const currentInputFrom = (value) => {
-    const body = text(value || '');
+    const body = stripSgaPeerRuntimeArtifacts(value);
     for (const tag of SGA_CURRENT_INPUT_TAGS) {
       const open = `<\\s*${tag.source}\\b[^>]*>`;
       const close = `<\\s*\\/\\s*${tag.source}\\s*>`;
@@ -3473,9 +3650,10 @@
       || /^<\s*(?:thoughts?|thinking|reasoning|analysis)\s*>[\s\S]*<\s*\/\s*(?:thoughts?|thinking|reasoning|analysis)\s*>$/i.test(body);
   };
 
-  const isBackstageUserPayload = value => isPrivateMachinePayload(value);
+  const isBackstageUserPayload = value => isPrivateMachinePayload(value) || isSgaPeerTransientPayload(value);
   const isExternalMemoryInjectionPayload = value =>
     isSgaInjectionText(value)
+    || isSgaPeerTransientPayload(value)
     || /<\s*Past\s+Events\s+Summary\b/i.test(text(value))
     || SGA_EXTERNAL_MEMORY_INJECTION_RE.test(text(value))
     || isPrivateMachinePayload(value);
@@ -3539,7 +3717,7 @@
       if (!hasSgaChatProvenance(message)) continue;
       const rawBody = rawCurrentTurnBody(message);
       const wrapped = currentInputFrom(rawBody);
-      const stripped = compact(wrapped || rawBody, 6000);
+      const stripped = compact(stripSgaPeerRuntimeArtifacts(wrapped || rawBody), 6000);
       if (!stripped || isBackstageUserPayload(rawBody) || isExternalMemoryInjectionPayload(rawBody)) continue;
       return {
         text: stripped,
@@ -3612,7 +3790,7 @@
       const role = currentTurnRole(message);
       if (role && !/user|human/i.test(role)) continue;
       const rawBody = rawCurrentTurnBody(message);
-      const stripped = compact(rawBody, 6000);
+      const stripped = compact(stripSgaPeerRuntimeArtifacts(rawBody), 6000);
       if (!stripped || isBackstageUserPayload(rawBody) || isExternalMemoryInjectionPayload(rawBody)) continue;
       if (isLikelyMetaUserMessage(stripped)) continue;
       if (SgaCurrentInputRequestKind.isModuleOnlyPrompt(stripped) || SgaCurrentInputRequestKind.isHardAuxiliaryPrompt(stripped)) continue;
@@ -22230,7 +22408,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     }
     const EmbeddingProviderRegistry = (() => {
         const PREPROCESS_VERSION = 'libra.embedding.preprocess.v3';
-        const OLLAMA_PREPROCESS_VERSION = 'libra.embedding.ollama.preprocess.v2';
+        const LONG_INPUT_PREPROCESS_VERSION = 'libra.embedding.preprocess.v4';
+        const OLLAMA_PREPROCESS_VERSION = 'libra.embedding.ollama.preprocess.v3';
+        const CONTEXT_GROUPING_VERSION = 'libra.embedding.context_grouping.v2';
         const SCHEMA = 'libra.embedding_result.v1';
         // Model-family policies mirror Flashback's Ollama v0.10.12 contract. The
         // catalog supplies safe defaults; the live Ollama server remains authoritative.
@@ -22263,7 +22443,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             const base = ollamaModelBaseName(model);
             if (!base)
                 return null;
-            const policy = OLLAMA_LOCAL_EMBEDDING_MODELS.find(item => base === item.id || base.startsWith(`${item.id}-`));
+            const policy = OLLAMA_LOCAL_EMBEDDING_MODELS.find(item => base === item.id || base.startsWith(`${item.id}-`) || base.includes(item.id));
             if (!policy)
                 return null;
             const raw = String(model || '').trim().toLowerCase();
@@ -22301,7 +22481,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             openai: { label: 'OpenAI', url: 'https://api.openai.com/v1/embeddings', models: ['text-embedding-3-small', 'text-embedding-3-large'], key: true, batchSize: 8 },
             voyageai: { label: 'Voyage AI', url: 'https://api.voyageai.com/v1/embeddings', models: ['voyage-4-lite', 'voyage-4', 'voyage-4-large'], key: true, batchSize: 8, purpose: true },
             voyage_context: { label: 'Voyage Context', url: 'https://api.voyageai.com/v1/contextualizedembeddings', models: ['voyage-context-4', 'voyage-context-3'], key: true, batchSize: 8, purpose: true, contextual: true },
-            gemini: { label: 'Gemini', url: 'https://generativelanguage.googleapis.com/v1beta', models: ['gemini-embedding-001'], key: true, batchSize: 8, purpose: true },
+            gemini: { label: 'Gemini', url: 'https://generativelanguage.googleapis.com/v1beta', models: ['gemini-embedding-001', 'gemini-embedding-2'], key: true, batchSize: 8, purpose: true },
             vertex: { label: 'Vertex AI', url: 'https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google/models', models: ['gemini-embedding-001', 'text-embedding-005', 'text-multilingual-embedding-002'], key: true, batchSize: 1, purpose: true },
             cohere: { label: 'Cohere', url: 'https://api.cohere.com/v2/embed', models: ['embed-v4.0', 'embed-multilingual-v3.0', 'embed-english-v3.0'], key: true, batchSize: 8, purpose: true },
             jina: { label: 'Jina AI', url: 'https://api.jina.ai/v1/embeddings', models: ['jina-embeddings-v3', 'jina-embeddings-v4', 'jina-embeddings-v5-text-small', 'jina-embeddings-v5-text-nano'], key: true, batchSize: 8, purpose: true },
@@ -22386,6 +22566,18 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 return 0;
             return parsed;
         };
+        const isGeminiEmbedding2Model = model => /^gemini-embedding-2(?:$|[-:])/i.test(String(model || '').trim());
+        const internalEmbeddingPreprocessVersion = (provider, model, requested = '') => {
+            const explicit = String(requested || '').trim();
+            // Preserve only genuinely custom external tags. Old LIBRA internal versions
+            // are upgraded automatically so corrected transport semantics cannot be
+            // mistaken for the old embedding profile.
+            if (explicit && !/^libra\.embedding\.(?:ollama\.)?preprocess\.v\d+$/i.test(explicit)) return explicit;
+            if (provider === 'ollama') return OLLAMA_PREPROCESS_VERSION;
+            if (['gemini', 'vertex', 'cohere'].includes(provider)) return LONG_INPUT_PREPROCESS_VERSION;
+            return PREPROCESS_VERSION;
+        };
+
         const validateProviderDimensions = cfg => {
             const dimensions = Math.max(0, Number(cfg?.dimensions || 0) || 0);
             if (!dimensions)
@@ -22440,14 +22632,15 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 customErrorPath: String(source.customErrorPath || 'error.message').trim(),
                 customMethod: String(source.customMethod || 'POST').trim().toUpperCase() === 'GET' ? 'GET' : 'POST',
                 fallback: source.fallback && typeof source.fallback === 'object' ? safeClone(source.fallback) : null,
-                preprocessingVersion: provider === 'ollama'
-                    ? OLLAMA_PREPROCESS_VERSION
-                    : String(source.preprocessingVersion || PREPROCESS_VERSION)
+                preprocessingVersion: internalEmbeddingPreprocessVersion(provider, model, source.preprocessingVersion)
             });
         };
         const TASK_POLICY_VERSION = 'libra.embedding.task.v2';
         const resolveProviderTask = (cfg, purpose) => {
             const role = purpose === 'query' ? 'query' : 'document';
+            // Gemini Embedding 2 no longer accepts task_type. Retrieval role is
+            // expressed in the text prefix instead (see effectiveEmbeddingPrefix).
+            if ((cfg.provider === 'gemini' || cfg.provider === 'vertex') && isGeminiEmbedding2Model(cfg.model)) return '';
             const configured = String((role === 'query' ? cfg.queryTask : cfg.documentTask) || '').trim();
             const alias = configured.toLowerCase().replace(/[\s-]+/g, '_');
             const genericQuery = !configured || ['query', 'search_query', 'retrieval_query', 'retrieval.query'].includes(alias);
@@ -22478,10 +22671,12 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             const explicit = String((purpose === 'query' ? cfg?.queryPrefix : cfg?.documentPrefix) || '');
             if (explicit)
                 return /\s$/.test(explicit) ? explicit : `${explicit} `;
-            if (cfg?.provider === 'ollama') {
+            if ((cfg?.provider === 'gemini' || cfg?.provider === 'vertex') && isGeminiEmbedding2Model(cfg?.model)) {
+                return purpose === 'query' ? 'task: search result | query: ' : 'title: none | text: ';
+            }
+            if (['ollama', 'lmstudio', 'localai', 'tei', 'openai_compat'].includes(cfg?.provider)) {
                 const policy = ollamaModelPolicy(cfg.model);
-                if (policy)
-                    return purpose === 'query' ? policy.queryPrefix : policy.documentPrefix;
+                if (policy) return purpose === 'query' ? policy.queryPrefix : policy.documentPrefix;
             }
             return '';
         };
@@ -22493,7 +22688,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 queryTask: resolveProviderTask(cfg, 'query'), documentTask: resolveProviderTask(cfg, 'document'),
                 queryPrefix: effectiveEmbeddingPrefix(cfg, 'query'), documentPrefix: effectiveEmbeddingPrefix(cfg, 'document'),
                 normalizeVectors: cfg.normalizeVectors, preprocessingVersion: cfg.preprocessingVersion,
-                taskPolicyVersion: TASK_POLICY_VERSION
+                taskPolicyVersion: TASK_POLICY_VERSION,
+                contextGroupingVersion: cfg.provider === 'voyage_context' ? CONTEXT_GROUPING_VERSION : ''
             };
             return Object.freeze({ ...basis, profileId: `lep_${stableHash(JSON.stringify(basis))}` });
         };
@@ -22606,9 +22802,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             return value;
         };
         const taskFor = (cfg, purpose) => resolveProviderTask(cfg, purpose);
-        const prepareTexts = (cfg, texts, purpose) => {
+        const prepareText = (cfg, text, purpose) => {
             const prefix = effectiveEmbeddingPrefix(cfg, purpose);
-            return texts.map(text => `${prefix || ''}${String(text || '').trim()}`);
+            return `${prefix || ''}${String(text || '').trim()}`;
         };
         const getPath = (source, path) => {
             const segments = String(path || '').replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean);
@@ -22669,23 +22865,40 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         };
         const estimateEmbeddingTokens = value => {
             const body = String(value || '');
-            if (!body)
-                return 0;
+            if (!body) return 0;
             const asciiWords = body.match(/[A-Za-z0-9_]+/g) || [];
             const hangulChars = (body.match(/[가-힣]/g) || []).length;
             const cjkChars = (body.match(/[一-龥ぁ-んァ-ン]/g) || []).length;
             const punctuation = (body.match(/[^\sA-Za-z0-9_가-힣一-龥ぁ-んァ-ン]/g) || []).length;
-            return Math.max(1, Math.ceil(asciiWords.length * 1.25 + (hangulChars + cjkChars) / 1.7 + punctuation / 4));
+            // Safety estimator, not billing telemetry. Korean/CJK is intentionally
+            // overestimated because provider tokenizers vary widely; underestimation
+            // would reintroduce the silent-truncation/INPUT_TOO_LONG bug this guard
+            // exists to prevent.
+            return Math.max(1, Math.ceil(asciiWords.length * 1.35 + (hangulChars + cjkChars) * 1.5 + punctuation * 0.5));
         };
         const providerSafeInputTokenLimit = (providerValue, rawConfig = {}) => {
             const provider = normalizeProvider(providerValue);
-            if (provider !== 'ollama')
-                return 0;
-            const cfg = rawConfig?.provider === 'ollama' ? rawConfig : normalizeConfig({ ...rawConfig, provider: 'ollama' });
-            const metadata = cachedOllamaModelMetadata(cfg);
-            if (metadata?.contextLength > 0)
-                return Math.max(64, Math.floor(metadata.contextLength * 0.875));
-            return Math.max(0, Number(ollamaModelPolicy(cfg.model)?.safeInputTokens || 0) || 0);
+            const cfg = rawConfig?.provider === provider ? rawConfig : normalizeConfig({ ...rawConfig, provider });
+            const model = String(cfg?.model || '').trim().toLowerCase();
+            if (provider === 'ollama') {
+                const metadata = cachedOllamaModelMetadata(cfg);
+                if (metadata?.contextLength > 0) return Math.max(64, Math.floor(metadata.contextLength * 0.875));
+                return Math.max(0, Number(ollamaModelPolicy(cfg.model)?.safeInputTokens || 0) || 0);
+            }
+            if (['lmstudio', 'localai', 'tei', 'openai_compat'].includes(provider)) {
+                const policyLimit = Math.max(0, Number(ollamaModelPolicy(cfg.model)?.safeInputTokens || 0) || 0);
+                if (policyLimit) return policyLimit;
+            }
+            // Conservative per-input limits for providers that otherwise truncate or
+            // reject oversized embedding inputs. These leave headroom for role prefixes
+            // and LIBRA's approximate tokenizer. Unknown/self-hosted providers remain
+            // provider-authoritative rather than being guessed.
+            if (provider === 'gemini' || provider === 'vertex') return isGeminiEmbedding2Model(model) ? 7900 : 1900;
+            if (provider === 'cohere') {
+                if (/^embed-v4(?:\.|$|-)/i.test(model)) return 120000;
+                if (/v3(?:\.|$|-)/i.test(model)) return 480;
+            }
+            return 0;
         };
         const splitEmbeddingInputByTokenBudget = (value = '', maxTokens = 0) => {
             const source = String(value || '').trim();
@@ -23079,11 +23292,14 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 const token = await VertexAIProvider._getAccessToken(cfg.key);
                 headers.Authorization = `Bearer ${token}`;
                 url = `${String(cfg.url).replace(/\/+$/, '')}/${encodeURIComponent(cfg.model)}:predict`;
-                body = { instances: texts.map(text => ({ content: text, ...(task ? { task_type: task } : {}) })), ...(cfg.dimensions ? { parameters: { outputDimensionality: cfg.dimensions } } : {}) };
+                body = {
+                    instances: texts.map(text => ({ content: text, ...(task ? { task_type: task } : {}) })),
+                    parameters: { autoTruncate: false, ...(cfg.dimensions ? { outputDimensionality: cfg.dimensions } : {}) }
+                };
             }
             else if (cfg.provider === 'cohere') {
                 headers.Authorization = `Bearer ${cfg.key}`;
-                body = { model: cfg.model, texts, input_type: task, embedding_types: ['float'], ...(cfg.dimensions ? { output_dimension: cfg.dimensions } : {}) };
+                body = { model: cfg.model, texts, input_type: task, embedding_types: ['float'], truncate: 'NONE', ...(cfg.dimensions ? { output_dimension: cfg.dimensions } : {}) };
             }
             else if (cfg.provider === 'dashscope') {
                 headers.Authorization = `Bearer ${cfg.key}`;
@@ -23206,27 +23422,36 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 throw new LIBRAError(`Embedding settings incomplete: ${validated.missing.join(', ')}`, 'EMBEDDING_CONFIG_INVALID');
             const cfg = validated.config;
             const purpose = String(options.purpose || options.taskType || 'document').toLowerCase() === 'query' ? 'query' : 'document';
-            const preparedTexts = prepareTexts(cfg, Array.isArray(sourceTexts) ? sourceTexts : [sourceTexts], purpose);
-            const sourceContextGroupKeys = Array.isArray(options.contextGroupKeys) && options.contextGroupKeys.length === preparedTexts.length
+            const rawTexts = (Array.isArray(sourceTexts) ? sourceTexts : [sourceTexts]).map(value => String(value || '').trim());
+            const sourceContextGroupKeys = Array.isArray(options.contextGroupKeys) && options.contextGroupKeys.length === rawTexts.length
                 ? options.contextGroupKeys.map(value => String(value || ''))
-                : new Array(preparedTexts.length).fill('');
+                : new Array(rawTexts.length).fill('');
             const safeInputTokenLimit = providerSafeInputTokenLimit(cfg.provider, cfg);
+            const prefix = effectiveEmbeddingPrefix(cfg, purpose);
+            const prefixTokenReserve = safeInputTokenLimit > 0 ? estimateEmbeddingTokens(prefix) + 16 : 0;
+            const contentTokenLimit = safeInputTokenLimit > 0 ? Math.max(32, safeInputTokenLimit - prefixTokenReserve) : 0;
             const expanded = [];
             let splitInputCount = 0;
-            preparedTexts.forEach((text, originalIndex) => {
-                const splitParts = safeInputTokenLimit > 0
-                    ? splitEmbeddingInputByTokenBudget(text, safeInputTokenLimit)
-                    : [text];
-                const parts = splitParts.length ? splitParts : [text];
-                if (parts.length > 1)
-                    splitInputCount += 1;
-                parts.forEach((partText, partIndex) => expanded.push({
-                    text: partText,
-                    originalIndex,
-                    partIndex,
-                    weight: Math.max(1, estimateEmbeddingTokens(partText)),
-                    contextGroupKey: sourceContextGroupKeys[originalIndex]
-                }));
+            rawTexts.forEach((rawText, originalIndex) => {
+                // Split the unformatted source first, then apply the purpose prefix to
+                // every part. Splitting an already-prefixed string leaves later chunks
+                // without query/document semantics on prefix-driven local models.
+                const splitParts = contentTokenLimit > 0
+                    ? splitEmbeddingInputByTokenBudget(rawText, contentTokenLimit)
+                    : [rawText];
+                const parts = splitParts.length ? splitParts : [rawText];
+                if (parts.length > 1) splitInputCount += 1;
+                parts.forEach((rawPartText, partIndex) => {
+                    const partText = prepareText(cfg, rawPartText, purpose);
+                    expanded.push({
+                        text: partText,
+                        originalIndex,
+                        partIndex,
+                        // Weight by source content rather than repeated role-prefix tokens.
+                        weight: Math.max(1, estimateEmbeddingTokens(rawPartText)),
+                        contextGroupKey: sourceContextGroupKeys[originalIndex]
+                    });
+                });
             });
             const texts = expanded.map(item => item.text);
             const contextGroupKeys = expanded.map(item => item.contextGroupKey);
@@ -23254,7 +23479,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
             }
             if (partVectors.some(vector => !Array.isArray(vector) || !vector.length))
                 throw new LIBRAError('Embedding response is missing one or more vectors.', 'INVALID_RESPONSE');
-            const vectors = preparedTexts.map((_, originalIndex) => combineEmbeddingPartVectors(expanded
+            const vectors = rawTexts.map((_, originalIndex) => combineEmbeddingPartVectors(expanded
                 .map((item, index) => ({ ...item, vector: partVectors[index] }))
                 .filter(item => item.originalIndex === originalIndex)
                 .sort((left, right) => left.partIndex - right.partIndex)));
@@ -23276,6 +23501,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                     expandedInputCount: expanded.length,
                     splitInputCount,
                     safeInputTokenLimit,
+                    contentTokenLimit,
+                    splitBeforePurposeFormatting: true,
                     profileId: profileFor({ embed: { ...cfg, dimensions: cfg.dimensions || dimensions } }).profileId,
                     requestFingerprint: requestFingerprintFor(cfg),
                     contextual: cfg.provider === 'voyage_context',
@@ -23396,16 +23623,31 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
                 const modelMetadata = cfg.provider === 'ollama'
                     ? await inspectOllamaModel(cfg, { force: true })
                     : null;
-                const result = await embedTexts(cfg, ['LIBRA embedding connection test.'], { purpose: cfg.provider === 'ollama' ? 'query' : 'document', bypassCache: true });
-                let documentTest = null;
-                if (cfg.provider === 'ollama') {
-                    const documentStartedAt = Date.now();
-                    const documentResult = await embedTexts(cfg, ['LIBRA document embedding connection test A.', 'LIBRA document embedding connection test B.'], { purpose: 'document', bypassCache: true });
-                    documentTest = { ok: true, dimensions: documentResult.dimensions, elapsedMs: Date.now() - documentStartedAt, batchSize: 2 };
-                }
-                const vector = result.vectors?.[0] || [];
-                const norm = Array.isArray(vector) ? Math.sqrt(vector.reduce((sum, value) => sum + Number(value || 0) ** 2, 0)) : 0;
-                return { ok: true, provider: result.provider, model: result.model, dimensions: result.dimensions, norm, durationMs: Date.now() - startedAt, errorType: '', documentTest, modelMetadata };
+                // Retrieval correctness requires both halves of the asymmetric space to
+                // work. Test query and document roles separately instead of validating
+                // only a generic/document request.
+                const queryStartedAt = Date.now();
+                const queryResult = await embedTexts(cfg, ['LIBRA memory retrieval query test.'], { purpose: 'query', bypassCache: true });
+                const queryElapsedMs = Date.now() - queryStartedAt;
+                const documentStartedAt = Date.now();
+                const documentResult = await embedTexts(cfg, ['LIBRA document embedding connection test A.', 'LIBRA document embedding connection test B.'], { purpose: 'document', bypassCache: true });
+                const documentElapsedMs = Date.now() - documentStartedAt;
+                const queryVector = queryResult.vectors?.[0] || [];
+                const documentVector = documentResult.vectors?.[0] || [];
+                const queryNorm = Array.isArray(queryVector) ? Math.sqrt(queryVector.reduce((sum, value) => sum + Number(value || 0) ** 2, 0)) : 0;
+                const documentNorm = Array.isArray(documentVector) ? Math.sqrt(documentVector.reduce((sum, value) => sum + Number(value || 0) ** 2, 0)) : 0;
+                const queryProfileId = String(queryResult?.metadata?.profileId || '');
+                const documentProfileId = String(documentResult?.metadata?.profileId || '');
+                if (!queryVector.length || !documentVector.length) throw new LIBRAError('Embedding connection test returned an empty query/document vector.', 'INVALID_RESPONSE');
+                if (queryVector.length !== documentVector.length) throw new LIBRAError(`Embedding query/document dimension mismatch: ${queryVector.length} vs ${documentVector.length}.`, 'DIMENSION_MISMATCH');
+                if (!queryProfileId || !documentProfileId || queryProfileId !== documentProfileId) throw new LIBRAError('Embedding query/document profile IDs do not match.', 'DIMENSION_MISMATCH');
+                return {
+                    ok: true, provider: queryResult.provider, model: queryResult.model, dimensions: queryResult.dimensions, norm: queryNorm,
+                    durationMs: Date.now() - startedAt, errorType: '', modelMetadata,
+                    queryTest: { ok: true, dimensions: queryVector.length, norm: queryNorm, elapsedMs: queryElapsedMs, profileId: queryProfileId },
+                    documentTest: { ok: true, dimensions: documentVector.length, norm: documentNorm, elapsedMs: documentElapsedMs, batchSize: 2, profileId: documentProfileId },
+                    profileMatch: true
+                };
             }
             catch (error) {
                 return { ok: false, provider: normalizeConfig(raw).provider, model: normalizeConfig(raw).model, dimensions: 0, durationMs: Date.now() - startedAt, errorType: classifyError(error), error: String(error?.message || error || 'unknown error').slice(0, 300) };
@@ -23420,7 +23662,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         return Object.freeze({
             SCHEMA,
             PREPROCESS_VERSION,
+            LONG_INPUT_PREPROCESS_VERSION,
             OLLAMA_PREPROCESS_VERSION,
+            CONTEXT_GROUPING_VERSION,
             normalizeProvider,
             normalizeConfig,
             normalizeDimensions,
@@ -24835,8 +25079,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         const secrets = {};
         for (const [key, child] of Object.entries(value)) {
             if (isProviderSecretKey(key)) {
-                if (child !== undefined && child !== null && child !== '')
-                    secrets[key] = safeClone(child);
+                secrets[key] = child === undefined || child === null ? '' : safeClone(child);
                 continue;
             }
             const split = splitProviderConfigSecrets(child);
@@ -24873,20 +25116,19 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     };
     const readProviderSettings = async () => {
         const current = await RisuCompat.pluginStorage.getItem(PROVIDER_SETTINGS_KEY);
+        const durableSecrets = await readDurableCredential(LOCAL_PROVIDER_CONFIG_SECRETS_KEY, SYNCED_PROVIDER_CONFIG_SECRETS_KEY, {});
         if (current === null || current === undefined || current === '') {
-            const storedSecrets = await RisuCompat.localGetItem(PROVIDER_SECRETS_KEY);
-            return storedSecrets && typeof storedSecrets === 'object'
-                ? mergeProviderConfigSecrets({}, storedSecrets)
+            return durableSecrets && typeof durableSecrets === 'object'
+                ? mergeProviderConfigSecrets({}, durableSecrets)
                 : null;
         }
         const parsed = parseProviderConfigValue(current);
         const split = splitProviderConfigSecrets(parsed);
-        const storedSecrets = await RisuCompat.localGetItem(PROVIDER_SECRETS_KEY);
-        const mergedSecrets = mergeProviderConfigSecrets(split.secrets || {}, storedSecrets || {});
+        const mergedSecrets = mergeProviderConfigSecrets(split.secrets || {}, durableSecrets || {});
         if (split.hasSecrets) {
-            const secretWritten = await RisuCompat.localSetItem(PROVIDER_SECRETS_KEY, mergedSecrets);
-            if (secretWritten === false)
-                throw new LIBRAError('Secure local provider-secret storage is unavailable', 'CONFIG_SECRET_STORAGE_UNAVAILABLE');
+            const secretWritten = await writeDurableCredential(LOCAL_PROVIDER_CONFIG_SECRETS_KEY, SYNCED_PROVIDER_CONFIG_SECRETS_KEY, mergedSecrets);
+            if (secretWritten.durable !== true)
+                throw new LIBRAError('Update-safe provider-secret backup storage is unavailable', 'CONFIG_SECRET_STORAGE_UNAVAILABLE');
             const sanitized = await RisuCompat.pluginStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(split.metadata));
             if (sanitized === false)
                 throw new LIBRAError('LIBRA provider settings secret migration failed', 'CONFIG_WRITE_FAILED');
@@ -24894,18 +25136,20 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         return mergeProviderConfigSecrets(split.metadata, mergedSecrets);
     };
     const writeProviderSettings = async (value) => {
-        const split = splitProviderConfigSecrets(parseProviderConfigValue(value));
-        const existingSecrets = split.hasSecrets ? null : await RisuCompat.localGetItem(PROVIDER_SECRETS_KEY);
-        const secretWritten = split.hasSecrets
-            ? await RisuCompat.localSetItem(PROVIDER_SECRETS_KEY, split.secrets)
-            : existingSecrets && typeof existingSecrets === 'object'
-                ? await RisuCompat.localRemoveItem(PROVIDER_SECRETS_KEY)
-                : true;
-        if (secretWritten === false)
-            throw new LIBRAError('Secure local provider-secret storage is unavailable', 'CONFIG_SECRET_STORAGE_UNAVAILABLE');
+        const parsedValue = parseProviderConfigValue(value);
+        const split = splitProviderConfigSecrets(parsedValue);
+        const secretWritten = await writeDurableCredential(LOCAL_PROVIDER_CONFIG_SECRETS_KEY, SYNCED_PROVIDER_CONFIG_SECRETS_KEY, split.secrets || {});
+        if (secretWritten.durable !== true)
+            throw new LIBRAError('Update-safe provider-secret backup storage is unavailable', 'CONFIG_SECRET_STORAGE_UNAVAILABLE');
         const written = await RisuCompat.pluginStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(split.metadata));
         if (written === false)
             throw new LIBRAError('LIBRA provider settings write failed', 'CONFIG_WRITE_FAILED');
+        // Match FLASHBACK's ordering: local/synced durable copies are committed before
+        // host arguments, because some WebRisu builds may refresh plugin metadata on setArgument.
+        await Promise.all([
+            setPluginArgumentValue('llm_key', text(parsedValue?.llm?.key || '')).catch(() => null),
+            setPluginArgumentValue('embedding_key', text(parsedValue?.embed?.key || '')).catch(() => null)
+        ]);
         return true;
     };
     const parseBooleanConfig = (value, fallback = false) => {
@@ -25329,14 +25573,27 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const EMBEDDING_REBUILD_SCHEMA = 'libra.embedding_rebuild.v1';
     const EMBEDDING_QUARANTINE_DAYS = 7;
     const MANIFEST_SCHEMA = 'libra.manifest.v1';
+    const BRANCH_GUARD_SCHEMA = 'libra.branch_guard.v1';
+    const BRANCH_GUARD_READY = 'ready';
+    const BRANCH_GUARD_BOOTSTRAP_PENDING = 'bootstrap_pending';
+    const SOURCE_EVIDENCE_VALIDATION_SCHEMA = 'libra.source_evidence_validation.v3';
+    const SOURCE_EVIDENCE_REPAIR_SCHEMA = 'libra.source_evidence_repair.v1';
     const MEMORY_SCHEMA = 'libra.canonical_memory.v1';
     const RUN_SCHEMA = 'libra.execution_run.v1';
     const WORK_SCHEMA = 'libra.memory_work.v1';
     const MEMORY_INJECTION_MARKER = '[LIBRA 장기기억 — 관련 기억만 시간순으로 제공됨]';
     const RETRIEVAL_PROJECTION_VERSION = 'libra.retrieval_projection.v2';
     const EMBEDDING_PROJECTION_SCHEMA = 'libra.embedding_projection.v2';
-    const EMBEDDING_PROJECTION_LAYOUT_VERSION = 'libra.embedding_projection_layout.v2';
-    const RECALL_CATALOG_SCHEMA = 'libra.recall_catalog.v2';
+    const EMBEDDING_PROJECTION_LAYOUT_VERSION = 'libra.embedding_projection_layout.v3';
+    const RECALL_CATALOG_SCHEMA = 'libra.recall_catalog.v3';
+    const RECALL_CATALOG_LEGACY_SCHEMA = 'libra.recall_catalog.v2';
+    const RECALL_CATALOG_UPGRADE_DELAY_MS = 30000;
+    const BRANCH_DEEP_AUDIT_INTERVAL_MS = 5 * 60 * 1000;
+    const BRANCH_DEEP_AUDIT_DELAY_MS = 30000;
+    const BRANCH_BOOTSTRAP_AUDIT_DELAY_MS = 750;
+    const LIVE_SCAN_EMBEDDING_RETRY_LIMIT = 2;
+    const SOURCE_EVIDENCE_REPAIR_MAX_TOKENS = 7000;
+    const SOURCE_EVIDENCE_HIGH_RISK_CLAIM_LIMIT = 12;
     const LOCAL_VECTOR_PAYLOAD_SCHEMA = 'libra.local_vector_payload.v1';
     const LOCAL_VECTOR_REF_SCHEMA = 'libra.local_vector_ref.v1';
     const LOCAL_VECTOR_STORAGE_MODE = 'safe_local_float32_v1';
@@ -25346,7 +25603,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const EMBEDDING_VECTOR_MIGRATION_MARKER_SCHEMA = 'libra.embedding_vector_migration_marker.v1';
     const EMBEDDING_VECTOR_MIGRATION_MARKER_PREFIX = `${PREFIX}:local-vector-migration:`;
     const LOCAL_VECTOR_CACHE_MAX = 96;
-    const RECALL_VECTOR_SKETCH_DIMS = 128;
+    const RECALL_VECTOR_SKETCH_DIMS = 256;
     const RECALL_CATALOG_SEARCH_TEXT_MAX_CHARS = 2800;
     const RECALL_CATALOG_ANCHOR_LIMIT = 112;
     const RETRIEVAL_SECTION_ORDER = Object.freeze([
@@ -25398,17 +25655,27 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const BM25F_K1 = 1.2;
     const RRF_WEIGHTS = Object.freeze({ dense: 1.0, sparse: 1.0, exact: 1.25, forced: 1.10 });
     // HAYAKU 2.4.4-inspired request-path safety, adapted to LIBRA's much coarser
-    // 5-turn canonical memories. These are hidden operational guards rather than
-    // new user-facing modes: the configured 8k recall cap remains the hard ceiling.
+    // 5-turn canonical memories. Character pressure is the primary prompt-safety
+    // budget; token capacity is derived from that budget instead of acting as a
+    // second fixed bottleneck.
     const RECALL_RUNTIME_SCHEMA = 'libra.recall_runtime.v1';
+    const RECALL_TOKEN_BUDGET_SCHEMA = 'libra.dynamic_recall_token_budget.v1';
     const RECALL_REQUEST_BUDGET_MS = 30000; // absolute live-recall watchdog; per-step guards remain separately bounded
-    const RECALL_STEP_BUDGET_MS = 1500;
+    const RECALL_STEP_BUDGET_MS = 20000;
     const RECALL_EMBEDDING_BUDGET_MS = 3500;
     const RECALL_BUDGET_STANDARD_CHARS = 3000;
     const RECALL_BUDGET_PRECISION_CHARS = 5000;
+    const RECALL_MAX_DYNAMIC_CHARS = 12000;
+    const RECALL_DYNAMIC_TOKEN_MIN = 640;
+    const RECALL_DYNAMIC_TOKEN_MAX = 48000;
+    const RECALL_DYNAMIC_TOKEN_RATE_FLOOR = 1.0;
+    const RECALL_DYNAMIC_TOKEN_RATE_CEILING = 2.35;
+    const RECALL_DYNAMIC_TOKEN_HEADROOM = 1.12;
+    const RECALL_DYNAMIC_TOKEN_FIXED_RESERVE = 96;
     const RECALL_CATALOG_RESERVE_MS = 2800;
     const RECALL_HYDRATE_MIN = 20;
     const RECALL_HYDRATE_MAX = 48;
+    const RECALL_HYDRATE_CONCURRENCY = 2;
     const RECALL_LATENT_MIN_AGE_TURNS = 30;
     const RECALL_LATENT_MIN_SIGNAL = 0.34;
     const RECALL_LATENT_REPEAT_COOLDOWN_TURNS = 3;
@@ -25443,7 +25710,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       ariadne: 'Ariadne',
       character_ito: '인물 ito',
       world_ito: '세계 ito',
-      plot_ito: '플롯 ito'
+      plot_ito: '플롯 ito',
+      evidence_guard: '정본 근거 검증'
     });
     const DEFAULT_SETTINGS = Object.freeze({
       enabled: true,
@@ -25451,7 +25719,6 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       autoRetry: true,
       recallQualityPreset: 'balanced',
       recallMaxMemories: 12,
-      recallMaxTokens: 2600,
       recallMaxChars: 8000,
       continuationTailMessages: 4,
       lexicalFallback: true,
@@ -25538,6 +25805,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       currentRun: null,
       nativeCopyChecks: new Map(),
       nativeCopyInFlight: new Map(),
+      lastResolvedContext: null,
+      previousResolvedContext: null,
+      branchPairSignatureCache: new Map(),
+      branchAuditInFlight: new Map(),
+      recallCatalogUpgradeInFlight: new Map(),
       lastNativeCopy: null,
       lastNativeCopyCheck: null,
       localVectorCache: new Map(),
@@ -25573,7 +25845,59 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       hasher.update(serialized);
       return hasher.digest();
     };
-    const estimateTokens = value => Math.max(1, Math.ceil(String(value || '').length / 3.2));
+    const recallTokenDensity = value => {
+      const body = String(value || '');
+      const chars = body.length;
+      if (!chars) return { chars: 0, cjkChars: 0, cjkRatio: 0, whitespaceChars: 0, estimatedTokens: 0, tokensPerChar: RECALL_DYNAMIC_TOKEN_RATE_FLOOR };
+      const cjkChars = (body.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\uac00-\ud7af]/g) || []).length;
+      const whitespaceChars = (body.match(/\s/g) || []).length;
+      const nonCjkChars = Math.max(0, chars - cjkChars);
+      // Same conservative mixed-script estimator already used elsewhere in LIBRA,
+      // intentionally biased upward so the token ceiling does not undercut the
+      // character budget for Korean/Japanese/Chinese RP text.
+      const estimatedTokens = Math.max(1, Math.ceil(nonCjkChars * 0.55 + cjkChars * 1.8 + whitespaceChars));
+      const rawRate = estimatedTokens / Math.max(1, chars);
+      const tokensPerChar = clamp(
+        Math.max(RECALL_DYNAMIC_TOKEN_RATE_FLOOR, rawRate * RECALL_DYNAMIC_TOKEN_HEADROOM),
+        RECALL_DYNAMIC_TOKEN_RATE_FLOOR,
+        RECALL_DYNAMIC_TOKEN_RATE_CEILING,
+        RECALL_DYNAMIC_TOKEN_RATE_FLOOR
+      );
+      return {
+        chars,
+        cjkChars,
+        cjkRatio: cjkChars / Math.max(1, chars),
+        whitespaceChars,
+        estimatedTokens,
+        tokensPerChar
+      };
+    };
+    const dynamicRecallTokenBudget = (charBudget, profileOrText = '') => {
+      const chars = Math.max(0, Number(charBudget || 0) || 0);
+      const profile = profileOrText && typeof profileOrText === 'object' && Number.isFinite(Number(profileOrText.tokensPerChar))
+        ? profileOrText
+        : recallTokenDensity(profileOrText);
+      const tokensPerChar = clamp(
+        Math.max(RECALL_DYNAMIC_TOKEN_RATE_FLOOR, Number(profile?.tokensPerChar || 0) || RECALL_DYNAMIC_TOKEN_RATE_FLOOR),
+        RECALL_DYNAMIC_TOKEN_RATE_FLOOR,
+        RECALL_DYNAMIC_TOKEN_RATE_CEILING,
+        RECALL_DYNAMIC_TOKEN_RATE_FLOOR
+      );
+      const tokenCeiling = Math.floor(clamp(
+        Math.ceil(chars * tokensPerChar + RECALL_DYNAMIC_TOKEN_FIXED_RESERVE),
+        RECALL_DYNAMIC_TOKEN_MIN,
+        RECALL_DYNAMIC_TOKEN_MAX,
+        RECALL_DYNAMIC_TOKEN_MIN
+      ));
+      return {
+        schema: RECALL_TOKEN_BUDGET_SCHEMA,
+        charBudget: chars,
+        tokenCeiling,
+        tokensPerChar,
+        cjkRatio: Number(profile?.cjkRatio || 0) || 0,
+        sampleChars: Number(profile?.chars || 0) || 0
+      };
+    };
     const createRecallGuard = (budgetMs = RECALL_REQUEST_BUDGET_MS) => {
       const startedAt = Date.now();
       const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -25607,6 +25931,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       error.phase = label;
       return error;
     };
+    const recallStepTimeoutError = (label = 'recall_step', timeoutMs = RECALL_STEP_BUDGET_MS) => {
+      const boundedMs = Math.max(1, Number(timeoutMs || RECALL_STEP_BUDGET_MS) || RECALL_STEP_BUDGET_MS);
+      const error = new Error(`LIBRA recall step timed out: ${label} after ${boundedMs}ms`);
+      error.code = 'LIBRA_RECALL_STEP_TIMEOUT';
+      error.phase = label;
+      error.stepTimeout = true;
+      error.timeoutMs = boundedMs;
+      return error;
+    };
     const ensureRecallGuard = (guard, label = 'recall') => {
       if (!guard) return true;
       if (guard.controller?.signal?.aborted) throw guard.controller.signal.reason || recallDeadlineError(label);
@@ -25630,9 +25963,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           new Promise(resolve => { timer = setTimeout(() => resolve(timeoutMarker), timeoutMs); })
         ]);
         if (result === timeoutMarker) {
-          const error = recallDeadlineError(label);
-          error.stepTimeout = true;
-          if (guard) guard.timeouts.push({ label, at: Date.now(), timeoutMs });
+          // A bounded phase timeout is not the same thing as exhausting the absolute
+          // request watchdog. Keep the two error codes separate so diagnostics do not
+          // report a false 30-second deadline failure when one 1.5-second step is slow.
+          const absoluteDeadlineReached = !!guard && recallGuardRemainingMs(guard) <= 0;
+          const error = absoluteDeadlineReached
+            ? recallDeadlineError(label)
+            : recallStepTimeoutError(label, timeoutMs);
+          if (guard) guard.timeouts.push({ label, at: Date.now(), timeoutMs, kind: absoluteDeadlineReached ? 'request_deadline' : 'step_timeout' });
           if (options.abortOnTimeout !== false) {
             try { guard?.controller?.abort(error); } catch (_) {}
           }
@@ -26057,8 +26395,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         forceCurrentScene: source.forceCurrentScene !== false,
         recallQualityPreset,
         recallMaxMemories: recallQualityValues.recallMaxMemories,
-        recallMaxTokens: Math.floor(clamp(source.recallMaxTokens, 320, 12000, DEFAULT_SETTINGS.recallMaxTokens)),
-        recallMaxChars: Math.floor(clamp(source.recallMaxChars, 1000, 30000, DEFAULT_SETTINGS.recallMaxChars)),
+        recallMaxChars: Math.floor(clamp(source.recallMaxChars, 1000, RECALL_MAX_DYNAMIC_CHARS, DEFAULT_SETTINGS.recallMaxChars)),
         continuationTailMessages: Math.floor(clamp(source.continuationTailMessages, 1, 20, DEFAULT_SETTINGS.continuationTailMessages)),
         candidateLimit: recallQualityValues.candidateLimit,
         rrfK: Math.floor(clamp(source.rrfK, 1, 200, DEFAULT_SETTINGS.rrfK)),
@@ -26077,6 +26414,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       // v1.0.5: this setting was never consumed by query construction; keep old persisted
       // values from leaking back into exports or UI-derived settings.
       delete normalized.recentQueryMessages;
+      // v1.0.49: recallMaxChars is normalized above to the absolute 12,000-character dynamic ceiling.
+      // v1.0.48: token capacity is request-local and derived from the pressure-adjusted
+      // character budget plus observed text density. Persisted fixed limits are legacy
+      // data and must never become a second recall bottleneck again.
+      delete normalized.recallMaxTokens;
       return normalized;
     };
 
@@ -26118,6 +26460,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         normalizeVectors: providerProfile?.normalizeVectors !== false,
         preprocessingVersion: string(providerProfile?.preprocessingVersion || ''),
         taskPolicyVersion: string(providerProfile?.taskPolicyVersion || ''),
+        contextGroupingVersion: string(providerProfile?.contextGroupingVersion || ''),
         retrievalProjection: RETRIEVAL_PROJECTION_VERSION,
         projectionLayoutVersion: EMBEDDING_PROJECTION_LAYOUT_VERSION
       };
@@ -26620,6 +26963,23 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return state.embeddingSettings;
     };
 
+    // Live recall must not depend on a fresh pluginStorage/argument walk merely to
+    // discover the embedding profile. The provider bridge runtime cache represents
+    // the last fully loaded/saved provider configuration and is not affected by
+    // unsaved GUI draft edits kept in state.embeddingSettings.
+    const peekEmbeddingSettingsForRecall = () => {
+      try {
+        const providerConfig = typeof LibraProviderBridge.peekConfig === 'function'
+          ? LibraProviderBridge.peekConfig()
+          : null;
+        const cachedEmbed = asObject(providerConfig?.embed);
+        if (Object.keys(cachedEmbed).length) {
+          return { config: normalizeEmbeddingSettings(cachedEmbed), source: 'provider_runtime_cache' };
+        }
+      } catch (_) {}
+      return { config: null, source: 'none' };
+    };
+
     const saveEmbeddingSettings = async patch => {
       const current = await loadEmbeddingSettings();
       const sourceSignature = embeddingConfigSignature(current);
@@ -26710,7 +27070,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const chatId = contextId(chat, identity || 'chat');
       if (state.disposed) throw new LIBRAError('LIBRA runtime was disposed.', 'RUNTIME_DISPOSED');
       const scopeKey = await resolveStableScopeKey(characterId, chatId, identity);
-      return { character, chat, identity, scope: { characterId, chatId, scopeKey } };
+      const context = { character, chat, identity, scope: { characterId, chatId, scopeKey } };
+      const previous = state.lastResolvedContext;
+      if (previous?.scope?.chatId && string(previous.scope.chatId) !== string(chatId)) {
+        state.previousResolvedContext = previous;
+      }
+      state.lastResolvedContext = context;
+      return context;
     };
 
     const rawChatMessages = chat => {
@@ -26748,6 +27114,21 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return string(item?.chatId || item?.messageId || item?.id || item?.m_id || item?.uuid || item?.uid || `idx_${index}`);
     };
 
+    const branchContentHash = value => {
+      const body = String(value || '');
+      let hashA = 2166136261;
+      let hashB = 0x9e3779b9;
+      for (let index = 0; index < body.length; index += 1) {
+        const code = body.charCodeAt(index);
+        hashA ^= code;
+        hashA = Math.imul(hashA, 16777619);
+        hashB ^= (code + index) >>> 0;
+        hashB = Math.imul(hashB, 2246822519);
+        hashB ^= hashB >>> 13;
+      }
+      return `${(hashA >>> 0).toString(16).padStart(8, '0')}${(hashB >>> 0).toString(16).padStart(8, '0')}:${body.length}`;
+    };
+
     const buildPairs = chat => {
       const pairs = [];
       let pendingUser = null;
@@ -26776,11 +27157,18 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           if (previous?.assistant) previous.assistant = appendSegment(previous.assistant, chatId, body, index);
           return;
         }
-        pairs.push({
+        const pair = {
           turn: pairs.length + 1,
           user: pendingUser,
           assistant: { chatId, chatIds: [chatId], text: body, index, endIndex: index }
-        });
+        };
+        // Compute one full-content signature while the sanitized pair is already hot
+        // in memory. Later live requests compare these signatures and only re-run the
+        // canonical sourceDigest for batches whose actual U+A content changed.
+        pair.branchQuickSignature = branchContentHash([
+          pair.turn, pair.user.chatId, pair.assistant.chatId, pair.user.text, pair.assistant.text
+        ].join('\u0000'));
+        pairs.push(pair);
         pendingUser = null;
       });
       return pairs;
@@ -26804,6 +27192,67 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       pair.assistant.text
     ].join('\n')).join('\n\n');
 
+    const branchPairQuickSignature = pair => string(pair?.branchQuickSignature || branchContentHash([
+      Number(pair?.turn || 0),
+      string(pair?.user?.chatId || ''), string(pair?.assistant?.chatId || ''),
+      string(pair?.user?.text || ''), string(pair?.assistant?.text || '')
+    ].join('\u0000')));
+
+    const normalizeBranchGuard = value => {
+      const source = asObject(value);
+      const rawSignatures = asArray(source.batchSignatures).map(item => string(item || ''));
+      const verifiedStarts = Array.from(new Set(asArray(source.verifiedStarts)
+        .map(item => Math.max(0, Number(item || 0) || 0))
+        .filter(item => item > 0 && ((item - 1) % BATCH_SIZE === 0))))
+        .sort((a, b) => a - b);
+      const status = source.schema === BRANCH_GUARD_SCHEMA && source.status === BRANCH_GUARD_READY
+        ? BRANCH_GUARD_READY
+        : BRANCH_GUARD_BOOTSTRAP_PENDING;
+      return {
+        schema: BRANCH_GUARD_SCHEMA,
+        status,
+        batchSignatures: rawSignatures,
+        verifiedStarts: status === BRANCH_GUARD_READY ? [] : verifiedStarts,
+        observedTurns: Math.max(0, Number(source.observedTurns || 0) || 0),
+        completeBatches: Math.max(0, Number(source.completeBatches || rawSignatures.length || 0) || 0),
+        lastFullAuditAt: Math.max(0, Number(source.lastFullAuditAt || 0) || 0),
+        updatedAt: string(source.updatedAt || '')
+      };
+    };
+
+    const defaultBranchGuard = () => normalizeBranchGuard({
+      schema: BRANCH_GUARD_SCHEMA,
+      status: BRANCH_GUARD_BOOTSTRAP_PENDING,
+      batchSignatures: [],
+      verifiedStarts: [],
+      observedTurns: 0,
+      completeBatches: 0,
+      lastFullAuditAt: 0,
+      updatedAt: ''
+    });
+
+    const branchStartForBatchIndex = index => Math.max(0, Number(index || 0)) * BATCH_SIZE + 1;
+    const branchBatchQuickSignature = batch => branchContentHash(JSON.stringify(asArray(batch).map(pair => ({
+      turn: Number(pair?.turn || 0),
+      quick: branchPairQuickSignature(pair),
+      userChatId: string(pair?.user?.chatId || ''),
+      assistantChatId: string(pair?.assistant?.chatId || ''),
+      userChars: string(pair?.user?.text || '').length,
+      assistantChars: string(pair?.assistant?.text || '').length
+    }))));
+    const branchBatchSignaturesForPairs = pairs => completeBatchStarts(pairs)
+      .map(startTurn => branchBatchQuickSignature(batchForStart(pairs, startTurn)));
+    const changedBranchStarts = (previousSignatures, currentSignatures) => {
+      const previous = asArray(previousSignatures);
+      const current = asArray(currentSignatures);
+      const out = [];
+      const maxLength = Math.max(previous.length, current.length);
+      for (let index = 0; index < maxLength; index += 1) {
+        if (string(previous[index] || '') !== string(current[index] || '')) out.push(branchStartForBatchIndex(index));
+      }
+      return out;
+    };
+
     const defaultManifest = (scope, observedTurn = 0) => ({
       schema: MANIFEST_SCHEMA,
       version: VERSION,
@@ -26814,12 +27263,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       createdAt: nowIso(),
       updatedAt: nowIso(),
       frontiers: { observedTurn, committedTurn: 0 },
+      branchGuard: defaultBranchGuard(),
       memories: {},
       inheritedMemories: [],
       archiveRef: null,
       runIds: [],
       inFlight: null,
-      stats: { commits: 0, failures: 0, ariadneFailures: 0, itoFailures: 0, partialCommits: 0, staleDiscards: 0, recalls: 0, embeddings: 0, handoffImports: 0 }
+      stats: { commits: 0, failures: 0, ariadneFailures: 0, itoFailures: 0, partialCommits: 0, staleDiscards: 0, recalls: 0, embeddings: 0, handoffImports: 0, evidenceRepairs: 0, evidenceFallbacks: 0, evidenceRejects: 0 }
     });
 
     const loadManifest = async (scope, observedTurn = 0) => {
@@ -26829,6 +27279,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       const manifest = loaded || defaultManifest(scope, observedTurn);
       manifest.frontiers = { ...defaultManifest(scope, observedTurn).frontiers, ...asObject(manifest.frontiers), observedTurn };
+      manifest.branchGuard = normalizeBranchGuard(manifest.branchGuard);
       manifest.memories = asObject(manifest.memories);
       manifest.inheritedMemories = asArray(manifest.inheritedMemories).filter(ref => ref && typeof ref === 'object');
       manifest.archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
@@ -26841,6 +27292,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const saveManifest = async (scope, manifest) => {
+      manifest.branchGuard = normalizeBranchGuard(manifest.branchGuard);
       if (Object.prototype.hasOwnProperty.call(manifest, 'worldAdditionalIds')) delete manifest.worldAdditionalIds;
       if (manifest.nativeChatCopy && typeof manifest.nativeChatCopy === 'object') delete manifest.nativeChatCopy.worldAdditional;
       if (manifest.lastSessionHandoff && typeof manifest.lastSessionHandoff === 'object') {
@@ -26914,6 +27366,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       || Number(a.turnRange?.end || 0) - Number(b.turnRange?.end || 0)
       || Number(a.revision || 0) - Number(b.revision || 0)
     ));
+    const listRecallCurrentMemoryRefs = manifest => {
+      const refs = listCurrentMemoryRefs(manifest);
+      const guard = normalizeBranchGuard(manifest?.branchGuard);
+      if (guard.status !== BRANCH_GUARD_BOOTSTRAP_PENDING) return refs;
+      const verified = new Set(asArray(guard.verifiedStarts).map(Number));
+      return refs.filter(ref => verified.has(Number(ref?.turnRange?.start || 0)));
+    };
+    const listRecallMemoryRefs = manifest => [...listInheritedMemoryRefs(manifest), ...listRecallCurrentMemoryRefs(manifest)].sort((a, b) => (
+      memoryRefSessionEpoch(a) - memoryRefSessionEpoch(b)
+      || Number(a.turnRange?.start || 0) - Number(b.turnRange?.start || 0)
+      || Number(a.turnRange?.end || 0) - Number(b.turnRange?.end || 0)
+      || Number(a.revision || 0) - Number(b.revision || 0)
+    ));
 
     const NATIVE_CHAT_COPY_SCHEMA = 'libra.native_chat_copy.v1';
     const NATIVE_CHAT_COPY_POSITIVE_TTL_MS = 5 * 60 * 1000;
@@ -26981,6 +27446,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       string(pair?.user?.text || ''),
       string(pair?.assistant?.text || '')
     ]);
+
+    // RisuAI native copy may assign new message IDs even when U+A text is byte-for-byte
+    // identical. Canonical sourceDigest intentionally includes message IDs for branch
+    // safety, so native-copy equivalence needs a second, content-only identity.
+    const nativeCopyBatchContentDigest = batch => digest(asArray(batch).map(pair => ({
+      turn: Number(pair?.turn || 0),
+      user: string(pair?.user?.text || ''),
+      assistant: string(pair?.assistant?.text || '')
+    })));
 
     const nativeCopySharedPrefixPairs = (leftChat, rightChat) => {
       const left = buildPairs(leftChat).map(nativeCopyPairSignature);
@@ -27104,10 +27578,27 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const targetChat = chatSnapshot.targetChat || context?.chat;
       const character = chatSnapshot.character || context?.character;
       const chats = Array.isArray(chatSnapshot.chats) ? chatSnapshot.chats : [];
-      if (!targetChat || !character || !chats.length) {
+      if (!targetChat || !character) {
         recordNativeCopyCheck({
-          phase: 'locate', reason: 'character_chat_list_unavailable', targetChatId: targetScope.chatId,
+          phase: 'locate', reason: 'current_chat_unavailable', targetChatId: targetScope.chatId,
           chatListSource: chatSnapshot.source, chatCount: chats.length, refreshError: chatSnapshot.refreshError || ''
+        });
+        return null;
+      }
+      const candidateEntries = chats.map((chat, index) => ({ chat, index, source: 'character_chats' }));
+      const previousContext = state.previousResolvedContext;
+      const previousChatId = string(previousContext?.scope?.chatId || '');
+      if (previousContext?.chat
+        && previousChatId
+        && previousChatId !== string(targetScope.chatId)
+        && string(previousContext?.scope?.characterId || '') === string(targetScope.characterId)
+        && !candidateEntries.some(entry => contextId(entry.chat, '') === previousChatId)) {
+        candidateEntries.push({ chat: previousContext.chat, index: -1, source: 'previous_resolved_context' });
+      }
+      if (!candidateEntries.length) {
+        recordNativeCopyCheck({
+          phase: 'locate', reason: 'copy_source_chat_list_unavailable', targetChatId: targetScope.chatId,
+          chatListSource: chatSnapshot.source, chatCount: 0, refreshError: chatSnapshot.refreshError || ''
         });
         return null;
       }
@@ -27124,8 +27615,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const allowTranscriptFallback = !explicitId && !branchId && !targetTitle.marked && targetPairCount >= BATCH_SIZE;
 
       const candidates = [];
-      for (let index = 0; index < chats.length; index += 1) {
-        const candidateChat = chats[index];
+      for (const candidateEntry of candidateEntries) {
+        const index = Number(candidateEntry.index);
+        const candidateChat = candidateEntry.chat;
         if (!candidateChat || candidateChat === targetChat) continue;
         const candidateChatId = contextId(candidateChat, '');
         if (!candidateChatId || candidateChatId === targetScope.chatId) continue;
@@ -27146,15 +27638,17 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!stored?.manifest || !nativeCopyManifestHasData(stored.manifest)) continue;
         const dataWeight = listCurrentMemoryRefs(stored.manifest).length * 4
           + listInheritedMemoryRefs(stored.manifest).length * 2;
+        const previousResolved = candidateEntry.source === 'previous_resolved_context';
         const reason = explicit ? 'explicit_copy_source'
           : branch ? 'risu_branch_marker'
             : titleDetected ? 'risu_native_chat_copy_title'
-              : 'risu_native_chat_copy_transcript';
-        const priority = explicit ? 1000 : branch ? 900 : immediateTitle ? 650 : titleDetected ? 550 : 400;
+              : previousResolved ? 'previous_scope_transcript_copy'
+                : 'risu_native_chat_copy_transcript';
+        const priority = explicit ? 1000 : branch ? 900 : immediateTitle ? 650 : titleDetected ? 550 : previousResolved ? 500 : 400;
         candidates.push({
           chat: candidateChat, chatId: candidateChatId, scope: stored.scope, manifest: stored.manifest,
           reason, priority, dataWeight, sharedPairs: shared.common,
-          updatedAt: Date.parse(string(stored.manifest.updatedAt || '')) || 0, chatIndex: index
+          updatedAt: Date.parse(string(stored.manifest.updatedAt || '')) || 0, chatIndex: index, source: candidateEntry.source
         });
       }
       candidates.sort((a, b) => b.priority - a.priority
@@ -27174,7 +27668,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         branchSourceChatId: branchId || '',
         transcriptFallback: allowTranscriptFallback,
         chatListSource: chatSnapshot.source,
-        chatCount: chats.length,
+        chatCount: candidateEntries.length,
         refreshError: chatSnapshot.refreshError || '',
         candidateCount: candidates.length,
         selectedSourceChatId: selected?.chatId || '',
@@ -27207,22 +27701,84 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return targetMemory;
     };
 
-    const cloneNativeCopyMemoryRecord = async (sourceMemory, targetScope, memoryKey, vectorKeyFactory, sourceScopeKey, writtenKeys) => {
+    const cloneNativeCopyMemoryRecord = async (sourceMemory, targetScope, memoryKey, vectorKeyFactory, sourceScopeKey, writtenKeys, options = {}) => {
+      const copiedAt = nowIso();
       const memory = {
-        ...clone(sourceMemory), scopeKey: targetScope.scopeKey, updatedAt: nowIso(),
-        nativeCopiedFromScopeKey: string(sourceScopeKey), nativeCopiedAt: nowIso()
+        ...clone(sourceMemory), scopeKey: targetScope.scopeKey, updatedAt: copiedAt,
+        nativeCopiedFromScopeKey: string(sourceScopeKey), nativeCopiedAt: copiedAt
       };
+      if (options.rebindCurrent === true) {
+        const targetSourceDigest = string(options.targetSourceDigest || '');
+        const targetSourcePairs = asArray(options.targetSourcePairs).map(item => clone(item));
+        if (!targetSourceDigest || !targetSourcePairs.length) throw new Error('LIBRA native chat-copy target identity is incomplete.');
+        memory.nativeCopySourceIdentity = {
+          sourceScopeKey: string(sourceScopeKey),
+          sourceDigest: string(sourceMemory?.sourceDigest || ''),
+          sourcePairs: clone(sourceMemory?.sourcePairs || []),
+          targetDigest: targetSourceDigest,
+          reboundAt: copiedAt,
+          version: 2
+        };
+        memory.sourceDigest = targetSourceDigest;
+        memory.branchId = targetSourceDigest;
+        memory.sourcePairs = targetSourcePairs;
+      }
       await cloneNativeCopyVectorForMemory(sourceMemory, memory, targetScope, vectorKeyFactory, writtenKeys);
       await storage.setJson(memoryKey, memory);
       writtenKeys.push(memoryKey);
       return memory;
     };
 
+    const verifyNativeChatCopyStorage = async (targetScope, targetPairs, expected = {}) => {
+      const manifest = await storage.getJson(key.manifest(targetScope), null);
+      if (!manifest || manifest.schema !== MANIFEST_SCHEMA || manifest?.nativeChatCopy?.schema !== NATIVE_CHAT_COPY_SCHEMA || manifest?.nativeChatCopy?.complete !== true) {
+        return { verified: false, durable: false, reason: 'native_copy_manifest_missing', memories: 0, vectors: 0 };
+      }
+      const refs = Object.values(asObject(manifest.memories)).filter(ref => ref?.status === 'committed' && ref?.key);
+      const rows = await mapWithConcurrency(refs, async ref => {
+        const memory = await storage.getJson(ref.key, null);
+        if (!memory || memory.status !== 'committed' || string(memory.scopeKey || '') !== string(targetScope.scopeKey)) {
+          return { ok: false, vector: false, reason: 'memory_missing' };
+        }
+        const startTurn = Number(ref?.turnRange?.start || memory?.turnRange?.start || 0);
+        const batch = startTurn > 0 ? batchForStart(targetPairs, startTurn) : [];
+        const expectedDigest = batch.length === BATCH_SIZE ? sourceDigest(batch) : '';
+        if (!expectedDigest || string(memory.sourceDigest || '') !== expectedDigest || string(ref.sourceDigest || '') !== expectedDigest) {
+          return { ok: false, vector: false, reason: 'target_source_identity_mismatch' };
+        }
+        const vectorKey = string(memory?.embedding?.vectorKey || '');
+        if (memory?.embedding?.status === 'ready' && vectorKey) {
+          const vector = await storage.getJson(vectorKey, null);
+          if (!projectionHasVectorPayload(vector)) return { ok: false, vector: false, reason: 'vector_missing' };
+          return { ok: true, vector: true, reason: 'ok' };
+        }
+        if (memory?.embedding?.status === 'ready' && !vectorKey) return { ok: false, vector: false, reason: 'ready_vector_key_missing' };
+        return { ok: true, vector: false, reason: 'ok' };
+      }, 8);
+      const expectedMemories = Math.max(0, Number(expected.memories || 0) || 0);
+      const expectedInherited = Math.max(0, Number(expected.inheritedMemories || 0) || 0);
+      const inherited = asArray(manifest.inheritedMemories).filter(ref => ref?.status === 'committed');
+      const rowsOk = rows.every(row => row?.ok === true);
+      const countsOk = refs.length === expectedMemories && inherited.length === expectedInherited;
+      const markerOk = string(manifest?.nativeChatCopy?.sourceScopeKey || '') === string(expected.sourceScopeKey || '')
+        && string(manifest?.nativeChatCopy?.targetScopeKey || '') === string(targetScope.scopeKey);
+      return {
+        verified: rowsOk && countsOk && markerOk,
+        durable: rowsOk && countsOk && markerOk,
+        reason: rowsOk && countsOk && markerOk ? 'native_copy_storage_verified' : 'native_copy_storage_verification_failed',
+        memories: refs.length,
+        inheritedMemories: inherited.length,
+        vectors: rows.filter(row => row?.vector === true).length,
+        diagnostics: { rowsOk, countsOk, markerOk, failures: rows.filter(row => row?.ok !== true).slice(0, 8) }
+      };
+    };
+
     const cloneNativeChatCopyStorage = async (context, sourceCandidate) => {
       const targetScope = context.scope;
       const targetPairs = buildPairs(context.chat);
       const sourceScope = sourceCandidate.scope;
-      const sourceManifest = await loadManifest(sourceScope, buildPairs(sourceCandidate.chat).length);
+      const sourcePairsForCopy = buildPairs(sourceCandidate.chat);
+      const sourceManifest = await loadManifest(sourceScope, sourcePairsForCopy.length);
       const targetLoaded = await storage.getJson(key.manifest(targetScope), null);
       const targetManifest = targetLoaded ? await loadManifest(targetScope, targetPairs.length) : defaultManifest(targetScope, targetPairs.length);
       if (nativeCopyManifestHasData(targetManifest)) return { ok: false, skipped: true, reason: 'target_not_empty' };
@@ -27234,16 +27790,22 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const copiedMemories = {};
       const copiedInherited = [];
       let vectorCount = 0;
+      let reboundMessageIdBatches = 0;
       try {
         for (const [slot, sourceRef] of Object.entries(asObject(sourceManifest.memories))) {
           if (sourceRef?.status !== 'committed' || !sourceRef?.key) continue;
           const startTurn = Number(sourceRef?.turnRange?.start || slot || 0);
+          const sourceBatch = startTurn > 0 ? batchForStart(sourcePairsForCopy, startTurn) : [];
           const targetBatch = startTurn > 0 ? batchForStart(targetPairs, startTurn) : [];
-          if (targetBatch.length !== BATCH_SIZE) continue;
+          if (sourceBatch.length !== BATCH_SIZE || targetBatch.length !== BATCH_SIZE) continue;
+          const sourceCanonicalDigest = sourceDigest(sourceBatch);
           const targetDigest = sourceDigest(targetBatch);
-          if (!targetDigest || string(sourceRef.sourceDigest || '') !== targetDigest) continue;
+          const sourceContentDigest = nativeCopyBatchContentDigest(sourceBatch);
+          const targetContentDigest = nativeCopyBatchContentDigest(targetBatch);
+          if (!sourceCanonicalDigest || !targetDigest || sourceContentDigest !== targetContentDigest) continue;
+          if (string(sourceRef.sourceDigest || '') !== sourceCanonicalDigest) continue;
           const sourceMemory = await storage.getJson(sourceRef.key, null);
-          if (!sourceMemory || sourceMemory.status !== 'committed' || string(sourceMemory.sourceDigest || '') !== targetDigest) continue;
+          if (!sourceMemory || sourceMemory.status !== 'committed' || string(sourceMemory.sourceDigest || '') !== sourceCanonicalDigest) continue;
           const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
           const memoryKey = key.memory(targetScope, startTurn, revision);
           const history = [];
@@ -27265,8 +27827,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           const memory = await cloneNativeCopyMemoryRecord(
             sourceMemory, targetScope, memoryKey,
             profileId => key.vector(targetScope, sourceMemory.memoryId, revision, profileId),
-            sourceScope.scopeKey, writtenKeys
+            sourceScope.scopeKey, writtenKeys,
+            {
+              rebindCurrent: true,
+              targetSourceDigest: targetDigest,
+              targetSourcePairs: sourcePairs(targetBatch)
+            }
           );
+          if (sourceCanonicalDigest !== targetDigest) reboundMessageIdBatches += 1;
           if (memory.embedding?.vectorKey) vectorCount += 1;
           const targetRef = {
             ...clone(sourceRef),
@@ -27330,6 +27898,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           ...targetManifest,
           scopeKey: targetScope.scopeKey, characterId: targetScope.characterId, chatId: targetScope.chatId,
           frontiers: { observedTurn: targetPairs.length, committedTurn },
+          branchGuard: normalizeBranchGuard({
+            schema: BRANCH_GUARD_SCHEMA,
+            status: BRANCH_GUARD_READY,
+            batchSignatures: branchBatchSignaturesForPairs(targetPairs),
+            verifiedStarts: [],
+            observedTurns: completeBatchStarts(targetPairs).length * BATCH_SIZE,
+            completeBatches: completeBatchStarts(targetPairs).length,
+            lastFullAuditAt: Date.now(),
+            updatedAt: copiedAt
+          }),
           memories: copiedMemories, inheritedMemories: copiedInherited,
           archiveRef: normalizeLibraArchiveRef(sourceManifest.archiveRef),
           inFlight: null,
@@ -27346,7 +27924,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             archiveId: string(sourceManifest.archiveRef?.archiveId || ''),
             archiveRecords: Math.max(0, Number(sourceManifest.archiveRef?.recordCount || 0) || 0),
             physicalInheritedCopies: copiedInherited.filter(ref => ref?.archiveShared !== true).length,
-            vectors: vectorCount, copiedAt
+            vectors: vectorCount,
+            contentIdentityVersion: 2,
+            reboundMessageIdBatches,
+            durableVerified: false,
+            copiedAt
           },
           updatedAt: copiedAt
         };
@@ -27358,13 +27940,36 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           || string(persistedManifest?.nativeChatCopy?.targetScopeKey) !== string(targetScope.scopeKey)) {
           throw new Error('LIBRA native chat-copy manifest durable readback failed.');
         }
+        const copyVerification = await verifyNativeChatCopyStorage(targetScope, targetPairs, {
+          sourceScopeKey: sourceScope.scopeKey,
+          memories: copiedCurrentRefs.length,
+          inheritedMemories: copiedInherited.length
+        });
+        if (copyVerification.verified !== true || copyVerification.durable !== true) {
+          throw new Error(`LIBRA native chat-copy durable verification failed: ${string(copyVerification.reason || 'unknown')}`);
+        }
+        persistedManifest.nativeChatCopy = {
+          ...asObject(persistedManifest.nativeChatCopy),
+          durableVerified: true,
+          verifiedMemories: copyVerification.memories,
+          verifiedInheritedMemories: copyVerification.inheritedMemories,
+          verifiedVectors: copyVerification.vectors,
+          verifiedAt: nowIso()
+        };
+        await saveManifest(targetScope, persistedManifest);
+        const finalManifest = await storage.getJson(key.manifest(targetScope), null);
+        if (finalManifest?.nativeChatCopy?.durableVerified !== true
+          || string(finalManifest?.nativeChatCopy?.sourceScopeKey || '') !== string(sourceScope.scopeKey)
+          || string(finalManifest?.nativeChatCopy?.targetScopeKey || '') !== string(targetScope.scopeKey)) {
+          throw new Error('LIBRA native chat-copy verification marker durable readback failed.');
+        }
         for (const startTurn of Object.keys(copiedMemories).map(Number).filter(Number.isFinite)) {
           try { await storage.remove(key.work(targetScope, startTurn)); } catch (_) {}
         }
         state.recallCatalogCache.delete(string(targetScope.scopeKey));
-        state.lastNativeCopy = clone(manifest.nativeChatCopy);
-        Runtime.lastNativeChatCopy = clone(manifest.nativeChatCopy);
-        return { ok: true, skipped: false, ...clone(manifest.nativeChatCopy) };
+        state.lastNativeCopy = clone(finalManifest.nativeChatCopy);
+        Runtime.lastNativeChatCopy = clone(finalManifest.nativeChatCopy);
+        return { ok: true, skipped: false, verified: true, durable: true, ...clone(finalManifest.nativeChatCopy) };
       } catch (error) {
         try {
           if (targetLoaded) await storage.setJson(key.manifest(targetScope), targetLoaded);
@@ -27574,7 +28179,6 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const parentRefs = asArray(parent?.memoryRefs);
       const parentIds = new Set(parentRefs.map(libraArchiveRefIdentity));
       const pending = [];
-      let refMetadataChanged = false;
       for (let index = 0; index < refs.length; index += 1) {
         const sourceRef = refs[index];
         const knownCanonicalId = string(sourceRef?.archiveCanonicalId || '');
@@ -27590,16 +28194,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (Number(sourceRef.revision || 0) > 0 && Number(sourceMemory.revision || 0) !== Number(sourceRef.revision || 0)) throw new Error(`LIBRA archive source revision changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
         if (sourceRef.sourceDigest && string(sourceMemory.sourceDigest || '') !== string(sourceRef.sourceDigest)) throw new Error(`LIBRA archive source transcript digest changed: ${string(sourceRef.memoryId || sourceRef.key)}`);
         const canonicalId = libraArchiveMemoryIdentity(sourceMemory);
-        if (!sourceRef.archiveCanonicalId) {
-          sourceRef.archiveCanonicalId = canonicalId;
-          refMetadataChanged = true;
-        }
         if (parentIds.has(canonicalId)) continue;
         pending.push({ sourceRef, sourceMemory, canonicalId });
       }
       if (!pending.length && existingRef) {
-        manifest.archiveRef = existingRef;
-        if (refMetadataChanged) await saveManifest(context.scope, manifest);
         return { archiveRef: existingRef, archive: parent.archive, memoryRefs: parentRefs, changed: false, deltaRecords: 0 };
       }
 
@@ -27607,9 +28205,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const layerSeed = pending.map(item => item.canonicalId).sort().join('|');
       const archiveId = `la_${stableDraftHash(`${existingRef?.archiveId || ''}|${context.scope.scopeKey}|${generation}|${layerSeed}`)}`;
       const manifestKey = key.archiveManifest(archiveId);
-      const deltaRefs = [];
-      for (let index = 0; index < pending.length; index += 1) {
-        const { sourceRef, sourceMemory, canonicalId } = pending[index];
+      const deltaRows = await mapWithConcurrency(pending, async item => {
+        const { sourceRef, sourceMemory, canonicalId } = item;
         const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
         const archiveMemoryId = `arc_${canonicalId.slice(0, 32)}`;
         const memoryKey = key.archiveMemory(archiveId, canonicalId, revision);
@@ -27652,7 +28249,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           }
         }
         await storage.setJson(memoryKey, memory);
-        deltaRefs.push({
+        return {
           ...memoryRefFromStoredMemory(memory, memoryKey, [], sourceRef.createdAt || memory.createdAt || ''),
           key: memoryKey,
           status: 'committed',
@@ -27665,12 +28262,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           vectorKey: archiveVectorKey,
           inheritedSessionHistory: true,
           authorityClass: 'permanent_predecessor'
-        });
-        sourceRef.archiveCanonicalId = canonicalId;
-        sourceRef.archivedInArchiveId = archiveId;
-        sourceRef.archivedAt = sourceRef.archivedAt || nowIso();
-        refMetadataChanged = true;
-      }
+        };
+      }, 3);
+      const deltaRefs = deltaRows.filter(Boolean);
+
       const memoryRefs = mergeLibraArchiveMemoryRefs(parentRefs, deltaRefs);
       const digestValue = libraArchiveRefsDigest(memoryRefs);
       const deltaDigest = libraArchiveRefsDigest(deltaRefs);
@@ -27712,8 +28307,6 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         updatedAt: archive.updatedAt,
         parentRef: existingRef ? libraArchiveRefPointer(existingRef) : null
       };
-      manifest.archiveRef = archiveRef;
-      await saveManifest(context.scope, manifest);
       return { archiveRef, archive, memoryRefs, changed: true, deltaRecords: deltaRefs.length };
     };
 
@@ -27739,6 +28332,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       vectorCount: Number(memory?.embedding?.vectorCount || 0),
       pipelineStatus: memory?.pipeline?.status || 'complete',
       failedItoStages: asArray(memory?.pipeline?.failedItoStages).map(item => string(item?.stage || item)).filter(Boolean),
+      evidenceStatus: string(memory?.sourceEvidenceValidation?.status || ''),
+      evidenceResolutionStatus: string(memory?.pipeline?.evidenceResolution?.status || ''),
       sessionEpoch: Number.isFinite(Number(memory?.sessionEpoch)) ? Number(memory.sessionEpoch) : 0,
       inheritedSessionHistory: memory?.inheritedSessionHistory === true,
       authorityClass: string(memory?.authorityClass || ''),
@@ -27775,21 +28370,114 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       return { startTurn, revision: Number(memory.revision || 0), sourceDigest: currentDigest, runId: memory.runId || '', key: matchedEntry.key };
     };
 
+    const yieldBranchAudit = () => new Promise(resolve => setTimeout(resolve, 0));
+
+    const scheduleDeepBranchAudit = (context, pairs, delayMs = BRANCH_DEEP_AUDIT_DELAY_MS) => {
+      const scope = clone(asObject(context?.scope));
+      const scopeKey = string(scope.scopeKey || '');
+      if (!scopeKey || state.disposed || state.branchAuditInFlight.has(scopeKey)) return false;
+      const timerKey = `branch_audit:${scopeKey}`;
+      if (state.timers.has(timerKey)) return false;
+      const timer = setTimeout(() => {
+        state.timers.delete(timerKey);
+        if (state.disposed || state.branchAuditInFlight.has(scopeKey)) return;
+        const task = enqueue(scopeKey, async () => {
+          const liveContext = await resolveContext();
+          if (state.disposed || string(liveContext?.scope?.scopeKey || '') !== scopeKey) return false;
+          const livePairs = buildPairs(liveContext.chat);
+          await reconcileCanonicalBranchBeforeRecall(liveContext, {
+            pairs: livePairs, full: true, background: true, scheduleDeep: false, reason: 'background_deep_audit'
+          });
+          return true;
+        }).catch(error => { warn('LIBRA background branch audit failed', error); return false; }).finally(() => {
+          state.branchAuditInFlight.delete(scopeKey);
+        });
+        state.branchAuditInFlight.set(scopeKey, task);
+      }, Math.max(0, Number(delayMs || 0)));
+      state.timers.set(timerKey, timer);
+      return true;
+    };
+
     const reconcileCanonicalBranchBeforeRecall = async (context, options = {}) => {
-      const pairs = buildPairs(context.chat);
-      const manifest = await loadManifest(context.scope, pairs.length);
+      const pairs = Array.isArray(options.pairs) ? options.pairs : buildPairs(context.chat);
+      const manifest = options.manifest && typeof options.manifest === 'object'
+        ? options.manifest
+        : await loadManifest(context.scope, pairs.length);
       const starts = completeBatchStarts(pairs);
       const startSet = new Set(starts.map(Number));
-      const digestByStart = new Map(starts.map(startTurn => [Number(startTurn), sourceDigest(batchForStart(pairs, startTurn))]));
+      const scopeKey = string(context?.scope?.scopeKey || manifest?.scopeKey || '');
+      const currentBatchSignatures = branchBatchSignaturesForPairs(pairs);
+      const persistedGuard = normalizeBranchGuard(manifest.branchGuard);
+      const previousCache = state.branchPairSignatureCache.get(scopeKey) || null;
+      const cachedSignatures = asArray(previousCache?.batchSignatures);
+      const previousSignatures = cachedSignatures.length ? cachedSignatures : asArray(persistedGuard.batchSignatures);
+      const previousStatus = string(previousCache?.status || persistedGuard.status || BRANCH_GUARD_BOOTSTRAP_PENDING);
+      const fullAudit = options.full === true;
+      const startsToCheck = new Set();
+      const signatureChangedStarts = changedBranchStarts(previousSignatures, currentBatchSignatures);
+
+      if (fullAudit) {
+        starts.forEach(startTurn => startsToCheck.add(Number(startTurn)));
+      } else if (previousSignatures.length) {
+        signatureChangedStarts.forEach(startTurn => startsToCheck.add(Number(startTurn)));
+        if (previousStatus !== BRANCH_GUARD_READY) {
+          const tailStart = starts.at(-1);
+          const previousTailStart = starts.length > 1 ? starts.at(-2) : 0;
+          if (tailStart) startsToCheck.add(Number(tailStart));
+          if (previousTailStart) startsToCheck.add(Number(previousTailStart));
+        }
+      } else {
+        // Legacy manifests do not yet have a persistent baseline. Verify only the two
+        // live tail batches synchronously and suppress older current-scope memories
+        // from recall until the yielded full audit establishes a trusted baseline.
+        const tailStart = starts.at(-1);
+        const previousTailStart = starts.length > 1 ? starts.at(-2) : 0;
+        if (tailStart) startsToCheck.add(Number(tailStart));
+        if (previousTailStart) startsToCheck.add(Number(previousTailStart));
+      }
+      if (manifest.inFlight?.startTurn) startsToCheck.add(Number(manifest.inFlight.startTurn));
+
       const changes = [];
       const reactivated = [];
       let changed = false;
+      let checkedBatches = 0;
+      const digestByStart = new Map();
+      const currentDigestFor = startTurn => {
+        const numeric = Number(startTurn || 0);
+        if (digestByStart.has(numeric)) return digestByStart.get(numeric);
+        const batch = batchForStart(pairs, numeric);
+        const value = batch.length === BATCH_SIZE ? sourceDigest(batch) : '';
+        digestByStart.set(numeric, value);
+        checkedBatches += 1;
+        return value;
+      };
+      const verifiedStarts = new Set(asArray(persistedGuard.verifiedStarts).map(Number));
+      for (const changedStart of signatureChangedStarts) verifiedStarts.delete(Number(changedStart));
 
-      for (const [keyName, ref] of Object.entries(asObject(manifest.memories))) {
+      const memoryEntries = asObject(manifest.memories);
+      const visitStarts = fullAudit
+        ? new Set(Object.entries(memoryEntries).map(([keyName, ref]) => Number(ref?.turnRange?.start || keyName || 0)).filter(Boolean))
+        : new Set(Array.from(startsToCheck).map(Number).filter(Boolean));
+      // A legacy manifest without fingerprints may be opened after a large rollback.
+      // Only in that one bootstrap case scan keys for removed batches; normal requests
+      // visit changed/tail/in-flight starts directly without walking every memory ref.
+      if (!fullAudit && !previousSignatures.length && Number(manifest.frontiers?.observedTurn || 0) > pairs.length) {
+        for (const [keyName, ref] of Object.entries(memoryEntries)) {
+          const startTurn = Number(ref?.turnRange?.start || keyName || 0);
+          if (startTurn && !startSet.has(startTurn)) visitStarts.add(startTurn);
+        }
+      }
+      const visitEntries = Array.from(visitStarts)
+        .sort((a, b) => a - b)
+        .map(startTurn => [String(startTurn), memoryRefForStart(manifest, startTurn)])
+        .filter(([, ref]) => !!ref);
+
+      let iteration = 0;
+      for (const [keyName, ref] of visitEntries) {
         const startTurn = Number(ref?.turnRange?.start || keyName || 0);
         if (!startTurn) continue;
-        const currentDigest = digestByStart.get(startTurn) || '';
         if (!startSet.has(startTurn)) {
+          verifiedStarts.delete(startTurn);
           if (ref?.status === 'committed') {
             ref.status = 'inactive';
             ref.inactiveReason = 'rollback_or_incomplete_batch';
@@ -27799,6 +28487,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           }
           continue;
         }
+        if (!fullAudit && !startsToCheck.has(startTurn)) continue;
+        const currentDigest = currentDigestFor(startTurn);
         if (string(ref?.sourceDigest || '') === currentDigest) {
           if (ref?.status !== 'committed') {
             ref.status = 'committed';
@@ -27809,26 +28499,31 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             reactivated.push({ startTurn, revision: Number(ref.revision || 0), sourceDigest: currentDigest, runId: '' });
             changed = true;
           }
-          continue;
+        } else {
+          const restored = await reactivateHistoricalRevision(context, manifest, startTurn, ref, currentDigest);
+          if (restored) {
+            changes.push({ startTurn, action: 'reactivated_history', sourceDigest: currentDigest, revision: restored.revision });
+            reactivated.push(restored);
+            changed = true;
+          } else if (ref?.status === 'committed') {
+            ref.status = 'inactive';
+            ref.inactiveReason = 'reroll_or_branch_digest_changed';
+            ref.inactiveAt = nowIso();
+            changes.push({ startTurn, action: 'inactive', reason: ref.inactiveReason, previousDigest: ref.sourceDigest || '', currentDigest });
+            changed = true;
+          }
         }
-        const restored = await reactivateHistoricalRevision(context, manifest, startTurn, ref, currentDigest);
-        if (restored) {
-          changes.push({ startTurn, action: 'reactivated_history', sourceDigest: currentDigest, revision: restored.revision });
-          reactivated.push(restored);
-          changed = true;
-        } else if (ref?.status === 'committed') {
-          ref.status = 'inactive';
-          ref.inactiveReason = 'reroll_or_branch_digest_changed';
-          ref.inactiveAt = nowIso();
-          changes.push({ startTurn, action: 'inactive', reason: ref.inactiveReason, previousDigest: ref.sourceDigest || '', currentDigest });
-          changed = true;
-        }
+        const active = memoryRefForStart(manifest, startTurn);
+        if (active?.status === 'committed' && string(active.sourceDigest || '') === currentDigest) verifiedStarts.add(startTurn);
+        else verifiedStarts.delete(startTurn);
+        iteration += 1;
+        if (fullAudit && (iteration & 3) === 0) await yieldBranchAudit();
       }
 
       if (manifest.inFlight) {
         const inFlightStart = Number(manifest.inFlight.startTurn || 0);
         const expectedDigest = string(manifest.inFlight.sourceDigest || '');
-        const currentDigest = digestByStart.get(inFlightStart) || '';
+        const currentDigest = inFlightStart && startSet.has(inFlightStart) ? currentDigestFor(inFlightStart) : '';
         if (!inFlightStart || !currentDigest || currentDigest !== expectedDigest) {
           const staleRunId = string(manifest.inFlight.runId || '');
           const staleReason = !currentDigest ? 'rollback_removed_inflight_batch' : 'reroll_changed_inflight_batch';
@@ -27844,6 +28539,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               await storage.setJson(key.run(context.scope, staleRunId), staleRun);
             }
           }
+          verifiedStarts.delete(inFlightStart);
           changes.push({ startTurn: inFlightStart, action: 'discard_inflight', reason: staleReason, expectedDigest, currentDigest });
           manifest.inFlight = null;
           manifest.stats.staleDiscards = Number(manifest.stats.staleDiscards || 0) + 1;
@@ -27853,10 +28549,63 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
       manifest.frontiers.observedTurn = pairs.length;
       manifest.frontiers.committedTurn = Math.max(0, ...Object.values(manifest.memories).filter(ref => ref?.status === 'committed').map(ref => Number(ref.turnRange?.end || 0)));
-      if (changed) await saveManifest(context.scope, manifest);
-      const result = { changed, changes, reactivated, observedTurns: pairs.length, completeBatches: starts.length, reason: string(options.reason || 'before_request') };
+      const now = Date.now();
+      // A ready zero-batch baseline is still a valid baseline. This matters for a
+      // newly started or handoff target session before its first complete five-turn batch.
+      const hadTrustedBaseline = previousStatus === BRANCH_GUARD_READY;
+      const nextStatus = fullAudit || hadTrustedBaseline ? BRANCH_GUARD_READY : BRANCH_GUARD_BOOTSTRAP_PENDING;
+      const lastFullAuditAt = fullAudit
+        ? now
+        : Math.max(Number(previousCache?.lastFullAuditAt || 0), Number(persistedGuard.lastFullAuditAt || 0));
+      const nextGuard = normalizeBranchGuard({
+        schema: BRANCH_GUARD_SCHEMA,
+        status: nextStatus,
+        batchSignatures: currentBatchSignatures,
+        verifiedStarts: nextStatus === BRANCH_GUARD_READY
+          ? []
+          : Array.from(verifiedStarts).filter(startTurn => startSet.has(Number(startTurn))),
+        observedTurns: starts.length * BATCH_SIZE,
+        completeBatches: starts.length,
+        lastFullAuditAt,
+        updatedAt: persistedGuard.updatedAt
+      });
+      const branchGuardComparable = value => ({ ...normalizeBranchGuard(value), updatedAt: '' });
+      const branchGuardChanged = digest(branchGuardComparable(persistedGuard)) !== digest(branchGuardComparable(nextGuard));
+      if (branchGuardChanged) nextGuard.updatedAt = nowIso();
+      manifest.branchGuard = nextGuard;
+      if (changed || branchGuardChanged) await saveManifest(context.scope, manifest);
+      state.branchPairSignatureCache.set(scopeKey, {
+        batchSignatures: currentBatchSignatures.slice(),
+        status: nextGuard.status,
+        verifiedStarts: nextGuard.verifiedStarts.slice(),
+        observedTurns: pairs.length,
+        at: now,
+        lastFullAuditAt
+      });
+      const deepAuditDue = !fullAudit && options.scheduleDeep !== false
+        && (nextGuard.status !== BRANCH_GUARD_READY || !lastFullAuditAt || now - lastFullAuditAt >= BRANCH_DEEP_AUDIT_INTERVAL_MS);
+      if (deepAuditDue) {
+        scheduleDeepBranchAudit(
+          context,
+          pairs,
+          nextGuard.status === BRANCH_GUARD_BOOTSTRAP_PENDING ? BRANCH_BOOTSTRAP_AUDIT_DELAY_MS : BRANCH_DEEP_AUDIT_DELAY_MS
+        );
+      }
+      const trustedCurrentRefs = listRecallCurrentMemoryRefs(manifest).length;
+      const totalCurrentRefs = listCurrentMemoryRefs(manifest).length;
+      const result = {
+        changed, changes, reactivated, observedTurns: pairs.length, completeBatches: starts.length,
+        checkedBatches, fastPath: !fullAudit, fullAudit, deepAuditScheduled: deepAuditDue,
+        branchGuardStatus: nextGuard.status,
+        persistentBaseline: nextGuard.status === BRANCH_GUARD_READY,
+        signatureBaselineAvailable: previousStatus === BRANCH_GUARD_READY || previousSignatures.length > 0,
+        trustedCurrentRefs,
+        recallSuppressedPendingAudit: Math.max(0, totalCurrentRefs - trustedCurrentRefs),
+        changedBatchStarts: signatureChangedStarts.slice(),
+        reason: string(options.reason || (fullAudit ? 'deep_audit' : 'before_request'))
+      };
       Runtime.lastBranchReconcile = clone(result);
-      return result;
+      return { ...result, manifest };
     };
 
     const verifyBatchStillCurrent = async (expectedContext, startTurn, expectedDigest) => {
@@ -28593,10 +29342,93 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       `USER: ${string(pair?.user?.text || '')}`,
       `ASSISTANT: ${string(pair?.assistant?.text || '')}`
     ].join('\n')).join('\n\n');
+    const SOURCE_EVIDENCE_DURABLE_GROUPS = Object.freeze([
+      Object.freeze({ id: 'romance_start', pattern: /(?:연인(?:이|으로)?\s*(?:되었|됐다|되었다|됨|발전했|발전하였다|발전하게\s*(?:되었|됐다|되었다))|사귀기\s*(?:시작했|시작하였다|시작함|시작됐|시작되었다)|사랑하게\s*(?:되었|됐다|되었다|됨)|호감.{0,16}(?:생겼|생긴|생기기\s*시작|확정됐|확정되었)|became\s+(?:lovers?|partners?)|started\s+dating|fell\s+in\s+love)/i }),
+      Object.freeze({ id: 'marriage_or_pregnancy', pattern: /(?:(?:결혼|약혼|임신)(?:을)?\s*(?:했|하였다|하게\s*(?:되었|됐다|되었다))|결혼식(?:을)?\s*올렸|부부가\s*(?:되었|됐다|되었다)|got\s+(?:married|engaged|pregnant))/i }),
+      Object.freeze({ id: 'death', pattern: /(?:사망(?:했|하였다)|죽었|숨졌|살해당|died|was\s+killed)/i }),
+      Object.freeze({ id: 'breakup', pattern: /(?:헤어졌|이별(?:을)?\s*(?:했|하였다|하게\s*(?:되었|됐다|되었다))|관계를\s*(?:끝냈|정리했)|broke\s+up)/i }),
+      Object.freeze({ id: 'ownership', pattern: /(?:소유권.{0,18}(?:이전됐|이전되었|양도했|넘겼|취득했)|ownership.{0,18}(?:transferred|changed))/i }),
+      Object.freeze({ id: 'commitment', pattern: /(?:(?:약속|맹세)(?:을|를)?\s*(?:했|하였다|함)|(?:계약|합의)(?:했|하였다|함)|계약(?:을)?\s*(?:체결|수락|완료)(?:했|하였다|되었|됐다)?|합의(?:가)?\s*(?:성립|확정|완료)(?:했|하였다|되었|됐다)?|(?:contract|agreement).{0,18}(?:accepted|completed|finalized)|promised|made\s+a\s+promise|swore)/i }),
+      Object.freeze({ id: 'knowledge_change', pattern: /(?:(?:비밀|정체).{0,18}(?:알게\s*(?:되었|됐다|되었다)|깨달았|밝혀졌)|learned.{0,18}(?:secret|identity))/i }),
+      Object.freeze({ id: 'relationship_change', pattern: /(?:관계.{0,18}(?:확정됐|확정되었|변화했|변화하였다|발전했|발전하였다)|relationship.{0,18}(?:changed|confirmed|developed))/i })
+    ]);
+    const sourceEvidenceDurableGroups = value => SOURCE_EVIDENCE_DURABLE_GROUPS
+      .filter(definition => definition.pattern.test(string(value || '')))
+      .map(definition => definition.id);
+    const SOURCE_EVIDENCE_UNCERTAINTY_RE = /(?:불확실|추정|추측|가능성|소문|주장|의심|의혹|가정|전해(?:짐|졌)|라고\s*(?:생각|믿)|아직\s*모름|미정|확인되지|확정되지|검증되지|성립되지|수락되지|완료되지|변화\s*없|(?:변화|발전|확정|성립|수락|완료|체결).{0,10}(?:없|않|되지)|(?:결혼|약혼|임신|사망|이별|헤어짐|계약|합의|약속).{0,10}(?:아니|않|되지|미정)|(?:알게|밝혀).{0,10}(?:않|되지)|알\s*수\s*없|unknown|uncertain|unconfirmed|unverified|suspected|rumou?r|alleged|reportedly|possibly|may\b|might\b|thought\s+that|believed\s+that|no\s+(?:change|confirmation)|not\s+(?:changed|confirmed|accepted|completed|married|engaged|pregnant|known|revealed))/i;
+    const SOURCE_EVIDENCE_ATTRIBUTED_QUOTE_RE = /(?:말했|말하|대답|물었|묻|외쳤|속삭|전했|답했|언급|선언|약속|said|asked|replied|answered|whispered|shouted|told|stated|declared|promised)/i;
+    const SOURCE_EVIDENCE_FUTURE_DRAFT_RE = /(?:다음\s*응답|이제\s*장면을\s*작성|RP\s*응답\s*초안|continue\s+the\s+scene|write\s+the\s+next\s+response)/i;
+    const SOURCE_EVIDENCE_GENERIC_ACTORS = new Set([
+      '두 사람', '두사람', '둘', '그들', '그녀', '그', '상대', '상대방', '인물', '사람',
+      '비밀', '정체', '관계', '약속', '맹세', '계약', '합의', '소유권', '결혼', '약혼', '임신',
+      '사망', '죽음', '이별', '호감', '사랑', '연인', '부부', '상태', '사건',
+      'both', 'they', 'them', 'he', 'she', 'the two', 'each other', 'secret', 'identity',
+      'relationship', 'promise', 'contract', 'agreement', 'ownership', 'marriage', 'pregnancy', 'death'
+    ]);
+    const sourceEvidenceActorAnchors = value => {
+      const source = String(value || '').normalize('NFKC');
+      const koreanSubjects = Array.from(source.matchAll(/([가-힣A-Za-z][가-힣A-Za-z0-9·'’-]{1,24})(?=\s*(?:은|는|이|가|에게|한테|와|과)(?:\s|[,.:;!?。！？]|$))/g), match => match[1]);
+      const capitalized = source.match(/\b[A-Z][A-Za-z0-9'’-]{1,30}(?:\s+[A-Z][A-Za-z0-9'’-]{1,30}){0,2}\b/g) || [];
+      return uniqueAnchors([...koreanSubjects, ...capitalized], 24)
+        .filter(anchor => !SOURCE_EVIDENCE_GENERIC_ACTORS.has(normalizeAnchor(anchor)));
+    };
+    const sourceEvidenceDurableUnits = value => {
+      const out = [];
+      const units = (string(value || '').match(/[^.!?。！？;；\n]+[.!?。！？;；]?/g) || [string(value || '')])
+        .map(string)
+        .filter(Boolean);
+      for (const unit of units) {
+        if (SOURCE_EVIDENCE_UNCERTAINTY_RE.test(unit)) continue;
+        const groups = sourceEvidenceDurableGroups(unit);
+        if (!groups.length) continue;
+        out.push({ text: unit, groups, actors: sourceEvidenceActorAnchors(unit), tokens: new Set(tokenize(unit)) });
+      }
+      return out;
+    };
+
+    const sourceEvidenceClaimUnits = memoryText => {
+      const sections = splitMemorySections(memoryText);
+      const order = ['summary', 'chronology', 'characters_relations', 'world_scene', 'narrative_open_threads', 'facts_uncertainty'];
+      const out = [];
+      for (const section of order) {
+        const body = string(sections[section] || '');
+        if (!body) continue;
+        const paragraphs = body.split(/\n{2,}|(?=^\s*[-*•]\s+)/gm).map(value => string(value).replace(/^[-*•]\s*/, '')).filter(Boolean);
+        for (const paragraph of paragraphs) {
+          // Claims must be judged at sentence/clause granularity. Treating a short
+          // multi-sentence paragraph as one unit can let a supported sentence mask a
+          // separate unsupported state change in the same paragraph.
+          const units = (paragraph.match(/[^.!?。！？;；\n]+[.!?。！？;；]?/g) || [paragraph])
+            .map(string)
+            .filter(Boolean);
+          for (const textValue of units) {
+            if (textValue.length < 12) continue;
+            out.push({ section, text: textValue });
+          }
+        }
+      }
+      return out.slice(0, 240);
+    };
+
+    const claimEvidenceCoverage = (claimText, sourceTokens) => {
+      const tokens = tokenize(claimText).filter(token => token.length >= 2 && !ANCHOR_STOPWORDS.has(token)).slice(0, 96);
+      if (!tokens.length) return { coverage: 1, tokens: 0, hits: 0, unsupported: [] };
+      const supported = tokens.filter(token => sourceTokens.has(token));
+      const unsupported = tokens.filter(token => !sourceTokens.has(token));
+      return {
+        coverage: supported.length / tokens.length,
+        tokens: tokens.length,
+        hits: supported.length,
+        unsupported: unsupported.slice(0, 16)
+      };
+    };
+
     const validateCanonicalMemorySourceEvidence = (memoryText, batch, recallKeyValues = []) => {
       const sourceText = sourceEvidenceTextForBatch(batch);
       const sourceComparable = normalizeLexicalText(sourceText);
       const sourceTokens = new Set(tokenize(sourceText));
+      const sourceDurableUnits = sourceEvidenceDurableUnits(sourceText);
+      const sourceDurableGroups = new Set(sourceDurableUnits.flatMap(unit => unit.groups));
       const anchors = anchorsFromText(memoryText);
       const unsupportedNumbers = asArray(anchors.numbers).filter(value => !sourceComparable.includes(normalizeLexicalText(value))).slice(0, 16);
       const unsupportedQuotes = asArray(anchors.quoted)
@@ -28617,23 +29449,110 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       });
       const supportedRecallKeys = recallKeySupport.filter(item => item.supported).map(item => item.key).slice(0, 64);
       const unsupportedRecallKeys = recallKeySupport.filter(item => !item.supported).map(item => item.key).slice(0, 32);
+      const highRiskClaims = [];
+      const mediumRiskClaims = [];
+      for (const unit of sourceEvidenceClaimUnits(memoryText)) {
+        const comparable = normalizeLexicalText(unit.text);
+        const evidence = claimEvidenceCoverage(unit.text, sourceTokens);
+        const uncertaintyMarked = SOURCE_EVIDENCE_UNCERTAINTY_RE.test(unit.text);
+        const durableGroups = sourceEvidenceDurableGroups(unit.text);
+        const durableChange = durableGroups.length > 0;
+        const numberHits = unsupportedNumbers.filter(value => comparable.includes(normalizeLexicalText(value)));
+        const quoteHits = unsupportedQuotes.filter(value => comparable.includes(normalizeLexicalText(value)));
+        const chronologyLiteralRisk = unit.section === 'chronology' && (numberHits.length || quoteHits.length);
+        const attributedQuoteRisk = quoteHits.length > 0 && SOURCE_EVIDENCE_ATTRIBUTED_QUOTE_RE.test(unit.text) && !uncertaintyMarked;
+        const claimActors = sourceEvidenceActorAnchors(unit.text);
+        const matchingDurableUnits = sourceDurableUnits.filter(sourceUnit => sourceUnit.groups.some(groupId => durableGroups.includes(groupId)));
+        let durableSupportCoverage = 0;
+        let durableGroupSupported = false;
+        for (const sourceUnit of matchingDurableUnits) {
+          const sharedActors = claimActors.filter(actor => sourceUnit.actors.some(sourceActor => (
+            sourceActor === actor
+            || (actor.length >= 2 && sourceActor.endsWith(actor))
+            || (sourceActor.length >= 2 && actor.endsWith(sourceActor))
+          )));
+          const actorsCompatible = !claimActors.length || !sourceUnit.actors.length || sharedActors.length > 0;
+          if (!actorsCompatible) continue;
+          const localEvidence = claimEvidenceCoverage(unit.text, sourceUnit.tokens);
+          durableSupportCoverage = Math.max(durableSupportCoverage, localEvidence.coverage);
+          if (localEvidence.coverage >= 0.12 || sourceComparable.includes(comparable)) {
+            durableGroupSupported = true;
+            break;
+          }
+        }
+        const durableUnsupported = durableChange && !uncertaintyMarked && !durableGroupSupported;
+        const reasons = [];
+        if (chronologyLiteralRisk) reasons.push('unsupported_chronology_literal');
+        if (attributedQuoteRisk) reasons.push('unsupported_attributed_quote');
+        if (durableUnsupported) reasons.push('unsupported_durable_state_change');
+        if (reasons.length) {
+          highRiskClaims.push({
+            section: unit.section,
+            text: compact(unit.text, 700),
+            reasons,
+            durableGroups: durableGroups.slice(),
+            sourceDurableGroups: Array.from(sourceDurableGroups),
+            claimActors,
+            durableSupportCoverage: Number(durableSupportCoverage.toFixed(4)),
+            coverage: Number(evidence.coverage.toFixed(4)),
+            unsupportedTokens: evidence.unsupported,
+            unsupportedNumbers: numberHits,
+            unsupportedQuotes: quoteHits
+          });
+        } else if ((numberHits.length || quoteHits.length) && !uncertaintyMarked) {
+          mediumRiskClaims.push({
+            section: unit.section,
+            text: compact(unit.text, 700),
+            reasons: ['unsupported_literal_outside_chronology'],
+            coverage: Number(evidence.coverage.toFixed(4)),
+            unsupportedNumbers: numberHits,
+            unsupportedQuotes: quoteHits
+          });
+        }
+        if (highRiskClaims.length >= SOURCE_EVIDENCE_HIGH_RISK_CLAIM_LIMIT) break;
+      }
+      if (SOURCE_EVIDENCE_FUTURE_DRAFT_RE.test(memoryText)) {
+        highRiskClaims.push({ section: 'full_text', text: 'future_drafting_language', reasons: ['future_drafting_language'], coverage: 0 });
+      }
+      const dedupeClaimRows = rows => {
+        const out = [];
+        const seen = new Set();
+        for (const row of asArray(rows)) {
+          const keyValue = `${normalizeLexicalText(row?.text || '')}|${asArray(row?.reasons).slice().sort().join(',')}`;
+          if (!keyValue || seen.has(keyValue)) continue;
+          seen.add(keyValue);
+          out.push(row);
+        }
+        return out;
+      };
+      const dedupedHighRiskClaims = dedupeClaimRows(highRiskClaims).slice(0, SOURCE_EVIDENCE_HIGH_RISK_CLAIM_LIMIT);
+      const dedupedMediumRiskClaims = dedupeClaimRows(mediumRiskClaims).slice(0, 16);
       const warnings = [];
       if (unsupportedNumbers.length) warnings.push('unsupported_numeric_literal');
       if (unsupportedQuotes.length) warnings.push('unsupported_quoted_literal');
       if (unsupportedRecallKeys.length) warnings.push('unsupported_recall_keys');
+      if (dedupedHighRiskClaims.length) warnings.push('high_risk_unsupported_claim');
+      const distinctiveTokenCoverage = distinctive.length ? Number((supportedDistinctive.length / distinctive.length).toFixed(4)) : 1;
+      const riskLevel = dedupedHighRiskClaims.length ? 'high'
+        : (warnings.length || mediumRiskClaims.length || distinctiveTokenCoverage < 0.24) ? 'medium'
+          : 'low';
       return {
-        schema: 'libra.source_evidence_validation.v2',
-        status: warnings.length ? 'warning' : 'ok',
+        schema: SOURCE_EVIDENCE_VALIDATION_SCHEMA,
+        status: riskLevel === 'low' ? 'ok' : riskLevel === 'high' ? 'high_risk' : 'warning',
+        riskLevel,
+        repairRecommended: riskLevel === 'high',
         warnings,
         sourceChars: sourceText.length,
         memoryChars: String(memoryText || '').length,
-        distinctiveTokenCoverage: distinctive.length ? Number((supportedDistinctive.length / distinctive.length).toFixed(4)) : 1,
+        distinctiveTokenCoverage,
         recallKeySupport,
         supportedRecallKeys,
         unsupportedRecallKeys,
         unsupportedNumbers,
         unsupportedQuotes,
-        policy: 'diagnostic_only_nonfatal'
+        highRiskClaims: dedupedHighRiskClaims,
+        mediumRiskClaims: dedupedMediumRiskClaims,
+        policy: 'selective_high_risk_repair_gate_v1'
       };
     };
 
@@ -29330,6 +30249,158 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       };
     };
 
+    const buildCanonicalEvidenceRepairPrompts = (batch, draft, validation) => {
+      const flaggedClaims = asArray(validation?.highRiskClaims).map((claim, index) => [
+        `${index + 1}. section=${string(claim?.section || 'unknown')}; reasons=${asArray(claim?.reasons).join(',') || 'high_risk'}`,
+        `claim: ${string(claim?.text || '')}`,
+        Number.isFinite(Number(claim?.coverage)) ? `lexical_support=${Number(claim.coverage).toFixed(4)}` : ''
+      ].filter(Boolean).join('\n')).join('\n\n');
+      return {
+        system: [
+          'You are the final source-evidence auditor for one LIBRA canonical long-term memory.',
+          'Return one complete corrected memory draft only, preserving every required heading and all evidence-supported information.',
+          'The exact five completed U+A turns below are the sole authority for events, actions, outcomes, newly learned information, state changes, relationship changes, promises, transfers, injuries, deaths, and numerical changes in this batch.',
+          'Static identity or pre-existing background context may remain only when it is clearly presented as prior context rather than a newly occurring change.',
+          'For each flagged claim, either preserve it only when the exact source truly supports it, rewrite it as explicitly uncertain/pending when that is what the source supports, or remove it.',
+          'Do not add a new fact, new event, future scene, prediction, or decorative canon. Preserve actor/target attribution and chronology.',
+          'Return readable prose with exactly these headings: # 종합 기억; ## 시간순 사건; ## 인물과 관계; ## 세계와 장면; ## 내러티브와 미해결 문제; ## 확정 사실과 불확실 정보; ## 회상 키워드.',
+          'No JSON, no markdown fence, no audit commentary.'
+        ].join('\n'),
+        user: [
+          `[검증 범위] TURN ${batch[0]?.turn || 0}~${batch.at(-1)?.turn || 0}`,
+          '[HIGH-RISK CLAIMS TO AUDIT]',
+          flaggedClaims || '(none listed; audit the supplied warning context conservatively)',
+          validation?.unsupportedNumbers?.length ? `[UNSUPPORTED NUMERIC LITERALS] ${asArray(validation.unsupportedNumbers).join(', ')}` : '',
+          validation?.unsupportedQuotes?.length ? `[UNSUPPORTED QUOTED LITERALS] ${asArray(validation.unsupportedQuotes).join(' | ')}` : '',
+          '',
+          PROMPT_CACHE_STABLE_START,
+          '[LIBRA 5-TURN EVIDENCE / EXACT U+A SOURCE]',
+          transcript(batch),
+          PROMPT_CACHE_STABLE_END,
+          '',
+          '[CANONICAL MEMORY DRAFT TO CORRECT]',
+          draft
+        ].filter(Boolean).join('\n')
+      };
+    };
+
+    const callCanonicalEvidenceRepair = async (batch, draft, validation) => {
+      const prompts = buildCanonicalEvidenceRepairPrompts(batch, draft, validation);
+      const startedAt = Date.now();
+      try {
+        const result = await callMemoryProvider('ariadne', prompts.system, prompts.user, {
+          temp: 0.05,
+          maxTokens: SOURCE_EVIDENCE_REPAIR_MAX_TOKENS,
+          cacheBatch: batch
+        });
+        const textValue = result?.ok === true ? stripFence(result.content || '') : '';
+        return {
+          schema: SOURCE_EVIDENCE_REPAIR_SCHEMA,
+          attempted: true,
+          ok: result?.ok === true && !!textValue,
+          reason: string(result?.reason || (textValue ? '' : 'empty_repair_output')),
+          text: textValue,
+          provider: string(result?.provider || ''),
+          model: string(result?.model || ''),
+          presetName: string(result?.presetName || ''),
+          durationMs: Date.now() - startedAt,
+          usage: clone(result?.usage || {}),
+          usageDiagnostics: clone(result?.usageDiagnostics || {}),
+          finishReason: string(result?.finishReason || ''),
+          outputBudgetTokens: Number(result?.outputBudgetTokens || 0)
+        };
+      } catch (error) {
+        return {
+          schema: SOURCE_EVIDENCE_REPAIR_SCHEMA,
+          attempted: true,
+          ok: false,
+          reason: compact(error?.message || error, 700),
+          text: '',
+          durationMs: Date.now() - startedAt
+        };
+      }
+    };
+
+    const assessCanonicalEvidenceCandidate = (textValue, batch, stageName = '') => {
+      const textValidation = validateMemoryText(textValue);
+      const missingHeadings = missingAriadneHeadings(textValue);
+      const evidenceValidation = validateCanonicalMemorySourceEvidence(textValue, batch, explicitRecallKeys(textValue));
+      return {
+        stage: string(stageName || ''),
+        text: textValidation.text,
+        valid: textValidation.valid && missingHeadings.length === 0,
+        textValidation,
+        missingHeadings,
+        evidenceValidation,
+        safe: textValidation.valid && missingHeadings.length === 0 && evidenceValidation.riskLevel !== 'high'
+      };
+    };
+
+    const resolveEvidenceSafeCanonicalMemory = async ({ batch, finalText, stageObjects = [] }) => {
+      const initial = assessCanonicalEvidenceCandidate(finalText, batch, 'final');
+      const baseResolution = {
+        schema: SOURCE_EVIDENCE_REPAIR_SCHEMA,
+        initialRisk: string(initial.evidenceValidation?.riskLevel || ''),
+        initialWarnings: asArray(initial.evidenceValidation?.warnings),
+        initialHighRiskClaims: clone(asArray(initial.evidenceValidation?.highRiskClaims)),
+        repair: null,
+        fallbackStage: '',
+        rejectedStages: []
+      };
+      if (initial.safe) {
+        return { ...initial, resolution: { ...baseResolution, status: 'passed_without_repair', attempted: false } };
+      }
+      const structuralRepairRequired = initial.valid !== true;
+      if (!structuralRepairRequired && initial.evidenceValidation?.riskLevel !== 'high') {
+        return { ...initial, resolution: { ...baseResolution, status: 'accepted_with_warning', attempted: false } };
+      }
+
+      const repair = await callCanonicalEvidenceRepair(batch, initial.text, initial.evidenceValidation);
+      if (repair.ok) {
+        const repaired = assessCanonicalEvidenceCandidate(repair.text, batch, 'evidence_repair');
+        repair.postRisk = string(repaired.evidenceValidation?.riskLevel || '');
+        repair.postWarnings = asArray(repaired.evidenceValidation?.warnings);
+        repair.postHighRiskClaims = clone(asArray(repaired.evidenceValidation?.highRiskClaims));
+        repair.retentionRatio = initial.text.length ? Number((repaired.text.length / initial.text.length).toFixed(4)) : 1;
+        if (repaired.safe && repair.retentionRatio >= 0.55) {
+          return {
+            ...repaired,
+            resolution: { ...baseResolution, status: 'repaired', attempted: true, repair: clone(repair) }
+          };
+        }
+      }
+
+      const seen = new Set([digest(initial.text)]);
+      const candidates = asArray(stageObjects).slice().reverse();
+      for (const stage of candidates) {
+        const draft = stageDraft(stage);
+        if (!draft) continue;
+        const hash = digest(draft);
+        if (seen.has(hash)) continue;
+        seen.add(hash);
+        const assessed = assessCanonicalEvidenceCandidate(draft, batch, stage?.stage || 'unknown_stage');
+        if (!assessed.safe) continue;
+        const fallbackIndex = STAGE_ORDER.indexOf(assessed.stage);
+        const rejectedStages = fallbackIndex >= 0 ? STAGE_ORDER.slice(fallbackIndex + 1) : [];
+        return {
+          ...assessed,
+          resolution: {
+            ...baseResolution,
+            status: 'stage_fallback',
+            attempted: true,
+            repair: clone(repair),
+            fallbackStage: assessed.stage,
+            rejectedStages
+          }
+        };
+      }
+
+      const error = new Error('최종 메모리의 고위험 비근거 주장을 안전하게 교정하거나 이전 단계로 되돌릴 수 없습니다. 다음 자동 재시도에서 다시 분석합니다.');
+      error.code = 'LIBRA_CANONICAL_EVIDENCE_REJECTED';
+      error.evidenceResolution = { ...baseResolution, status: 'rejected_for_retry', attempted: true, repair: clone(repair) };
+      throw error;
+    };
+
     const callAriadne = async batch => {
       let referenceContext = { block: '', meta: { schema: ARIADNE_REFERENCE_SCHEMA, status: 'unavailable', cbsApplied: false, cbsWarnings: [] }, packet: null };
       try {
@@ -29654,6 +30725,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const previousEntries = normalizeProjectionEntries(previousRecord);
       const contextual = String(config.provider || '').toLowerCase() === 'voyage_context';
       const allKeys = Object.keys(projection.embeddingTexts).filter(keyName => keyName === 'global' || (state.settings?.sectionVectors !== false));
+      const contextualGroupKeysFor = keyNames => contextual
+        ? keyNames.map(keyName => keyName === 'global'
+          ? `${memory.memoryId}:r${memory.revision}:global`
+          : `${memory.memoryId}:r${memory.revision}:sections`)
+        : undefined;
       const reusable = {};
       if (!contextual && previousRecord?.configHash === configHash) {
         for (const keyName of allKeys) {
@@ -29670,7 +30746,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const texts = embedKeys.map(keyName => projection.embeddingTexts[keyName]);
         result = await LibraProviderBridge.embedTexts(texts, {
           purpose: 'document',
-          contextGroupKeys: contextual ? embedKeys.map(() => `${memory.memoryId}:r${memory.revision}`) : undefined
+          contextGroupKeys: contextualGroupKeysFor(embedKeys)
         });
         if (!Array.isArray(result?.vectors) || result.vectors.length !== embedKeys.length) throw new Error('임베딩 투영 벡터 수가 일치하지 않습니다.');
         embedKeys.forEach((keyName, index) => {
@@ -29688,7 +30764,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const texts = allKeys.map(keyName => projection.embeddingTexts[keyName]);
         result = await LibraProviderBridge.embedTexts(texts, {
           purpose: 'document',
-          contextGroupKeys: contextual ? allKeys.map(() => `${memory.memoryId}:r${memory.revision}`) : undefined
+          contextGroupKeys: contextualGroupKeysFor(allKeys)
         });
         profileId = string(result?.metadata?.profileId || '');
         for (const keyName of Object.keys(reusable)) delete reusable[keyName];
@@ -29700,6 +30776,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const entries = { ...reusable, ...embedded };
       const globalVector = entries.global?.vector;
       if (!Array.isArray(globalVector) || !globalVector.length) throw new Error('종합 메모리 벡터가 비어 있습니다.');
+      const entryVectors = Object.values(entries).map(entry => entry?.vector).filter(Array.isArray);
+      if (entryVectors.some(vector => vector.length !== globalVector.length || vector.some(value => !Number.isFinite(Number(value))))) {
+        throw new Error('임베딩 투영 벡터의 차원 또는 수치가 일치하지 않습니다.');
+      }
       const dimensions = Number(result?.dimensions || previousRecord?.dimensions || globalVector.length || 0);
       const provider = result?.provider || previousRecord?.provider || config.provider;
       const model = result?.model || previousRecord?.model || config.model;
@@ -29718,6 +30798,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         configHash,
         requestHash: embeddingRequestSignature(config),
         contextual,
+        contextGrouping: contextual ? 'global_independent_sections_shared_v2' : '',
         entries,
         vector: globalVector,
         textHash: projection.textHashes.global,
@@ -29741,7 +30822,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         sectionVectorKeys: Object.keys(entries).filter(keyName => keyName !== 'global'),
         reusedKeys: record.reusedKeys,
         embeddedKeys: record.embeddedKeys,
-        contextual
+        contextual,
+        contextGrouping: record.contextGrouping
       };
     };
 
@@ -29886,23 +30968,79 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           });
         if (state.disposed) return disposedResult();
         currentStage = pipelineResult?.currentStage || pipelineResult?.stages?.at?.(-1) || currentStage;
-        const failedItoStages = asArray(work.failedStages)
+        let failedItoStages = asArray(work.failedStages)
           .filter(item => item?.stage && item.stage !== 'ariadne')
           .map(item => ({ stage: item.stage, label: STAGE_LABELS[item.stage] || item.stage, message: compact(item.message || '', 700), at: item.at || nowIso() }));
-        const pipelineStatus = failedItoStages.length ? 'partial' : 'complete';
-        const completedStageNames = STAGE_ORDER.filter((stageName, index) => run.stages?.[index]?.status === 'complete');
+        let pipelineStatus = failedItoStages.length ? 'partial' : 'complete';
 
-        const finalText = stripFence(stageDraft(currentStage) || work.currentDraft);
-        const finalValidation = validateMemoryText(finalText);
-        if (!finalValidation.valid) throw new Error(`최종 메모리 검증 실패: ${finalValidation.errors.join(',')}`);
+        let finalText = stripFence(stageDraft(currentStage) || work.currentDraft);
+        const initialFinalValidation = validateMemoryText(finalText);
+        if (!initialFinalValidation.valid) throw new Error(`최종 메모리 검증 실패: ${initialFinalValidation.errors.join(',')}`);
         const preCommitVerification = await verifyBatchStillCurrent(context, startTurn, sourceHash);
         if (!preCommitVerification.ok) {
           if (preCommitVerification.reason === 'runtime_disposed') return disposedResult();
           return await discardStaleBatchBuild({ context, manifest, work, run, workKey, startTurn, sourceHash, revision, verification: preCommitVerification });
         }
+
+        await updatePipelineWorkPanel(`TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 정본 근거를 검증하고 있습니다…`, 'libra_evidence_guard', {
+          busy: true, source: 'libra_memory', currentStage: 'evidence_guard',
+          stagePlan: [...STAGE_ORDER.map(name => STAGE_LABELS[name]), STAGE_LABELS.evidence_guard]
+        });
+        let evidenceSafe;
+        try {
+          evidenceSafe = await resolveEvidenceSafeCanonicalMemory({
+            batch,
+            finalText,
+            stageObjects: work.stageObjects
+          });
+        } catch (evidenceError) {
+          manifest.stats.evidenceRejects = Number(manifest.stats.evidenceRejects || 0) + 1;
+          run.evidence = clone(evidenceError?.evidenceResolution || {
+            schema: SOURCE_EVIDENCE_REPAIR_SCHEMA,
+            status: 'rejected_for_retry',
+            error: compact(evidenceError?.message || evidenceError, 700)
+          });
+          throw evidenceError;
+        }
+        finalText = evidenceSafe.text;
+        const finalValidation = evidenceSafe.textValidation;
+        const sourceEvidenceValidation = evidenceSafe.evidenceValidation;
+        const evidenceResolution = clone(evidenceSafe.resolution || {});
+        run.evidence = clone(evidenceResolution);
+        if (evidenceResolution.status === 'repaired') {
+          manifest.stats.evidenceRepairs = Number(manifest.stats.evidenceRepairs || 0) + 1;
+        }
+        if (evidenceResolution.status === 'stage_fallback') {
+          manifest.stats.evidenceFallbacks = Number(manifest.stats.evidenceFallbacks || 0) + 1;
+          for (const rejectedStageName of asArray(evidenceResolution.rejectedStages)) {
+            if (!rejectedStageName || rejectedStageName === 'ariadne') continue;
+            if (!failedItoStages.some(item => item.stage === rejectedStageName)) {
+              failedItoStages.push({
+                stage: rejectedStageName,
+                label: STAGE_LABELS[rejectedStageName] || rejectedStageName,
+                message: 'source_evidence_high_risk_stage_rejected',
+                at: nowIso(),
+                evidenceRejected: true
+              });
+            }
+            const rejectedIndex = STAGE_ORDER.indexOf(rejectedStageName);
+            if (rejectedIndex >= 0 && run.stages?.[rejectedIndex]) {
+              run.stages[rejectedIndex] = {
+                ...run.stages[rejectedIndex],
+                status: 'evidence_rejected',
+                evidenceRejected: true,
+                error: 'source_evidence_high_risk_stage_rejected'
+              };
+            }
+          }
+          pipelineStatus = 'partial';
+        }
+        const completedStageNames = STAGE_ORDER.filter((stageName, index) => run.stages?.[index]?.status === 'complete');
+        const canonicalStageName = evidenceResolution.status === 'repaired'
+          ? 'evidence_repair'
+          : string(evidenceResolution.fallbackStage || currentStage?.stage || completedStageNames.at(-1) || 'ariadne');
         const previousMemory = activeRef?.key ? await loadMemoryRef(activeRef) : null;
         const parsedRecallKeys = recallKeys(finalText);
-        const sourceEvidenceValidation = validateCanonicalMemorySourceEvidence(finalText, batch, explicitRecallKeys(finalText));
         const memory = {
           schema: MEMORY_SCHEMA,
           memoryId: work.memoryId,
@@ -29917,7 +31055,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             status: pipelineStatus,
             completedStages: completedStageNames,
             failedItoStages: clone(failedItoStages),
-            lastSuccessfulStage: currentStage?.stage || completedStageNames.at(-1) || 'ariadne'
+            lastSuccessfulStage: canonicalStageName,
+            evidenceResolution: clone(evidenceResolution)
           },
           text: finalText,
           summary: memorySummary(finalText),
@@ -29979,7 +31118,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           turnRange: clone(memory.turnRange), summary: memory.summary, embeddingStatus: memory.embedding.status,
           retrievalVersion: memory.embedding?.projectionVersion || memory.retrieval?.version || RETRIEVAL_PROJECTION_VERSION,
           vectorCount: Number(memory.embedding?.vectorCount || 0),
-          pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage), runId: memory.runId, sessionEpoch: 0, inheritedSessionHistory: false,
+          pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage), evidenceStatus: string(sourceEvidenceValidation.status || ''),
+          evidenceResolutionStatus: string(evidenceResolution.status || ''), runId: memory.runId, sessionEpoch: 0, inheritedSessionHistory: false,
           createdAt: activeRef?.createdAt || memory.createdAt, updatedAt: memory.updatedAt, history: retainedHistory
         };
         manifest.frontiers.committedTurn = Math.max(
@@ -29993,7 +31133,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         run.status = pipelineStatus === 'partial' ? 'complete_with_warnings' : 'complete';
         run.finishedAt = nowIso();
         run.durationMs = Date.now() - startedAt;
-        run.commit = { status: 'committed', pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage), revision, contentHash: digest(finalText), memoryKey };
+        run.commit = {
+          status: 'committed', pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage),
+          evidenceStatus: string(sourceEvidenceValidation.status || ''), evidenceResolutionStatus: string(evidenceResolution.status || ''),
+          revision, contentHash: digest(finalText), memoryKey
+        };
         run.embedding = clone(memory.embedding);
         await storage.setJson(key.run(context.scope, run.runId), run);
         manifest.inFlight = null;
@@ -30001,14 +31145,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         await storage.remove(workKey);
 
         Runtime.finalDraft = finalText;
-        Runtime.lastSafeStage = clone(currentStage);
+        Runtime.lastSafeStage = evidenceResolution.status === 'stage_fallback'
+          ? clone(asArray(work.stageObjects).find(stage => stage?.stage === evidenceResolution.fallbackStage) || currentStage)
+          : clone(currentStage);
         Runtime.finalDraftMeta = {
-          at: Date.now(), memoryMode: true, stage: currentStage?.stage || 'ariadne', chars: finalText.length,
+          at: Date.now(), memoryMode: true, stage: canonicalStageName, chars: finalText.length,
           pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage),
-          turnRange: clone(memory.turnRange), memoryId: memory.memoryId, revision, runId: run.runId
+          turnRange: clone(memory.turnRange), memoryId: memory.memoryId, revision, runId: run.runId, evidenceResolution: clone(evidenceResolution)
         };
-        Runtime.last = { at: Date.now(), ok: true, memoryMode: true, stageCount: 4, pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage), memoryId: memory.memoryId, revision, turnRange: clone(memory.turnRange) };
-        state.lastScan = { at: Date.now(), ok: true, partial: pipelineStatus === 'partial', failedItoStages: failedItoStages.map(item => item.stage), memoryId: memory.memoryId, revision, turnRange: clone(memory.turnRange), runId: run.runId };
+        Runtime.last = { at: Date.now(), ok: true, memoryMode: true, stageCount: 4, pipelineStatus, failedItoStages: failedItoStages.map(item => item.stage), evidenceResolutionStatus: string(evidenceResolution.status || ''), memoryId: memory.memoryId, revision, turnRange: clone(memory.turnRange) };
+        state.lastScan = { at: Date.now(), ok: true, partial: pipelineStatus === 'partial', failedItoStages: failedItoStages.map(item => item.stage), evidenceResolutionStatus: string(evidenceResolution.status || ''), memoryId: memory.memoryId, revision, turnRange: clone(memory.turnRange), runId: run.runId };
         const completionMessage = pipelineStatus === 'partial'
           ? `TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 메모리 저장 완료 · ${failedItoStages.map(item => item.label).join(', ')} 보정 실패는 건너뜀`
           : `TURN ${startTurn}~${startTurn + BATCH_SIZE - 1} 종합 메모리 저장 완료`;
@@ -30017,7 +31163,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         return memory;
       } catch (error) {
         if (state.disposed) return disposedResult();
-        const stageName = STAGE_ORDER[Number(work.stageIndex || 0)] || manifest.inFlight?.stage || 'unknown';
+        const stageName = error?.code === 'LIBRA_CANONICAL_EVIDENCE_REJECTED'
+          ? 'evidence_guard'
+          : (STAGE_ORDER[Number(work.stageIndex || 0)] || manifest.inFlight?.stage || 'unknown');
         work.status = 'failed';
         work.lastError = compact(error?.message || error, 700);
         work.updatedAt = nowIso();
@@ -30113,9 +31261,18 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
         if (state.deletingScopes.has(context.scope.scopeKey)) return { ok: true, skipped: true, reason: 'scope_deleting' };
         const pairs = buildPairs(context.chat);
-        const manifest = await loadManifest(context.scope, pairs.length);
+        let manifest = await loadManifest(context.scope, pairs.length);
         if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
         const starts = completeBatchStarts(pairs);
+        const branchResult = await reconcileCanonicalBranchBeforeRecall(context, {
+          pairs,
+          manifest,
+          reason: 'scan_incremental_branch_guard'
+        });
+        manifest = branchResult?.manifest || manifest;
+        const changedBatchStarts = branchResult?.signatureBaselineAvailable === true
+          ? asArray(branchResult?.changedBatchStarts).map(Number).filter(startTurn => starts.includes(startTurn))
+          : [];
         const scanMode = string(options.mode || options.reason || 'live').toLowerCase();
         const allowHistoricalBackfill = options.allowHistoricalBackfill === true
           || ['manual_cold_start', 'manual_cold_start_retry', 'historical_reanalysis'].includes(scanMode);
@@ -30141,23 +31298,47 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         const staleDiscards = [];
         const failedBatches = [];
 
-        for (const ref of Object.values(manifest.memories)) {
-          if (!starts.includes(Number(ref?.turnRange?.start))) ref.status = 'inactive';
+        // Automatic scans are fully incremental. They inspect only the batch that just
+        // completed, a branch-changed batch, an explicit recovery/in-flight batch, or a
+        // small bounded embedding-retry queue. Existing unchanged canonical batches are
+        // no longer re-digested on every assistant output.
+        const candidatePriority = new Map();
+        const candidateReason = new Map();
+        const addCandidate = (startTurn, priority, reason) => {
+          const numeric = Math.max(0, Number(startTurn || 0) || 0);
+          if (!numeric || !starts.includes(numeric)) return;
+          const previousPriority = candidatePriority.get(numeric);
+          if (previousPriority == null || priority < previousPriority) candidatePriority.set(numeric, priority);
+          const reasons = candidateReason.get(numeric) || [];
+          if (reason && !reasons.includes(reason)) reasons.push(reason);
+          candidateReason.set(numeric, reasons);
+        };
+        if (currentCompletedStart) addCandidate(currentCompletedStart, 0, 'current_completed_boundary');
+        if (liveRecoveryStart) addCandidate(liveRecoveryStart, 0, 'explicit_live_recovery');
+        if (inFlightStart && !!inFlightMode && !['manual_cold_start', 'manual_cold_start_retry', 'historical_reanalysis'].includes(inFlightMode)) {
+          addCandidate(inFlightStart, 1, 'resume_inflight');
+        }
+        for (const startTurn of changedBatchStarts) addCandidate(startTurn, 1, 'branch_signature_changed');
+
+        if (!allowHistoricalBackfill) {
+          const pendingEmbeddingStarts = Object.values(asObject(manifest.memories))
+            .filter(ref => ref?.status === 'committed'
+              && (['pending', 'retry_pending'].includes(string(ref.embeddingStatus || ''))
+                || string(ref.retrievalVersion || '') !== RETRIEVAL_PROJECTION_VERSION))
+            .map(ref => Number(ref?.turnRange?.start || 0))
+            .filter(startTurn => starts.includes(startTurn))
+            .sort((a, b) => a - b)
+            .slice(0, LIVE_SCAN_EMBEDDING_RETRY_LIMIT);
+          for (const startTurn of pendingEmbeddingStarts) addCandidate(startTurn, 3, 'bounded_embedding_retry');
         }
 
-        // Live scans must never turn into an implicit cold-start. They may only:
-        // 1) maintain/revise batches that LIBRA already owns,
-        // 2) finish the 5-turn batch completed by the current live output, or
-        // 3) resume a failed live batch. Missing historical batches are eligible
-        // only when the user explicitly starts manual cold-start/backfill.
-        const eligibleStarts = allowHistoricalBackfill ? starts : starts.filter(startTurn => {
-          const batch = batchForStart(pairs, startTurn);
-          const ref = memoryRefForStart(manifest, startTurn);
-          if (ref) return true;
-          if (liveRecoveryStart && startTurn === liveRecoveryStart) return true;
-          if (currentCompletedStart && startTurn === currentCompletedStart) return true;
-          return inFlightStart === startTurn && !!inFlightMode && !['manual_cold_start', 'manual_cold_start_retry', 'historical_reanalysis'].includes(inFlightMode);
-        });
+        const eligibleStarts = allowHistoricalBackfill
+          ? starts.slice()
+          : Array.from(candidatePriority.keys()).sort((left, right) => (
+              Number(candidatePriority.get(left) || 0) - Number(candidatePriority.get(right) || 0)
+              || left - right
+            ));
+        let scanRebuildState = state.embeddingRebuild || null;
 
         for (const startTurn of eligibleStarts) {
           if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
@@ -30166,7 +31347,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           const ref = memoryRefForStart(manifest, startTurn);
           if (ref?.status === 'committed' && ref.sourceDigest === sourceHash) {
             const needsProjectionUpgrade = ref.retrievalVersion !== RETRIEVAL_PROJECTION_VERSION;
-            const rebuildState = state.embeddingRebuild || await loadEmbeddingRebuildState();
+            scanRebuildState = scanRebuildState || await loadEmbeddingRebuildState();
+            const rebuildState = scanRebuildState;
             const manuallyQuarantined = ['rebuild_required', 'rebuilding', 'paused', 'rebuild_partial', 'rebuild_failed'].includes(rebuildState?.status)
               && asArray(rebuildState?.items).some(item => item.memoryKey === ref.key && item.status !== 'complete');
             if (!manuallyQuarantined && (['pending', 'retry_pending'].includes(ref.embeddingStatus) || needsProjectionUpgrade)) {
@@ -30234,6 +31416,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         }
 
         if (state.disposed) return { ok: true, skipped: true, reason: 'runtime_disposed' };
+        if (allowHistoricalBackfill) {
+          const completedAudit = await reconcileCanonicalBranchBeforeRecall(context, {
+            pairs,
+            manifest,
+            full: true,
+            scheduleDeep: false,
+            reason: 'manual_backfill_full_audit'
+          });
+          manifest = completedAudit?.manifest || manifest;
+        }
         manifest.frontiers.observedTurn = pairs.length;
         manifest.frontiers.committedTurn = Math.max(0, ...Object.values(manifest.memories).filter(ref => ref?.status === 'committed').map(ref => Number(ref.turnRange?.end || 0)));
         await saveManifest(context.scope, manifest);
@@ -30255,6 +31447,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           reason: noEligibleReason,
           processed, partialCommitted, staleDiscarded, staleDiscards, failed: failedBatches.length, failedBatches,
           observedTurns: pairs.length, committedTurn: manifest.frontiers.committedTurn, currentCompletedStart, liveRecoveryStart, inFlightStart,
+          changedBatchStarts: changedBatchStarts.slice(), branchGuardStatus: string(manifest.branchGuard?.status || ''),
+          fullMemorySweep: allowHistoricalBackfill,
+          candidateReasons: Object.fromEntries(eligibleStarts.map(startTurn => [String(startTurn), asArray(candidateReason.get(startTurn))])),
           mode: scanMode, historicalBackfill: allowHistoricalBackfill, eligibleBatches: eligibleStarts.length, eligibleStarts: eligibleStarts.slice(), totalCompleteBatches: starts.length
         };
       });
@@ -30405,7 +31600,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const sanitizeRecallCurrentInput = value => compact(
-      stripExternalHostMemoryBlocks(deriveNarrativeContinuityCopy(value)),
+      stripSgaPeerRuntimeArtifacts(stripExternalHostMemoryBlocks(deriveNarrativeContinuityCopy(value))),
       6000
     );
 
@@ -30418,7 +31613,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!['user', 'assistant'].includes(role)) return null;
         const provenance = hasSgaChatProvenance(message);
         const wrapped = Boolean(currentInputFrom(rawBody));
-        const body = compact(stripExternalHostMemoryBlocks(deriveNarrativeContinuityCopy(rawBody)), 2600);
+        const body = compact(stripSgaPeerRuntimeArtifacts(stripExternalHostMemoryBlocks(deriveNarrativeContinuityCopy(rawBody))), 2600);
         if (!body) return null;
         // Synthetic prompt-manager rules sometimes arrive in a user-shaped row. They
         // are never allowed into recall context unless they are a real chat/provenance
@@ -30430,7 +31625,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const buildQueryText = messages => sanitizeRecallCurrentInput(resolveSgaCurrentTurn(messages).text || '');
 
-    const buildQueryBundle = (messages, context, settings) => {
+    const buildQueryBundle = (messages, context, settings, sharedPairs = null) => {
       const currentTurnResolution = resolveSgaCurrentTurn(messages);
       const currentText = sanitizeRecallCurrentInput(currentTurnResolution.text || '');
       const rows = visibleQueryRows(messages);
@@ -30442,7 +31637,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         .filter(row => row.provenance === true && (resolvedIndex < 0 || row.index < resolvedIndex))
         .slice(-settings.continuationTailMessages)
         .map(row => `${row.role.toUpperCase()}: ${row.body}`).join('\n');
-      const pairs = buildPairs(context.chat);
+      const pairs = Array.isArray(sharedPairs) ? sharedPairs : buildPairs(context.chat);
       const promptChars = requestPromptChars(messages);
       const promptPressure = recallPromptPressure(promptChars);
       const latestPair = pairs.at(-1);
@@ -30479,7 +31674,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         sceneAnchors: extractQueryAnchors(sceneText),
         pairs,
         promptChars,
-        promptPressure
+        promptPressure,
+        settings,
+        pairsShared: Array.isArray(sharedPairs)
       };
     };
 
@@ -30607,6 +31804,30 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       for (let index = 0; index < vector.length; index += 1) {
         const value = Number(vector[index]);
         if (!Number.isFinite(value) || value === 0) continue;
+        // Deterministic feature hashing: both bucket and sign come from an avalanche
+        // hash of the source dimension. This avoids the old index%size collisions that
+        // systematically folded the same coordinate bands together.
+        let mixed = Math.imul(index + 1, 0x9e3779b1) >>> 0;
+        mixed ^= mixed >>> 16;
+        mixed = Math.imul(mixed, 0x85ebca6b) >>> 0;
+        mixed ^= mixed >>> 13;
+        mixed = Math.imul(mixed, 0xc2b2ae35) >>> 0;
+        mixed ^= mixed >>> 16;
+        const bucket = mixed % size;
+        const sign = (mixed & 0x80000000) === 0 ? 1 : -1;
+        buckets[bucket] += value * sign;
+      }
+      const norm = Math.sqrt(buckets.reduce((sum, value) => sum + value * value, 0));
+      if (!(norm > 0)) return [];
+      return buckets.map(value => Math.round((value / norm) * 100000) / 100000);
+    };
+    const foldRecallVectorSketchLegacyV2 = (vector, dimensions = 128) => {
+      if (!Array.isArray(vector) || !vector.length) return [];
+      const size = Math.max(8, Math.floor(Number(dimensions || 128)));
+      const buckets = Array(size).fill(0);
+      for (let index = 0; index < vector.length; index += 1) {
+        const value = Number(vector[index]);
+        if (!Number.isFinite(value) || value === 0) continue;
         const mixed = Math.imul(index + 1, 0x9e3779b1) >>> 0;
         const sign = (mixed & 1) === 0 ? 1 : -1;
         buckets[index % size] += value * sign;
@@ -30680,20 +31901,88 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       key: string(ref?.key || ''), fingerprint: recallCatalogRefFingerprint(ref)
     })));
 
+    const recallCatalogSchemaUsable = value => value?.schema === RECALL_CATALOG_SCHEMA || value?.schema === RECALL_CATALOG_LEGACY_SCHEMA;
+    const scheduleRecallCatalogUpgrade = (context, manifest, delayMs = RECALL_CATALOG_UPGRADE_DELAY_MS) => {
+      const scope = clone(asObject(context?.scope));
+      const scopeKey = string(scope.scopeKey || '');
+      if (!scopeKey || state.disposed || state.recallCatalogUpgradeInFlight.has(scopeKey)) return false;
+      const timerKey = `recall_catalog_upgrade:${scopeKey}`;
+      if (state.timers.has(timerKey)) return false;
+      const expectedSignature = recallCatalogSignature(manifest);
+      const refs = listMemoryRefs(manifest).map(ref => clone(ref));
+      const timer = setTimeout(() => {
+        state.timers.delete(timerKey);
+        if (state.disposed || state.recallCatalogUpgradeInFlight.has(scopeKey)) return;
+        const task = (async () => {
+          const entries = [];
+          for (let index = 0; index < refs.length; index += 1) {
+            if (state.disposed) return false;
+            const entry = await recallCatalogEntryFromMemory(refs[index]);
+            if (entry) entries.push(entry);
+            if ((index & 1) === 1) await new Promise(resolve => setTimeout(resolve, 0));
+          }
+          const liveManifest = await loadManifest(scope, 0);
+          if (recallCatalogSignature(liveManifest) !== expectedSignature) return false;
+          const catalog = {
+            schema: RECALL_CATALOG_SCHEMA, scopeKey, signature: expectedSignature, entries, complete: entries.length === refs.length, updatedAt: nowIso()
+          };
+          if (!catalog.complete) return false;
+          await storage.setJson(key.recallCatalog(scope), catalog);
+          state.recallCatalogCache.set(scopeKey, catalog);
+          return true;
+        })().catch(error => { warn('LIBRA background recall catalog upgrade failed', error); return false; }).finally(() => {
+          state.recallCatalogUpgradeInFlight.delete(scopeKey);
+        });
+        state.recallCatalogUpgradeInFlight.set(scopeKey, task);
+      }, Math.max(0, Number(delayMs || 0)));
+      state.timers.set(timerKey, timer);
+      return true;
+    };
+
     const loadOrRefreshRecallCatalog = async (context, manifest, guard = null) => {
       const scopeKey = string(context?.scope?.scopeKey || '');
       const refs = listMemoryRefs(manifest);
       const signature = recallCatalogSignature(manifest);
       const runtimeCatalog = state.recallCatalogCache.get(scopeKey) || null;
-      if (runtimeCatalog?.schema === RECALL_CATALOG_SCHEMA && runtimeCatalog.signature === signature && runtimeCatalog.complete !== false) {
-        return { ...runtimeCatalog, source: 'memory', refreshedEntries: 0, reusedEntries: runtimeCatalog.entries?.length || 0 };
+      if (recallCatalogSchemaUsable(runtimeCatalog) && runtimeCatalog.signature === signature && runtimeCatalog.complete !== false) {
+        if (runtimeCatalog.schema === RECALL_CATALOG_LEGACY_SCHEMA) scheduleRecallCatalogUpgrade(context, manifest);
+        return {
+          ...runtimeCatalog,
+          source: runtimeCatalog.schema === RECALL_CATALOG_SCHEMA ? 'memory' : 'legacy_memory_v2',
+          refreshedEntries: 0, reusedEntries: runtimeCatalog.entries?.length || 0, legacyCatalog: runtimeCatalog.schema === RECALL_CATALOG_LEGACY_SCHEMA
+        };
       }
-      let previous = runtimeCatalog?.schema === RECALL_CATALOG_SCHEMA
+      let previous = recallCatalogSchemaUsable(runtimeCatalog)
         ? runtimeCatalog
         : await runRecallStep(guard, 'recall_catalog_read', () => storage.getJson(key.recallCatalog(context.scope), null), RECALL_STEP_BUDGET_MS, { soft: true, fallback: null, abortOnTimeout: false });
-      if (previous?.schema === RECALL_CATALOG_SCHEMA && previous.signature === signature && previous.complete !== false) {
+      if (recallCatalogSchemaUsable(previous) && previous.signature === signature && previous.complete !== false) {
         state.recallCatalogCache.set(scopeKey, previous);
-        return { ...previous, source: 'storage', refreshedEntries: 0, reusedEntries: previous.entries?.length || 0 };
+        if (previous.schema === RECALL_CATALOG_LEGACY_SCHEMA) scheduleRecallCatalogUpgrade(context, manifest);
+        return {
+          ...previous,
+          source: previous.schema === RECALL_CATALOG_SCHEMA ? 'storage' : 'legacy_storage_v2',
+          refreshedEntries: 0, reusedEntries: previous.entries?.length || 0, legacyCatalog: previous.schema === RECALL_CATALOG_LEGACY_SCHEMA
+        };
+      }
+      if (previous?.schema === RECALL_CATALOG_LEGACY_SCHEMA) {
+        // Never rebuild every memory/vector synchronously just because the catalog
+        // layout changed. Reuse unchanged v2 rows immediately, add cheap manifest
+        // fallbacks for changed/new refs, and rebuild v3 after the request.
+        const oldByKey = new Map(asArray(previous.entries).map(entry => [string(entry?.memoryKey || ''), entry]).filter(([keyValue]) => keyValue));
+        const entries = refs.map(ref => {
+          const refKey = string(ref?.key || '');
+          const cached = oldByKey.get(refKey);
+          return cached?.refFingerprint === recallCatalogRefFingerprint(ref) ? cached : lightweightRecallCatalogEntryFromRef(ref);
+        });
+        const bridged = { schema: RECALL_CATALOG_LEGACY_SCHEMA, scopeKey, signature, entries, complete: false, updatedAt: nowIso() };
+        state.recallCatalogCache.set(scopeKey, bridged);
+        scheduleRecallCatalogUpgrade(context, manifest);
+        return {
+          ...bridged, source: 'legacy_manifest_bridge_v2', refreshedEntries: 0,
+          reusedEntries: entries.filter(entry => entry.lightweightManifestFallback !== true).length,
+          failedEntries: 0, lightweightFallbackEntries: entries.filter(entry => entry.lightweightManifestFallback === true).length,
+          budgetTruncated: false, legacyCatalog: true
+        };
       }
       if (previous?.schema !== RECALL_CATALOG_SCHEMA) previous = { entries: [] };
       const oldByKey = new Map(asArray(previous.entries).map(entry => [string(entry?.memoryKey || ''), entry]).filter(([keyValue]) => keyValue));
@@ -30796,8 +32085,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     };
 
     const shortlistRecallCatalog = (catalog, manifest, queryBundle, queryVectors, settings, guard = null) => {
-      const entries = asArray(catalog?.entries);
-      const refs = listMemoryRefs(manifest);
+      const allEntries = asArray(catalog?.entries);
+      const refs = listRecallMemoryRefs(manifest);
+      const refByKey = new Map(refs.map(ref => [string(ref?.key || ''), ref]));
+      const entries = allEntries.filter(entry => refByKey.has(string(entry?.memoryKey || '')));
       if (!entries.length || !refs.length) {
         const fallbackLimit = Math.max(1, Math.min(
           Number(settings.candidateLimit || 80),
@@ -30807,9 +32098,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         ));
         return { refs: refs.slice(0, fallbackLimit), rows: [], total: entries.length, limit: Math.min(Number(settings.candidateLimit || 80), refs.length), hydrateLimit: fallbackLimit, catalogSelected: 0 };
       }
-      const refByKey = new Map(refs.map(ref => [string(ref?.key || ''), ref]));
-      const currentSketch = foldRecallVectorSketch(queryVectors.current);
-      const sceneSketch = foldRecallVectorSketch(queryVectors.scene);
+      const legacySketchMode = catalog?.schema === RECALL_CATALOG_LEGACY_SCHEMA;
+      const sketchFold = legacySketchMode ? foldRecallVectorSketchLegacyV2 : foldRecallVectorSketch;
+      const sketchDims = legacySketchMode ? 128 : RECALL_VECTOR_SKETCH_DIMS;
+      const currentSketch = sketchFold(queryVectors.current, sketchDims);
+      const sceneSketch = sketchFold(queryVectors.scene, sketchDims);
       const currentTurn = asArray(queryBundle?.pairs).length;
       const rows = [];
       for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
@@ -31263,18 +32556,29 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }
       return { level: 'optional', reason: 'ordinary_recall' };
     };
-    const packRecallCandidates = (candidates, queryBundle, settings, evidenceCharBudget, guard = null) => {
+    const packRecallCandidates = (candidates, queryBundle, settings, evidenceCharBudget, tokenBudget = null, guard = null) => {
       const source = asArray(candidates).slice(0, Math.max(1, Number(settings.recallMaxMemories || 1)));
       const selected = [];
       let tokens = 0;
       let excerptChars = 0;
       const memoryCharCeiling = Math.max(0, Number(evidenceCharBudget || 0) || 0);
+      const queryProfile = recallTokenDensity(`${string(queryBundle?.currentText || '')}
+${string(queryBundle?.sceneText || '')}`);
+      const initialBudget = tokenBudget && typeof tokenBudget === 'object'
+        ? clone(tokenBudget)
+        : dynamicRecallTokenBudget(memoryCharCeiling, queryProfile);
+      let peakTokensPerChar = clamp(
+        Number(initialBudget?.tokensPerChar || queryProfile.tokensPerChar || RECALL_DYNAMIC_TOKEN_RATE_FLOOR),
+        RECALL_DYNAMIC_TOKEN_RATE_FLOOR,
+        RECALL_DYNAMIC_TOKEN_RATE_CEILING,
+        RECALL_DYNAMIC_TOKEN_RATE_FLOOR
+      );
+      let effectiveTokenBudget = dynamicRecallTokenBudget(memoryCharCeiling, { ...queryProfile, tokensPerChar: peakTokensPerChar });
       const possibleSelections = Math.max(1, source.length);
       for (const row of source) {
         ensureRecallGuard(guard, 'recall_pack_candidate');
         const remainingChars = Math.max(0, memoryCharCeiling - excerptChars);
-        const remainingTokens = Math.max(0, Number(settings.recallMaxTokens || 0) - tokens);
-        if (remainingChars < 180 || remainingTokens <= 0) break;
+        if (remainingChars < 180) break;
         const rank = selected.length;
         const itemsLeft = Math.max(1, possibleSelections - rank);
         const preferredChars = possibleSelections === 1
@@ -31284,13 +32588,18 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             : rank === 1
               ? Math.min(2600, Math.max(900, Math.floor(remainingChars * 0.42)))
               : Math.min(1800, Math.max(420, Math.floor(remainingChars / itemsLeft)));
-        const tokenCharCeiling = Math.max(0, Math.floor(remainingTokens * 3.2));
-        const excerptBudget = Math.min(remainingChars, preferredChars, tokenCharCeiling);
+        const excerptBudget = Math.min(remainingChars, preferredChars);
         if (excerptBudget < 180) break;
         const excerpt = excerptForMemory(row, queryBundle, settings, excerptBudget);
         if (!excerpt.text) continue;
-        const cost = estimateTokens(excerpt.text);
+        const excerptProfile = recallTokenDensity(excerpt.text);
+        if (excerptProfile.tokensPerChar > peakTokensPerChar) {
+          peakTokensPerChar = excerptProfile.tokensPerChar;
+          effectiveTokenBudget = dynamicRecallTokenBudget(memoryCharCeiling, { ...excerptProfile, tokensPerChar: peakTokensPerChar });
+        }
+        const cost = Math.max(1, excerptProfile.estimatedTokens);
         const charCost = excerpt.text.length;
+        const remainingTokens = Math.max(0, Number(effectiveTokenBudget.tokenCeiling || 0) - tokens);
         if (cost > remainingTokens || excerptChars + charCost > memoryCharCeiling) continue;
         row.excerpt = excerpt;
         row.text = excerpt.text;
@@ -31305,6 +32614,14 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         tokens,
         excerptChars,
         evidenceCharBudget: memoryCharCeiling,
+        effectiveTokenBudget: Number(effectiveTokenBudget.tokenCeiling || 0),
+        tokenBudgetProfile: {
+          schema: RECALL_TOKEN_BUDGET_SCHEMA,
+          mode: 'dynamic_cjk_v1',
+          tokensPerChar: peakTokensPerChar,
+          cjkRatio: Number(queryProfile.cjkRatio || 0),
+          sampleChars: Number(queryProfile.chars || 0)
+        },
         dropped,
         hardDropped: dropped.filter(item => item.level === 'hard'),
         importantDropped: dropped.filter(item => item.level === 'important'),
@@ -31312,84 +32629,140 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       };
     };
     const recallBudgetPlanForQuery = (queryBundle, settings) => {
-      const configuredCeiling = Math.max(1000, Number(settings.recallMaxChars || 8000));
-      const tokenCeiling = Math.max(1000, Math.floor(Math.max(1, Number(settings.recallMaxTokens || 2600)) * 3.2));
+      const configuredCeiling = Math.max(1000, Math.min(RECALL_MAX_DYNAMIC_CHARS, Number(settings.recallMaxChars || 8000)));
       const pressure = string(queryBundle?.promptPressure || recallPromptPressure(queryBundle?.promptChars || 0));
       const pressureRatio = recallPromptPressureRatio(pressure);
       const pressureCeiling = Math.max(1000, Math.floor(configuredCeiling * pressureRatio));
-      const blockCharCeiling = Math.max(1000, Math.min(configuredCeiling, tokenCeiling + 1500, pressureCeiling));
+      // Character pressure is authoritative. A fixed token setting no longer shrinks
+      // this ceiling; token capacity is derived from each evidence tier below.
+      const blockCharCeiling = Math.max(1000, Math.min(configuredCeiling, pressureCeiling));
       const evidenceCeiling = Math.max(0, blockCharCeiling - 1500);
-      const rawTiers = [RECALL_BUDGET_STANDARD_CHARS, RECALL_BUDGET_PRECISION_CHARS, evidenceCeiling]
+      const tokenSample = `${string(queryBundle?.currentText || '')}
+${string(queryBundle?.sceneText || '')}`;
+      const tokenProfile = recallTokenDensity(tokenSample);
+      const rawTierChars = [RECALL_BUDGET_STANDARD_CHARS, RECALL_BUDGET_PRECISION_CHARS, evidenceCeiling]
         .map(value => Math.max(0, Math.min(evidenceCeiling, Number(value || 0))))
         .filter((value, index, array) => value > 0 && array.indexOf(value) === index)
         .sort((a, b) => a - b);
-      if (!rawTiers.length && evidenceCeiling > 0) rawTiers.push(evidenceCeiling);
-      return { configuredCeiling, tokenCeiling, pressure, pressureRatio, blockCharCeiling, evidenceCeiling, tiers: rawTiers };
+      if (!rawTierChars.length && evidenceCeiling > 0) rawTierChars.push(evidenceCeiling);
+      const tiers = rawTierChars.map(chars => ({
+        chars,
+        tokenBudget: dynamicRecallTokenBudget(chars, tokenProfile)
+      }));
+      const effectiveRecallMaxTokens = dynamicRecallTokenBudget(evidenceCeiling, tokenProfile).tokenCeiling;
+      return {
+        configuredCeiling,
+        pressure,
+        pressureRatio,
+        blockCharCeiling,
+        evidenceCeiling,
+        tokenBudgetMode: 'dynamic_cjk_v1',
+        tokenProfile: {
+          schema: RECALL_TOKEN_BUDGET_SCHEMA,
+          cjkRatio: Number(tokenProfile.cjkRatio || 0),
+          tokensPerChar: Number(tokenProfile.tokensPerChar || RECALL_DYNAMIC_TOKEN_RATE_FLOOR),
+          sampleChars: Number(tokenProfile.chars || 0)
+        },
+        effectiveRecallMaxTokens,
+        tiers
+      };
     };
+
 
     const recall = async (context, queryInput, guard = null) => {
       ensureRecallGuard(guard, 'recall_start');
-      const settings = await runRecallStep(guard, 'recall_settings', () => loadMemorySettings(), RECALL_STEP_BUDGET_MS);
+      const suppliedBundle = queryInput && typeof queryInput === 'object' ? queryInput : null;
+      const settings = suppliedBundle?.settings || await runRecallStep(guard, 'recall_settings', () => loadMemorySettings(), RECALL_STEP_BUDGET_MS);
       const queryBundle = typeof queryInput === 'string'
         ? { currentText: queryInput, sceneText: '', sparseText: queryInput, currentWeight: 1, sceneWeight: 0, queryType: classifyQueryType(queryInput), currentAnchors: extractQueryAnchors(queryInput), sceneAnchors: extractQueryAnchors(''), pairs: buildPairs(context.chat), promptChars: 0, promptPressure: 'normal' }
         : queryInput;
       const pairs = queryBundle.pairs || buildPairs(context.chat);
-      const manifest = await runRecallStep(guard, 'recall_manifest', () => loadManifest(context.scope, pairs.length), RECALL_STEP_BUDGET_MS);
+      const manifest = queryBundle.manifest && typeof queryBundle.manifest === 'object'
+        ? queryBundle.manifest
+        : await runRecallStep(guard, 'recall_manifest', () => loadManifest(context.scope, pairs.length), RECALL_STEP_BUDGET_MS);
       const queryVectors = { current: null, scene: null, profileId: '', configHash: '' };
-      const embeddingConfig = await runRecallStep(guard, 'recall_embedding_settings', () => loadEmbeddingSettings(), RECALL_STEP_BUDGET_MS);
-      queryVectors.configHash = embeddingConfigSignature(embeddingConfig);
-      const embeddingValidation = await runRecallStep(
-        guard,
-        'recall_embedding_validate',
-        () => LibraProviderBridge.validateEmbedding(embeddingConfig),
-        1000,
-        { soft: true, fallback: { ok: false, missing: ['validation_timeout'] }, abortOnTimeout: false }
-      );
-      if (embeddingConfig.enabled && embeddingValidation?.ok && queryBundle.currentText) {
-        try {
-          const queryTexts = [queryBundle.currentText];
-          if (queryBundle.sceneText && queryBundle.sceneWeight > 0) queryTexts.push(queryBundle.sceneText);
-          const result = await runRecallStep(
-            guard,
-            'recall_query_embedding',
-            () => {
-              const child = typeof AbortController === 'function' ? new AbortController() : null;
-              const parentSignal = guard?.controller?.signal;
-              const abortChild = () => { try { child?.abort(parentSignal?.reason || recallDeadlineError('recall_query_embedding')); } catch (_) {} };
-              if (parentSignal?.aborted) abortChild();
-              else parentSignal?.addEventListener?.('abort', abortChild, { once: true });
-              const childBudget = Math.max(250, Math.min(RECALL_EMBEDDING_BUDGET_MS - 120, recallGuardRemainingMs(guard) - 120));
-              const childTimer = child ? setTimeout(() => {
-                try { child.abort(recallDeadlineError('recall_query_embedding_child')); } catch (_) {}
-              }, childBudget) : null;
-              return Promise.resolve(LibraProviderBridge.embedTexts(queryTexts, { purpose: 'query', signal: child?.signal || parentSignal }))
-                .finally(() => {
-                  if (childTimer) clearTimeout(childTimer);
-                  parentSignal?.removeEventListener?.('abort', abortChild);
-                });
-            },
-            RECALL_EMBEDDING_BUDGET_MS,
-            { soft: true, fallback: null, abortOnTimeout: false }
-          );
-          queryVectors.current = result?.vectors?.[0] || null;
-          queryVectors.scene = result && queryTexts.length > 1 ? result?.vectors?.[1] || null : null;
-          queryVectors.profileId = result?.metadata?.profileId || '';
-        } catch (error) {
-          warn('LIBRA recall query embedding failed', error);
-        }
+      let embeddingSettingsSource = 'none';
+      let embeddingConfig = null;
+      const cachedEmbedding = peekEmbeddingSettingsForRecall();
+      if (cachedEmbedding.config) {
+        embeddingConfig = cachedEmbedding.config;
+        embeddingSettingsSource = cachedEmbedding.source;
+      } else {
+        // A cache miss is allowed to spend only one normal step budget. If RisuAI
+        // argument/pluginStorage reads are temporarily slow, do not abort recall:
+        // dense retrieval is optional and sparse/exact/temporal channels remain valid.
+        embeddingConfig = await runRecallStep(
+          guard,
+          'recall_embedding_settings',
+          () => loadEmbeddingSettings(),
+          RECALL_STEP_BUDGET_MS,
+          { soft: true, fallback: null, abortOnTimeout: false }
+        );
+        embeddingSettingsSource = embeddingConfig ? 'bounded_settings_load' : 'unavailable_sparse_fallback';
       }
+      if (embeddingConfig) queryVectors.configHash = embeddingConfigSignature(embeddingConfig);
+      const embeddingValidation = embeddingConfig
+        ? await runRecallStep(
+            guard,
+            'recall_embedding_validate',
+            () => LibraProviderBridge.validateEmbedding(embeddingConfig),
+            1000,
+            { soft: true, fallback: { ok: false, missing: ['validation_timeout'] }, abortOnTimeout: false }
+          )
+        : { ok: false, missing: ['embedding_settings_unavailable'] };
+      const queryTexts = [queryBundle.currentText];
+      if (queryBundle.sceneText && queryBundle.sceneWeight > 0) queryTexts.push(queryBundle.sceneText);
+      const queryEmbeddingPromise = embeddingConfig?.enabled && embeddingValidation?.ok && queryBundle.currentText
+        ? (async () => {
+            try {
+              const result = await runRecallStep(
+                guard,
+                'recall_query_embedding',
+                () => {
+                  const child = typeof AbortController === 'function' ? new AbortController() : null;
+                  const parentSignal = guard?.controller?.signal;
+                  const abortChild = () => { try { child?.abort(parentSignal?.reason || recallDeadlineError('recall_query_embedding')); } catch (_) {} };
+                  if (parentSignal?.aborted) abortChild();
+                  else parentSignal?.addEventListener?.('abort', abortChild, { once: true });
+                  const childBudget = Math.max(250, Math.min(RECALL_EMBEDDING_BUDGET_MS - 120, recallGuardRemainingMs(guard) - 120));
+                  const childTimer = child ? setTimeout(() => {
+                    try { child.abort(recallDeadlineError('recall_query_embedding_child')); } catch (_) {}
+                  }, childBudget) : null;
+                  return Promise.resolve(LibraProviderBridge.embedTexts(queryTexts, { purpose: 'query', signal: child?.signal || parentSignal }))
+                    .finally(() => {
+                      if (childTimer) clearTimeout(childTimer);
+                      parentSignal?.removeEventListener?.('abort', abortChild);
+                    });
+                },
+                RECALL_EMBEDDING_BUDGET_MS,
+                { soft: true, fallback: null, abortOnTimeout: false }
+              );
+              return result;
+            } catch (error) {
+              warn('LIBRA recall query embedding failed', error);
+              return null;
+            }
+          })()
+        : Promise.resolve(null);
 
+      // Catalog I/O/index preparation does not depend on the query vector. Overlap it
+      // with the remote/local embedding call instead of serially delaying model send.
       ensureRecallGuard(guard, 'recall_catalog');
-      const recallCatalog = await loadOrRefreshRecallCatalog(context, manifest, guard);
+      const catalogPromise = loadOrRefreshRecallCatalog(context, manifest, guard);
+      const [embeddingResult, recallCatalog] = await Promise.all([queryEmbeddingPromise, catalogPromise]);
+      queryVectors.current = embeddingResult?.vectors?.[0] || null;
+      queryVectors.scene = embeddingResult && queryTexts.length > 1 ? embeddingResult?.vectors?.[1] || null : null;
+      queryVectors.profileId = embeddingResult?.metadata?.profileId || '';
       ensureRecallGuard(guard, 'recall_shortlist');
       const catalogShortlist = shortlistRecallCatalog(recallCatalog, manifest, queryBundle, queryVectors, settings, guard);
       const shortlistMetaByKey = new Map(asArray(catalogShortlist.rows).map(row => [string(row?.entry?.memoryKey || ''), row]).filter(([keyValue]) => keyValue));
       const refs = catalogShortlist.refs;
-      const rows = [];
-      for (const ref of refs) {
+      const rowSlots = new Array(refs.length).fill(null);
+      let hydrationCursor = 0;
+      const hydrateOne = async (ref, slotIndex) => {
         ensureRecallGuard(guard, 'recall_candidate_load');
         const memory = await runRecallStep(guard, 'recall_memory_read', () => loadMemoryRef(ref), RECALL_STEP_BUDGET_MS, { soft: true, fallback: null, abortOnTimeout: false });
-        if (!memory || memory.status !== 'committed') continue;
+        if (!memory || memory.status !== 'committed') return null;
         const vectorRecord = memory.embedding?.status === 'ready'
           ? await runRecallStep(guard, 'recall_vector_read', () => loadVectorForMemory(memory), RECALL_STEP_BUDGET_MS, { soft: true, fallback: null, abortOnTimeout: false })
           : null;
@@ -31404,7 +32777,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           : { score: 0, global: 0, bestSection: 0, sectionScores: {}, globalVector: null };
         const exact = exactAnchorScore(memory, queryBundle);
         const idValue = `${memory.memoryId}:r${memory.revision}`;
-        rows.push({
+        rowSlots[slotIndex] = {
           id: idValue,
           memory,
           vectorRecord,
@@ -31426,8 +32799,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           latentCueSignal: Number(shortlistMeta?.latentCueSignal || 0),
           latentAgeTurns: Number(shortlistMeta?.latentAgeTurns || 0),
           latentRepeatedRecently: shortlistMeta?.latentRepeatedRecently === true
-        });
-      }
+        };
+        return rowSlots[slotIndex];
+      };
+      const hydrationWorker = async () => {
+        for (;;) {
+          const slotIndex = hydrationCursor++;
+          if (slotIndex >= refs.length) return;
+          await hydrateOne(refs[slotIndex], slotIndex);
+        }
+      };
+      const workerCount = Math.max(1, Math.min(RECALL_HYDRATE_CONCURRENCY, refs.length || 1));
+      await Promise.all(Array.from({ length: workerCount }, () => hydrationWorker()));
+      const rows = rowSlots.filter(Boolean);
 
       const sparseMap = settings.lexicalFallback ? bm25fScores(rows, queryBundle.sparseText, guard) : new Map();
       for (const row of rows) {
@@ -31487,13 +32871,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const mmrPool = selectByMmr(gated, settings, Math.min(settings.recallMaxMemories * 2, settings.candidateLimit), guard);
       const budgetPlan = recallBudgetPlanForQuery(queryBundle, settings);
       const budgetAttempts = [];
-      let packed = { selected: [], tokens: 0, excerptChars: 0, dropped: [], hardDropped: [], importantDropped: [], optionalDropped: [], evidenceCharBudget: 0 };
-      for (const tierChars of budgetPlan.tiers) {
+      let packed = { selected: [], tokens: 0, excerptChars: 0, dropped: [], hardDropped: [], importantDropped: [], optionalDropped: [], evidenceCharBudget: 0, effectiveTokenBudget: 0, tokenBudgetProfile: null };
+      for (const tier of budgetPlan.tiers) {
         ensureRecallGuard(guard, 'recall_pack');
-        packed = packRecallCandidates(mmrPool, queryBundle, settings, tierChars, guard);
+        packed = packRecallCandidates(mmrPool, queryBundle, settings, tier.chars, tier.tokenBudget, guard);
         budgetAttempts.push({
-          targetChars: tierChars,
+          targetChars: tier.chars,
+          targetTokens: Number(tier.tokenBudget?.tokenCeiling || 0),
           actualChars: packed.excerptChars,
+          actualTokens: packed.tokens,
+          effectiveTokens: packed.effectiveTokenBudget,
           selected: packed.selected.length,
           hardDropped: packed.hardDropped.length,
           importantDropped: packed.importantDropped.length,
@@ -31554,6 +32941,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           gated: gated.length,
           mmrSelected: mmrPool.length,
           queryProfileId: queryVectors.profileId || '',
+          embeddingSettingsSource,
+          denseQueryAvailable: !!queryVectors.current,
           projectionVersion: RETRIEVAL_PROJECTION_VERSION,
           exactAnchorMode: 'strong_source_backed_v2',
           temporalIntent: recallTemporalIntent(queryBundle.currentText),
@@ -31571,6 +32960,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             pressureRatio: budgetPlan.pressureRatio,
             blockCharCeiling: budgetPlan.blockCharCeiling,
             evidenceCeiling: budgetPlan.evidenceCeiling,
+            tokenBudgetMode: budgetPlan.tokenBudgetMode,
+            tokenProfile: clone(packed.tokenBudgetProfile || budgetPlan.tokenProfile),
+            effectiveRecallMaxTokens: Number(packed.effectiveTokenBudget || budgetPlan.effectiveRecallMaxTokens || 0),
             attempts: budgetAttempts,
             finalHardDropped: packed.hardDropped.length,
             finalImportantDropped: packed.importantDropped.length,
@@ -31582,6 +32974,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         excerptChars,
         recallMaxChars: Number(settings.recallMaxChars || 8000),
         effectiveRecallMaxChars: Number(budgetPlan.blockCharCeiling || settings.recallMaxChars || 8000),
+        effectiveRecallMaxTokens: Number(packed.effectiveTokenBudget || budgetPlan.effectiveRecallMaxTokens || 0),
+        recallTokenBudgetMode: string(budgetPlan.tokenBudgetMode || 'dynamic_cjk_v1'),
         at: Date.now()
       };
       state.lastRecall = result;
@@ -31609,7 +33003,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         injectedMemories: 0,
         droppedMemories: 0,
         blockChars: 0,
-        charCeiling: Math.max(1000, Number(result?.effectiveRecallMaxChars || settings.recallMaxChars || result?.recallMaxChars || 8000)),
+        charCeiling: Math.max(1000, Math.min(RECALL_MAX_DYNAMIC_CHARS, Number(result?.effectiveRecallMaxChars || settings.recallMaxChars || result?.recallMaxChars || 8000))),
+        tokenCeiling: Math.max(0, Number(result?.effectiveRecallMaxTokens || result?.diagnostics?.budgetPlan?.effectiveRecallMaxTokens || 0)),
+        tokenBudgetMode: string(result?.recallTokenBudgetMode || result?.diagnostics?.budgetPlan?.tokenBudgetMode || 'dynamic_cjk_v1'),
         blockCompacted: false,
         excerptContextMode: 'semantic_group_v2',
         rows: selectedMemories.map((row, index) => {
@@ -31878,35 +33274,42 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           observedTurns: completedPairs.length
         };
 
-        // Native-copy adoption and the third-level five-turn recovery are useful
-        // maintenance work, but neither is allowed to block live recall.
-        await runRecallStep(
-          guard,
-          'before_native_copy',
-          () => ensureNativeChatCopyAdopted(context),
-          1200,
-          { soft: true, fallback: null, abortOnTimeout: false }
-        );
-
-        // Branch reconciliation is the safety boundary that prevents future/retired
-        // memories from leaking after rollback/reroll. If it cannot complete within
-        // the bounded request path, fail open with no LIBRA injection for this request.
-        await runRecallStep(
+        // Parse the chat exactly once per live request and share that immutable view
+        // with branch safety, recovery decisions, query construction, and recall.
+        const branchResult = await runRecallStep(
           guard,
           'before_branch_reconcile',
-          () => reconcileCanonicalBranchBeforeRecall(context, { reason: 'before_request' }),
+          () => reconcileCanonicalBranchBeforeRecall(context, { pairs: completedPairs, reason: 'before_request_fast' }),
           2200
         );
+        let requestManifest = branchResult?.manifest || null;
 
-        await runRecallStep(
-          guard,
-          'before_recovery_schedule',
-          () => scheduleBeforeRequestRecovery({ context, settings, previousRequestScope, completedPairs }),
-          1200,
-          { soft: true, fallback: false, abortOnTimeout: false }
-        );
+        // Native-copy adoption is normally startup/background maintenance. Only a
+        // clearly empty copied/branched target is allowed a short blocking rescue;
+        // established chats never pay this storage walk on every send.
+        const nativeCache = state.nativeCopyChecks.get(string(context.scope?.scopeKey || ''));
+        const nativeCacheFresh = nativeCache && Number(nativeCache.expiresAt || 0) > Date.now();
+        const bridgeMarker = nativeCopyBridgeMarkerState(context.chat, context.scope?.chatId);
+        const copyHint = !!nativeCopyExplicitSourceChatId(context.chat) || bridgeMarker.valid || !!nativeCopyBranchSourceChatId(context.chat);
+        const emptyManifest = !nativeCopyManifestHasData(requestManifest);
+        if (!nativeCacheFresh && emptyManifest && copyHint) {
+          const copyResult = await runRecallStep(guard, 'before_native_copy_rescue', () => ensureNativeChatCopyAdopted(context), 800, { soft: true, fallback: null, abortOnTimeout: false });
+          if (copyResult?.ok === true && copyResult?.skipped !== true) {
+            requestManifest = await runRecallStep(guard, 'before_manifest_after_copy', () => loadManifest(context.scope, completedPairs.length), 900, { soft: true, fallback: requestManifest, abortOnTimeout: false });
+          }
+        } else if (!nativeCacheFresh) {
+          setTimeout(() => { void ensureNativeChatCopyAdopted(context).catch(error => warn('LIBRA deferred native-copy check failed', error)); }, 6000);
+        }
 
-        queryBundle = buildQueryBundle(messages, context, settings);
+        // Third-level recovery only schedules later 5-turn analysis. It has no bearing
+        // on the current recall result, so keep it completely outside the send path.
+        setTimeout(() => {
+          void scheduleBeforeRequestRecovery({ context, settings, previousRequestScope, completedPairs })
+            .catch(error => warn('LIBRA deferred beforeRequest recovery scheduling failed', error));
+        }, 6000);
+
+        queryBundle = buildQueryBundle(messages, context, settings, completedPairs);
+        queryBundle.manifest = requestManifest;
         state.lastRecallInputResolution = {
           at: Date.now(),
           scope: clone(context.scope),
@@ -31966,7 +33369,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           characterId: string(context.scope?.characterId || ''),
           chatId: string(context.scope?.chatId || ''),
           chars: block.length,
-          charCeiling: Number(result?.effectiveRecallMaxChars || settings.recallMaxChars || 8000),
+          charCeiling: Math.min(RECALL_MAX_DYNAMIC_CHARS, Number(result?.effectiveRecallMaxChars || settings.recallMaxChars || 8000)),
+          tokenCeiling: Number(result?.effectiveRecallMaxTokens || delivery.tokenCeiling || 0),
+          tokenBudgetMode: string(result?.recallTokenBudgetMode || delivery.tokenBudgetMode || 'dynamic_cjk_v1'),
           selectedMemories: Number(result?.memories?.length || 0),
           injectedMemories: Number(delivery.injectedMemories || 0),
           queryText: compact(queryBundle.currentText || '', 600),
@@ -32013,6 +33418,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           errorCode: string(error?.code || ''),
           failOpen: true,
           deadlineExceeded: error?.code === 'LIBRA_RECALL_DEADLINE',
+          stepTimedOut: error?.code === 'LIBRA_RECALL_STEP_TIMEOUT' || error?.stepTimeout === true,
+          timeoutPhase: string(error?.phase || ''),
           recallRuntime: runtimeSnapshot,
           rows: [],
         };
@@ -32021,7 +33428,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         Runtime.lastMemoryInjectionMeta = {
           at: Date.now(), requestType: normalizeRequestType(type) || 'missing', scope: clone(failure.scope),
           scopeKey: failure.scopeKey, chars: 0, selectedMemories: 0, injectedMemories: 0, injected: false,
-          failOpen: true, deadlineExceeded: failure.deadlineExceeded, errorCode: failure.errorCode,
+          failOpen: true, deadlineExceeded: failure.deadlineExceeded, stepTimedOut: failure.stepTimedOut, timeoutPhase: failure.timeoutPhase, errorCode: failure.errorCode,
           inputSource: failure.inputSource, inputConfidence: failure.inputConfidence,
           queryText: compact(failure.queryText || '', 600), recallRuntime: runtimeSnapshot, error: failure.error
         };
@@ -32237,13 +33644,20 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       available: true,
       inspectSchema: LIBRA_RETRACE_INSPECT_SCHEMA,
       actions: ['ping', 'capabilities', 'inspect', 'prepare_session_handoff', 'adopt_session_handoff', 'verify_session_handoff'],
+      compatibility: libraRetraceCompatibility(),
       features: {
+        retraceCompatibility: libraRetraceCompatibility(),
+        sourceImmutableHandoff: true,
+        handoffContract: LIBRA_SESSION_HANDOFF_CONTRACT,
         lightweightProbe: true,
         canonicalViewer: true,
         sessionHandoff: true,
         parallelInspect: true,
         inspectConcurrency: 12,
         archiveHandoffV1: true,
+        canonicalMemoryOnlyHandoff: true,
+        worldAdditionalHandoff: false,
+        legacyZeroWorldAdditionalReceiptCompat: true,
         physicalMemoryCopyOnHandoff: false,
         summaryInspect: true,
         localDenseVectorPayloads: true,
@@ -32251,6 +33665,75 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       },
       respondedAt: nowIso()
     });
+
+    const libraRetraceCompatibility = () => ({
+      schema: RETRACE_PEER_COMPATIBILITY_SCHEMA,
+      protocolMajor: RETRACE_PEER_PROTOCOL_MAJOR,
+      protocolMinor: 0,
+      pluginId: PLUGIN_NAME,
+      pluginVersion: PLUGIN_VERSION,
+      peerRole: 'canonical_long_term_memory',
+      features: {
+        inspect: true,
+        nextSessionHandoff: true,
+        sourceImmutableHandoff: true,
+        durableTargetReadback: true,
+        idempotentHandoff: true,
+        inheritedStateUsable: true
+      },
+      handoff: {
+        contract: LIBRA_SESSION_HANDOFF_CONTRACT,
+        receiptSchemas: [LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA],
+        sourceMutationAllowed: false,
+        sourceCompactionAllowed: false,
+        physicalCopyRequired: false
+      }
+    });
+
+    const libraSourceHandoffIntegritySnapshot = async scopeValue => {
+      const scope = scopeValue && typeof scopeValue === 'object' ? scopeValue : { scopeKey: string(scopeValue || '') };
+      const rawManifest = await storage.getJson(key.manifest(scope), null);
+      if (!rawManifest || rawManifest.schema !== MANIFEST_SCHEMA) {
+        return { scopeKey: string(scope.scopeKey || ''), fingerprint: '', records: 0, missingMemories: 0, missingVectors: 0, reason: 'source_manifest_missing' };
+      }
+      const refs = listMemoryRefs(rawManifest);
+      let missingMemories = 0;
+      let missingVectors = 0;
+      const records = await mapWithConcurrency(refs, async ref => {
+        const memory = await storage.getJson(string(ref?.key || ''), null);
+        if (!memory) missingMemories += 1;
+        const vectorKey = string(memory?.embedding?.vectorKey || ref?.vectorKey || '').trim();
+        const vector = vectorKey ? await storage.getJson(vectorKey, null) : null;
+        if (vectorKey && !projectionHasVectorPayload(vector)) missingVectors += 1;
+        return {
+          key: string(ref?.key || ''),
+          memoryHash: memory ? digest(memory) : '',
+          vectorKey,
+          vectorHash: vector ? digest(vector) : ''
+        };
+      }, 4);
+      const core = {
+        scopeKey: string(rawManifest.scopeKey || scope.scopeKey || ''),
+        manifestHash: digest(rawManifest),
+        records: records.sort((a, b) => a.key.localeCompare(b.key)),
+        missingMemories,
+        missingVectors
+      };
+      return { ...core, recordsCount: refs.length, fingerprint: digest(core), reason: missingMemories ? 'source_memory_missing' : 'ok' };
+    };
+
+    const verifyLibraHandoffSourceBranchesReadOnly = (manifest, pairs) => {
+      const mismatches = [];
+      for (const ref of listCurrentMemoryRefs(manifest)) {
+        const start = Math.max(1, Number(ref?.turnRange?.start || 0) || 0);
+        const batch = start ? batchForStart(pairs, start) : [];
+        const currentDigest = batch.length === BATCH_SIZE ? sourceDigest(batch) : '';
+        if (!start || batch.length !== BATCH_SIZE || !ref?.sourceDigest || currentDigest !== string(ref.sourceDigest)) {
+          mismatches.push({ startTurn: start, memoryId: string(ref?.memoryId || ''), reason: batch.length !== BATCH_SIZE ? 'batch_incomplete' : 'source_digest_mismatch' });
+        }
+      }
+      return { ok: mismatches.length === 0, mismatches };
+    };
 
     const inspectForRetrace = async (options = {}) => {
       const includeRecords = options?.includeRecords !== false;
@@ -32260,7 +33743,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const memoryRefs = listMemoryRefs(manifest);
       const inheritedCount = memoryRefs.filter(ref => ref?.inheritedSessionHistory === true || Number(ref?.sessionEpoch || 0) < 0).length;
       const archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
-      const snapshotHash = digest({
+      const canonicalStateHash = digest({
+        scopeKey: string(context.scope.scopeKey || ''),
+        memoryRefs: memoryRefs.map(ref => ({
+          key: string(ref?.key || ''), memoryId: string(ref?.memoryId || ''), revision: Number(ref?.revision || 0),
+          sourceDigest: string(ref?.sourceDigest || ''), turnRange: clone(ref?.turnRange || {}),
+          sessionEpoch: Number(ref?.sessionEpoch || 0), inheritedSessionHistory: ref?.inheritedSessionHistory === true,
+          status: string(ref?.status || ''), pipelineStatus: string(ref?.pipelineStatus || ''), summary: string(ref?.summary || '')
+        }))
+      });
+      const transportSnapshotHash = digest({
         scopeKey: string(context.scope.scopeKey || ''),
         memoryRefs: memoryRefs.map(ref => ({
           key: string(ref?.key || ''), memoryId: string(ref?.memoryId || ''), revision: Number(ref?.revision || 0),
@@ -32270,18 +33762,26 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         })),
         archiveRef
       });
+      // snapshotHash historically drove RE:TRACE's source-stability check. Keep it
+      // canonical-only so prepare_session_handoff may attach archive metadata without
+      // falsely looking like a memory mutation; expose transportSnapshotHash separately.
+      const snapshotHash = canonicalStateHash;
       const base = {
         schema: LIBRA_RETRACE_INSPECT_SCHEMA,
         pluginVersion: VERSION,
         available: true,
         recordsIncluded: includeRecords,
-        capabilities: { archiveHandoffV1: true, summaryInspect: true, physicalMemoryCopyOnHandoff: false, localDenseVectorPayloads: true, portableDenseVectorPayloads: true, automaticLegacyVectorMigration: true, denseRecallFailSoft: true },
+        capabilities: { archiveHandoffV1: true, canonicalMemoryOnlyHandoff: true, worldAdditionalHandoff: false, legacyZeroWorldAdditionalReceiptCompat: true, summaryInspect: true, physicalMemoryCopyOnHandoff: false, sourceImmutableHandoff: true, handoffContract: LIBRA_SESSION_HANDOFF_CONTRACT, retraceCompatibility: libraRetraceCompatibility(), localDenseVectorPayloads: true, portableDenseVectorPayloads: true, automaticLegacyVectorMigration: true, denseRecallFailSoft: true },
+        compatibility: libraRetraceCompatibility(),
         scope: context.scope,
         manifest: {
           schema: manifest.schema, version: manifest.version, frontiers: manifest.frontiers,
+          branchGuard: clone(manifest.branchGuard),
           inFlight: manifest.inFlight, stats: manifest.stats, archiveRef, updatedAt: manifest.updatedAt
         },
+        canonicalStateHash,
         snapshotHash,
+        transportSnapshotHash,
         localVectorStorage: {
           mode: PLUGIN_VECTOR_STORAGE_MODE,
           localCacheMode: LOCAL_VECTOR_STORAGE_MODE,
@@ -32369,46 +33869,84 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const prepareSessionHandoff = async (options = {}) => {
       const transferId = normalizeHandoffTransferId(options.transferId || id('libra_handoff'));
       await cleanupExpiredHandoffPackages();
-      const context = await resolveContext();
-      const pairs = buildPairs(context.chat);
-      const manifest = await loadManifest(context.scope, pairs.length);
-      const sourceMemoryRefs = listMemoryRefs(manifest).filter(ref => ref?.key);
-      const archive = await ensureLibraSharedArchive(context, manifest, sourceMemoryRefs);
-      const memoryRefs = archive.memoryRefs;
-      const expectedRecords = options.expectedRecords == null ? memoryRefs.length : Math.max(0, Number(options.expectedRecords || 0) || 0);
-      if (expectedRecords !== memoryRefs.length) throw new Error('LIBRA handoff source count changed before preparation.');
-      const preparedAt = nowIso();
-      const packageValue = {
-        schema: LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA,
-        archiveContract: LIBRA_SHARED_ARCHIVE_REF_SCHEMA,
-        transferId,
-        source: { scope: clone(context.scope), identity: context.identity },
-        archiveRef: archive.archiveRef,
-        memoryRefs,
-        expectedRecords,
-        physicalMemoryCopies: 0,
-        preparedAt,
-        expiresAt: new Date(Date.now() + LIBRA_SESSION_HANDOFF_TTL_MS).toISOString()
-      };
-      packageValue.packageDigest = digest({ ...packageValue, packageDigest: undefined });
-      await storage.setJson(key.handoffPackage(transferId), packageValue);
-      const durablePackage = await storage.getJson(key.handoffPackage(transferId), null);
-      if (!durablePackage || durablePackage.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA
-        || string(durablePackage.transferId || '') !== transferId
-        || string(durablePackage.packageDigest || '') !== string(packageValue.packageDigest)
-        || digest({ ...durablePackage, packageDigest: undefined }) !== string(durablePackage.packageDigest || '')) {
-        throw new Error('LIBRA handoff package durable readback failed.');
-      }
-      return clone({
-        schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
-        action: 'prepared', transferId, prepared: true, durable: true, sourceScope: context.scope,
-        records: memoryRefs.length, expectedRecords,
-        archiveId: archive.archiveRef.archiveId,
-        archiveGeneration: archive.archiveRef.generation,
-        archiveDigest: archive.archiveRef.digest,
-        archiveRecordCount: archive.archiveRef.recordCount,
-        physicalMemoryCopies: 0,
-        preparedAt, expiresAt: packageValue.expiresAt
+      const initialContext = await resolveContext();
+      const expectedScopeKey = string(initialContext?.scope?.scopeKey || '');
+      if (!expectedScopeKey) throw new Error('LIBRA handoff source scope를 계산하지 못했습니다.');
+
+      return await enqueue(expectedScopeKey, async () => {
+        const context = await resolveContext();
+        if (string(context?.scope?.scopeKey || '') !== expectedScopeKey) {
+          throw new Error('LIBRA handoff 준비 중 활성 source scope가 변경되었습니다.');
+        }
+        const pairs = buildPairs(context.chat);
+        const manifest = await loadManifest(context.scope, pairs.length);
+        const branchValidation = verifyLibraHandoffSourceBranchesReadOnly(manifest, pairs);
+        if (!branchValidation.ok) {
+          const error = new Error(`LIBRA handoff source branch validation failed: ${branchValidation.mismatches.map(item => item.startTurn).join(',')}`);
+          error.code = 'LIBRA_HANDOFF_SOURCE_BRANCH_MISMATCH';
+          throw error;
+        }
+        const sourceIntegrityBefore = await libraSourceHandoffIntegritySnapshot(context.scope);
+        if (!sourceIntegrityBefore.fingerprint || sourceIntegrityBefore.missingMemories > 0) {
+          throw new Error(`LIBRA handoff source storage is incomplete: ${sourceIntegrityBefore.reason || 'unknown'}`);
+        }
+        const sourceMemoryRefs = listMemoryRefs(manifest).filter(ref => ref?.key);
+        const archive = await ensureLibraSharedArchive(context, manifest, sourceMemoryRefs);
+        const memoryRefs = archive.memoryRefs;
+        const expectedRecords = options.expectedRecords == null ? memoryRefs.length : Math.max(0, Number(options.expectedRecords || 0) || 0);
+        if (expectedRecords !== memoryRefs.length) throw new Error('LIBRA handoff source count changed before preparation.');
+        const sourceIntegrityAfter = await libraSourceHandoffIntegritySnapshot(context.scope);
+        if (sourceIntegrityBefore.fingerprint !== sourceIntegrityAfter.fingerprint) {
+          const error = new Error('LIBRA source mutation detected during handoff preparation.');
+          error.code = 'SOURCE_MUTATION_DETECTED';
+          throw error;
+        }
+        const preparedAt = nowIso();
+        const packageValue = {
+          schema: LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA,
+          archiveContract: LIBRA_SHARED_ARCHIVE_REF_SCHEMA,
+          handoffContract: LIBRA_SESSION_HANDOFF_CONTRACT,
+          transferId,
+          source: { scope: clone(context.scope), identity: context.identity },
+          archiveRef: archive.archiveRef,
+          memoryRefs,
+          expectedRecords,
+          physicalMemoryCopies: 0,
+          sourceFingerprintBefore: sourceIntegrityBefore.fingerprint,
+          sourceFingerprintAfter: sourceIntegrityAfter.fingerprint,
+          sourcePreserved: true,
+          sourceMutationAllowed: false,
+          sourceCompactionAllowed: false,
+          preparedAt,
+          expiresAt: new Date(Date.now() + LIBRA_SESSION_HANDOFF_TTL_MS).toISOString()
+        };
+        packageValue.packageDigest = digest({ ...packageValue, packageDigest: undefined });
+        await storage.setJson(key.handoffPackage(transferId), packageValue);
+        const durablePackage = await storage.getJson(key.handoffPackage(transferId), null);
+        if (!durablePackage || durablePackage.schema !== LIBRA_SESSION_HANDOFF_PACKAGE_SCHEMA
+          || string(durablePackage.transferId || '') !== transferId
+          || string(durablePackage.packageDigest || '') !== string(packageValue.packageDigest)
+          || digest({ ...durablePackage, packageDigest: undefined }) !== string(durablePackage.packageDigest || '')) {
+          throw new Error('LIBRA handoff package durable readback failed.');
+        }
+        return clone({
+          schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
+          action: 'prepared', transferId, prepared: true, durable: true, sourceScope: context.scope,
+          records: memoryRefs.length, expectedRecords,
+          worldAdditional: 0, expectedWorldAdditional: 0,
+          archiveId: archive.archiveRef.archiveId,
+          archiveGeneration: archive.archiveRef.generation,
+          archiveDigest: archive.archiveRef.digest,
+          archiveRecordCount: archive.archiveRef.recordCount,
+          physicalMemoryCopies: 0,
+          handoffContract: LIBRA_SESSION_HANDOFF_CONTRACT,
+          sourcePreserved: true,
+          sourceMutationAllowed: false,
+          sourceCompactionAllowed: false,
+          sourceFingerprintBefore: sourceIntegrityBefore.fingerprint,
+          sourceFingerprintAfter: sourceIntegrityAfter.fingerprint,
+          preparedAt, expiresAt: packageValue.expiresAt
+        });
       });
     };
 
@@ -32441,14 +33979,16 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
       const refs = asArray(manifest.inheritedMemories).filter(ref => ref?.status === 'committed' && string(ref.handoffTransferId) === transferId);
       const expectedRecords = options.expectedRecords == null ? refs.length : Math.max(0, Number(options.expectedRecords) || 0);
-      let readable = 0;
-      let vectorsReady = 0;
-      for (const ref of refs) {
+      const verifiedRows = await mapWithConcurrency(refs, async ref => {
         const memory = await loadMemoryRef(ref);
-        if (!memory) continue;
-        readable += 1;
-        if (memory.embedding?.status === 'ready' && memory.embedding?.vectorKey && projectionHasVectorPayload(await storage.getJson(memory.embedding.vectorKey, null))) vectorsReady += 1;
-      }
+        if (!memory) return { readable: false, vectorReady: false };
+        const vectorReady = memory.embedding?.status === 'ready' && memory.embedding?.vectorKey
+          ? projectionHasVectorPayload(await storage.getJson(memory.embedding.vectorKey, null))
+          : false;
+        return { readable: true, vectorReady };
+      }, 4);
+      const readable = verifiedRows.filter(row => row?.readable === true).length;
+      const vectorsReady = verifiedRows.filter(row => row?.vectorReady === true).length;
       const archiveRef = normalizeLibraArchiveRef(manifest.archiveRef);
       const archive = await readLibraSharedArchive(archiveRef);
       const handoffMarker = manifest.lastSessionHandoff && typeof manifest.lastSessionHandoff === 'object'
@@ -32463,7 +34003,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         && Number(handoffMarker.records || 0) === expectedRecords
         && string(handoffMarker.archiveId || '') === string(archiveRef?.archiveId || '')
         && Number(handoffMarker.archiveGeneration || 0) === Number(archiveRef?.generation || 0)
-        && string(handoffMarker.archiveDigest || '') === string(archiveRef?.digest || '');
+        && string(handoffMarker.archiveDigest || '') === string(archiveRef?.digest || '')
+        && string(handoffMarker.handoffContract || '') === LIBRA_SESSION_HANDOFF_CONTRACT
+        && handoffMarker.sourcePreserved === true
+        && handoffMarker.sourceMutationAllowed === false
+        && handoffMarker.sourceCompactionAllowed === false
+        && string(handoffMarker.sourceFingerprintBefore || '').length > 0
+        && string(handoffMarker.sourceFingerprintBefore || '') === string(handoffMarker.sourceFingerprintAfter || '');
       const requestedArchiveMatches = (!expectedArchiveId || expectedArchiveId === string(archiveRef?.archiveId || ''))
         && (!expectedArchiveDigest || expectedArchiveDigest === string(archiveRef?.digest || ''))
         && (!expectedArchiveGeneration || expectedArchiveGeneration === Number(archiveRef?.generation || 0));
@@ -32475,12 +34021,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         schema: LIBRA_SESSION_HANDOFF_RECEIPT_SCHEMA,
         action: 'verified', transferId, targetChatId, targetScope: target.scope,
         verified, durable: verified, records: readable, expectedRecords,
+        worldAdditional: 0, expectedWorldAdditional: 0,
         vectorsReady,
         archiveId: archiveRef?.archiveId || '',
         archiveGeneration: archiveRef?.generation || 0,
         archiveDigest: archiveRef?.digest || '',
         archiveRecordCount: archiveRef?.recordCount || 0,
         physicalMemoryCopies: 0,
+        handoffContract: LIBRA_SESSION_HANDOFF_CONTRACT,
+        sourcePreserved: handoffMarker.sourcePreserved === true,
+        sourceMutationAllowed: false,
+        sourceCompactionAllowed: false,
+        sourceFingerprintBefore: string(handoffMarker.sourceFingerprintBefore || ''),
+        sourceFingerprintAfter: string(handoffMarker.sourceFingerprintAfter || ''),
         reason: verified ? 'libra_archive_handoff_durable' : 'libra_archive_handoff_readback_mismatch'
       });
     };
@@ -32510,6 +34063,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           && integerFieldMatches('archiveGeneration')
           && Number(prior.archiveGeneration) >= 1
           && integerFieldMatches('physicalMemoryCopies', 0)
+          && string(prior?.handoffContract || '') === LIBRA_SESSION_HANDOFF_CONTRACT
+          && prior?.sourcePreserved === true
+          && prior?.sourceMutationAllowed === false
+          && prior?.sourceCompactionAllowed === false
+          && string(prior?.sourceFingerprintBefore || '').trim().length > 0
+          && string(prior?.sourceFingerprintBefore || '') === string(prior?.sourceFingerprintAfter || '')
           && string(prior?.archiveId || '').trim().length > 0
           && string(prior?.archiveDigest || '').trim().length > 0
           && (requestedExpectedRecords == null || requestedExpectedRecords === priorRecords);
@@ -32559,6 +34118,20 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       if (requestedExpectedRecords != null && requestedExpectedRecords !== packageRecords) {
         throw new Error('LIBRA handoff package count does not match the requested transfer.');
       }
+      if (string(packageValue.handoffContract || '') !== LIBRA_SESSION_HANDOFF_CONTRACT
+        || packageValue.sourcePreserved !== true
+        || packageValue.sourceMutationAllowed !== false
+        || packageValue.sourceCompactionAllowed !== false
+        || !string(packageValue.sourceFingerprintBefore || '')
+        || string(packageValue.sourceFingerprintBefore || '') !== string(packageValue.sourceFingerprintAfter || '')) {
+        throw new Error('LIBRA handoff package does not prove immutable source preparation.');
+      }
+      const sourceIntegrityBeforeAdoption = await libraSourceHandoffIntegritySnapshot(packageValue.source?.scope || {});
+      if (sourceIntegrityBeforeAdoption.fingerprint !== string(packageValue.sourceFingerprintAfter || '')) {
+        const error = new Error('LIBRA source changed between handoff preparation and adoption.');
+        error.code = 'SOURCE_MUTATION_DETECTED';
+        throw error;
+      }
       const target = await waitForTargetContextForHandoff(targetChatId);
       if (string(packageValue.source?.scope?.chatId) === targetChatId) throw new Error('LIBRA handoff 대상이 원본 채팅과 같습니다.');
       const manifest = await loadManifest(target.scope, buildPairs(target.chat).length);
@@ -32573,9 +34146,22 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         sourceChatId: string(sourceScope.chatId || ''), sourceScopeKey: string(sourceScope.scopeKey || ''),
         targetChatId, targetScopeKey: target.scope.scopeKey, records: linkedRefs.length,
         archiveId: archiveRef.archiveId, archiveGeneration: archiveRef.generation, archiveDigest: archiveRef.digest,
-        physicalMemoryCopies: 0, adoptedAt: nowIso()
+        physicalMemoryCopies: 0,
+        handoffContract: LIBRA_SESSION_HANDOFF_CONTRACT,
+        sourcePreserved: true,
+        sourceMutationAllowed: false,
+        sourceCompactionAllowed: false,
+        sourceFingerprintBefore: string(packageValue.sourceFingerprintBefore || ''),
+        sourceFingerprintAfter: string(packageValue.sourceFingerprintAfter || ''),
+        adoptedAt: nowIso()
       };
       await saveManifest(target.scope, manifest);
+      const sourceIntegrityAfterAdoption = await libraSourceHandoffIntegritySnapshot(packageValue.source?.scope || {});
+      if (sourceIntegrityAfterAdoption.fingerprint !== string(packageValue.sourceFingerprintAfter || '')) {
+        const error = new Error('LIBRA source mutation detected during target adoption.');
+        error.code = 'SOURCE_MUTATION_DETECTED';
+        throw error;
+      }
       const verification = await verifySessionHandoff({ transferId, targetChatId, expectedRecords: packageRecords });
       const receipt = { ...verification, action: 'adopted', adopted: verification.verified === true, sourceScope: clone(sourceScope), adoptedAt: nowIso() };
       await storage.setJson(key.handoffReceipt(transferId), receipt);
@@ -33266,9 +34852,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     ];
     await Promise.all(keys.map(key => RisuCompat.removeItem(key)));
     if (includeSecrets) {
-      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
-      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_CONFIG_SECRETS_KEY);
-      await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
+      await Promise.all([
+        RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY),
+        RisuCompat.localRemoveItem(LOCAL_PROVIDER_CONFIG_SECRETS_KEY),
+        RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY),
+        RisuCompat.removeItem(SYNCED_PROVIDER_SECRETS_KEY),
+        RisuCompat.removeItem(SYNCED_PROVIDER_CONFIG_SECRETS_KEY),
+        RisuCompat.removeItem(SYNCED_BACKEND_HOSTING_TOKEN_KEY)
+      ]);
+      await Promise.all([
+        setPluginArgumentValue('llm_key', '').catch(() => null),
+        setPluginArgumentValue('embedding_key', '').catch(() => null),
+        setPluginArgumentValue('backend_hosting_token', '').catch(() => null)
+      ]);
     }
     LibraProviderBridge.resetConfigRuntime();
     const marker = {
@@ -37173,6 +38769,9 @@ html,body{width:100%;height:100%;overflow:hidden}
     lastNativeChatCopyCheck: Runtime.lastNativeChatCopyCheck || LibraMemoryCore.state.lastNativeCopyCheck || null,
     memoryRunCount: Number(LibraMemoryCore.state.memoryRunCount || 0),
     lastMemoryRequestScope: LibraMemoryCore.state.lastRequestScope ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastRequestScope)) : null,
+    branchFastCacheScopes: LibraMemoryCore.state.branchPairSignatureCache?.size || 0,
+    branchAuditInFlight: LibraMemoryCore.state.branchAuditInFlight?.size || 0,
+    recallCatalogUpgradeInFlight: LibraMemoryCore.state.recallCatalogUpgradeInFlight?.size || 0,
     lastMemoryBeforeRequestRecovery: LibraMemoryCore.state.lastBeforeRequestRecovery ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastBeforeRequestRecovery)) : null,
     lastMemoryAfterRequest: LibraMemoryCore.state.lastAfterRequest ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastAfterRequest)) : null,
     lastMemoryScanSchedule: LibraMemoryCore.state.lastScanSchedule ? JSON.parse(JSON.stringify(LibraMemoryCore.state.lastScanSchedule)) : null,
@@ -37914,7 +39513,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '정밀 후보' }), guiEl('strong', { text: String(Number(diagnostics.shortlistedCandidates || diagnostics.candidates || 0)) })]),
       guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '게이트 제외' }), guiEl('strong', { text: String(Number(diagnostics.gateRejected || 0)) })]),
       guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '주입 문자' }), guiEl('strong', { text: String(Number(delivery.blockChars || Runtime.lastMemoryInjectionMeta?.chars || 0)) })]),
-      guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '동적 상한' }), guiEl('strong', { text: String(Number(delivery.charCeiling || diagnostics?.budgetPlan?.blockCharCeiling || 0)) })]),
+      guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '동적 문자 상한' }), guiEl('strong', { text: String(Number(delivery.charCeiling || diagnostics?.budgetPlan?.blockCharCeiling || 0)) })]),
+      guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '동적 토큰 상한' }), guiEl('strong', { text: String(Number(delivery.tokenCeiling || diagnostics?.budgetPlan?.effectiveRecallMaxTokens || Runtime.lastMemoryInjectionMeta?.tokenCeiling || 0)) })]),
       guiEl('div', { class: 'libra-recall-metric' }, [guiEl('span', { text: '프롬프트 압력' }), guiEl('strong', { text: libraGuiText(diagnostics.promptPressure || Runtime.lastMemoryInjectionMeta?.promptPressure || 'normal') })])
     ]);
 
@@ -38107,14 +39707,27 @@ html,body{width:100%;height:100%;overflow:hidden}
       const failedItoStages = Array.isArray(memory?.pipeline?.failedItoStages)
         ? memory.pipeline.failedItoStages
         : [];
+      const evidenceResolutionStatus = libraGuiText(memory?.pipeline?.evidenceResolution?.status || '');
+      const rawEvidenceStatus = libraGuiText(memory?.sourceEvidenceValidation?.status || '');
+      const evidenceLabel = ({
+        passed_without_repair: '근거 통과',
+        accepted_with_warning: '근거 경고',
+        repaired: '근거 교정 완료',
+        stage_fallback: '안전 단계 복귀'
+      })[evidenceResolutionStatus] || ({
+        ok: '근거 통과',
+        warning: '근거 경고',
+        high_risk: '근거 위험'
+      })[rawEvidenceStatus] || '근거 미기록';
       return guiLazyDetails({ class: 'sga-card wide' }, guiEl('summary', {}, [
         guiEl('strong', { text: `TURN ${memory.turnRange.start}~${memory.turnRange.end}` }),
-        guiEl('span', { text: `revision ${memory.revision} · ${memory.pipeline?.status === 'partial' ? '부분 정본 · ' : ''}${embeddingDisplay.text}` })
+        guiEl('span', { text: `revision ${memory.revision} · ${memory.pipeline?.status === 'partial' ? '부분 정본 · ' : ''}${evidenceLabel} · ${embeddingDisplay.text}` })
       ]), () => [
         guiEl('div', { class: 'sga-summary-table', style: { marginTop: '12px' } }, [
           guiEl('span', { text: '메모리 ID' }), guiEl('strong', { text: memory.memoryId }),
           guiEl('span', { text: '정본 상태' }), guiEl('strong', { text: memory.status }),
           guiEl('span', { text: '파이프라인' }), guiEl('strong', { text: memory.pipeline?.status === 'partial' ? `부분 정본 · 실패 ito: ${failedItoStages.map(item => LibraMemoryCore.STAGE_LABELS[item?.stage] || item?.stage).filter(Boolean).join(', ') || '기록됨'}` : '완료' }),
+          guiEl('span', { text: '근거 검증' }), guiEl('strong', { text: evidenceLabel }),
           guiEl('span', { text: '원문 digest' }), guiEl('strong', { text: memory.sourceDigest }),
           guiEl('span', { text: '생성 시각' }), guiEl('strong', { text: libraFormatTime(memory.updatedAt) }),
           guiEl('span', { text: '임베딩' }), guiEl('strong', { text: embeddingDisplay.text }),
@@ -38122,7 +39735,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         ]),
         guiEl('h4', { text: '최종 종합 메모리' }),
         guiEl('pre', { class: 'sga-live-result-code', text: memory.text }),
-        guiLazyDetails({}, guiEl('summary', { text: '검색 영역·anchor·근거 U+A' }), () => guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ sourcePairs: memory.sourcePairs, sourceEvidenceValidation: memory.sourceEvidenceValidation || null, recallKeys: memory.recallKeys, sections: memory.sections, anchors: memory.anchors, retrieval: memory.retrieval, embedding: memory.embedding }, null, 2) })),
+        guiLazyDetails({}, guiEl('summary', { text: '검색 영역·anchor·근거 U+A' }), () => guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify({ sourcePairs: memory.sourcePairs, sourceEvidenceValidation: memory.sourceEvidenceValidation || null, evidenceResolution: memory.pipeline?.evidenceResolution || null, recallKeys: memory.recallKeys, sections: memory.sections, anchors: memory.anchors, retrieval: memory.retrieval, embedding: memory.embedding }, null, 2) })),
         guiEl('div', { class: 'sga-actions' }, [guiEl('button', { class: 'sga-btn', type: 'button', text: '이 메모리의 실행 기록', onClick: () => { Gui.libraSelectedRunId = memory.runId; libraGuiNavigate('runs'); } })])
       ]);
     });
@@ -38146,8 +39759,10 @@ html,body{width:100%;height:100%;overflow:hidden}
           guiEl('span', { text: '시작' }), guiEl('strong', { text: libraFormatTime(run.startedAt) }),
           guiEl('span', { text: '완료' }), guiEl('strong', { text: libraFormatTime(run.finishedAt) }),
           guiEl('span', { text: '커밋' }), guiEl('strong', { text: run.commit?.status || 'pending' }),
+          guiEl('span', { text: '근거 검증' }), guiEl('strong', { text: run.evidence?.status || run.commit?.evidenceResolutionStatus || '미기록' }),
           guiEl('span', { text: '임베딩' }), guiEl('strong', { text: run.embedding?.status || 'pending' })
         ]),
+        run.evidence ? guiLazyDetails({}, guiEl('summary', { text: '정본 근거 검증' }), () => guiEl('pre', { class: 'sga-live-result-code', text: JSON.stringify(run.evidence, null, 2) })) : null,
         ...(Array.isArray(run.stages) ? run.stages : []).filter(stage => stage && typeof stage === 'object').map((stage, index) => guiLazyDetails({ class: 'sga-card', open: index === 0 }, guiEl('summary', {}, [
           guiEl('strong', { text: `${index + 1}. ${stage.label || LibraMemoryCore.STAGE_LABELS[stage.stage] || stage.stage}` }),
           guiEl('span', { text: `${stage.status} · ${stage.provider || 'provider?'} / ${stage.model || 'model?'} · ${stage.durationMs || 0}ms${Number(stage.cache?.readTokens || 0) > 0 ? ` · 캐시 ${stage.cache.readTokens}T` : ''}` })
@@ -38192,8 +39807,8 @@ html,body{width:100%;height:100%;overflow:hidden}
         ]),
         guiEl('div', { class: 'sga-note', style: { marginTop: '10px' }, text: '기존 세션의 과거 대화는 자동으로 분석하지 않습니다. 홈의 “수동 콜드스타트”를 눌렀을 때만 누락된 과거 5턴 구간을 구축합니다.' }),
         guiEl('div', { class: 'sga-grid', style: { marginTop: '12px' } }, [
-          fieldNode('리콜 토큰 예산', numberInput('recallMaxTokens', settings.recallMaxTokens, 320, 12000)),
-          fieldNode('리콜 주입 문자 상한', numberInput('recallMaxChars', settings.recallMaxChars, 1000, 30000)),
+          fieldNode('리콜 토큰 예산', guiEl('input', { class: 'sga-input', type: 'text', value: '자동', disabled: true })),
+          fieldNode('리콜 주입 문자 상한', numberInput('recallMaxChars', settings.recallMaxChars, 1000, RECALL_MAX_DYNAMIC_CHARS)),
           fieldNode('연속 입력 문맥 메시지 수', numberInput('continuationTailMessages', settings.continuationTailMessages, 1, 20)),
           fieldNode('RRF k', numberInput('rrfK', settings.rrfK, 1, 200)),
           fieldNode('Exact anchor 문턱', numberInput('gateExactAnchor', settings.gateExactAnchor, 0, 1, 0.01)),
@@ -38202,7 +39817,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           fieldNode('메모리당 최대 영역', numberInput('maxSectionsPerMemory', settings.maxSectionsPerMemory, 1, 5)),
           fieldNode('상세 실행 기록 보관 수', numberInput('runDetailRetention', settings.runDetailRetention, 5, 200))
         ]),
-        guiEl('div', { class: 'sga-note', text: '분석 간격은 완성된 U+A 5턴으로 고정됩니다. 리콜 주입 문자 상한은 기본 8,000자이며 채우기 목표가 아닙니다. 관련 자료가 적으면 필요한 만큼만 주입합니다. 정본은 한 건이지만 검색 시에는 종합·시간순·인물관계·세계장면·내러티브·사실 영역을 별도 투영하고, 경량 카탈로그에서 후보 한도만 먼저 추린 뒤 Dense/BM25F/Exact/Forced → RRF → 증거 게이트 → MMR → 적응형 다중 구간 발췌 순으로 정밀 리콜합니다. 후보 재랭킹 한도는 이제 정본·벡터 정밀 로드의 실제 상한으로 동작합니다.' }),
+        guiEl('div', { class: 'sga-note', text: '분석 간격은 완성된 U+A 5턴으로 고정됩니다. 리콜 주입 문자 상한은 기본 8,000자, 절대 최대 12,000자이며 채우기 목표가 아닙니다. 토큰 예산은 프롬프트 압력으로 결정된 실제 문자 예산과 현재 텍스트의 CJK 비율에 맞춰 자동 계산됩니다. 관련 자료가 적으면 필요한 만큼만 주입합니다. 정본은 한 건이지만 검색 시에는 종합·시간순·인물관계·세계장면·내러티브·사실 영역을 별도 투영하고, 경량 카탈로그에서 후보 한도만 먼저 추린 뒤 Dense/BM25F/Exact/Forced → RRF → 증거 게이트 → MMR → 적응형 다중 구간 발췌 순으로 정밀 리콜합니다. 후보 재랭킹 한도는 이제 정본·벡터 정밀 로드의 실제 상한으로 동작합니다.' }),
         guiEl('div', { class: 'sga-actions' }, [
           guiEl('button', { class: 'sga-btn good', type: 'button', text: 'LIBRA 설정 저장', onClick: async () => { await LibraMemoryCore.saveSettings(LibraMemoryCore.state.settings || settings); await renderSettingsGui(); guiSetStatus('LIBRA 기억 설정을 저장했습니다.'); } }),
           guiEl('button', { class: 'sga-btn danger', type: 'button', text: '현재 채팅 LIBRA 데이터 삭제', onClick: async () => {
@@ -39072,7 +40687,9 @@ html,body{width:100%;height:100%;overflow:hidden}
         profile: registry.profileFor(config),
         requestFingerprint: registry.requestFingerprintFor(config),
         queryCache: registry.getQueryCacheStats(),
-        preprocessVersion: registry.normalizeProvider(config.provider) === 'ollama' ? registry.OLLAMA_PREPROCESS_VERSION : registry.PREPROCESS_VERSION,
+        preprocessVersion: registry.profileFor(config)?.preprocessingVersion || registry.PREPROCESS_VERSION,
+        contextGroupingVersion: registry.profileFor(config)?.contextGroupingVersion || '',
+        safeInputTokenLimit: registry.providerSafeInputTokenLimit(config.provider, registry.normalizeConfig(config)),
         ollama: registry.normalizeProvider(config.provider) === 'ollama' ? {
           policy: registry.ollamaModelPolicy(config.model),
           discovery: registry.getOllamaDiscovery(),
@@ -39169,6 +40786,29 @@ html,body{width:100%;height:100%;overflow:hidden}
     return false;
   };
 
+  const INPUT_ASSIST_FAST_MODE_TTL_MS = 30 * 1000;
+  const readInputAssistModeFast = async (force = false) => {
+    const now = Date.now();
+    if (!force && Runtime.settings && now - Number(Runtime.settingsLoadedAt || 0) < SETTINGS_CACHE_TTL_MS) {
+      const mode = normalizeChoice(Runtime.settings.inputAssistMode || 'off', INPUT_ASSIST_MODES, 'off');
+      Runtime.inputAssistFastMode = mode;
+      Runtime.inputAssistFastModeLoadedAt = now;
+      return mode;
+    }
+    if (!force && Runtime.inputAssistFastMode !== 'unknown'
+      && now - Number(Runtime.inputAssistFastModeLoadedAt || 0) < INPUT_ASSIST_FAST_MODE_TTL_MS) {
+      return Runtime.inputAssistFastMode;
+    }
+    const runtimeStored = await readRuntimeSettings();
+    const raw = Object.prototype.hasOwnProperty.call(runtimeStored, 'input_assist_mode')
+      ? runtimeStored.input_assist_mode
+      : await getArgument('input_assist_mode', 'off');
+    const mode = normalizeChoice(raw || 'off', INPUT_ASSIST_MODES, 'off');
+    Runtime.inputAssistFastMode = mode;
+    Runtime.inputAssistFastModeLoadedAt = now;
+    return mode;
+  };
+
   try {
     const registerInputAssistHandler = async () => {
       const inputApi = getLiveApi(['addRisuScriptHandler']);
@@ -39177,9 +40817,14 @@ html,body{width:100%;height:100%;overflow:hidden}
         warn('RisuAI addRisuScriptHandler input API is unavailable. Normal input reconstruction is disabled.');
         return false;
       }
+      // Prime the one-field mode cache during plugin setup so the first ordinary
+      // user send does not need to deserialize the full provider/agent configuration.
+      try { await readInputAssistModeFast(true); } catch (_) {}
       const handler = async content => {
         if (LibraMemoryCore.state.disposed) return content;
         try {
+          const fastMode = await readInputAssistModeFast();
+          if (fastMode === 'off') return content;
           const settings = await loadSettings();
           if (settings.inputAssistMode === 'off') return content;
           let rewritten = await runInputAssistForContent(content, settings, { source: 'normal_input' });
@@ -39314,6 +40959,9 @@ html,body{width:100%;height:100%;overflow:hidden}
       LibraMemoryCore.state.scheduledRecoveryScanSerial += 1;
       for (const timer of LibraMemoryCore.state.timers.values()) clearTimeout(timer);
       LibraMemoryCore.state.timers.clear();
+      LibraMemoryCore.state.branchPairSignatureCache?.clear?.();
+      LibraMemoryCore.state.branchAuditInFlight?.clear?.();
+      LibraMemoryCore.state.recallCatalogUpgradeInFlight?.clear?.();
       LibraMemoryCore.state.outputListenerRegistered = false;
       LibraMemoryCore.state.outputListener = null;
       Gui.visible = false;
@@ -39400,6 +41048,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       clearArgumentCache();
       LibraMemoryCore.state.nativeCopyChecks?.clear?.();
       LibraMemoryCore.state.nativeCopyInFlight?.clear?.();
+      LibraMemoryCore.state.lastResolvedContext = null;
+      LibraMemoryCore.state.previousResolvedContext = null;
       LibraMemoryCore.state.lastNativeCopyCheck = null;
       LibraMemoryCore.state.lastRequestScope = null;
       LibraMemoryCore.state.lastBeforeRequestRecovery = null;
