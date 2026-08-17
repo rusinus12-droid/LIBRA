@@ -1,8 +1,11 @@
 //@name libra
-//@display-name LIBRA v1.0.59
+//@display-name LIBRA v1.0.62
 //@api 3.0
-//@version 1.0.59
+//@version 1.0.62
 
+/* v1.0.62 fixes a false SOURCE_MUTATION_DETECTED during RE:TRACE handoff preparation: source-vector integrity now fingerprints the exact durable pluginStorage record instead of the cache-dependent hydrated projection object, so switching hydration provenance between portable pluginStorage payload and RAM/local cache cannot masquerade as a vector rewrite. Real durable vector-record changes, canonical-memory changes, manifest changes, and missing-record changes are still fail-closed. */
+/* v1.0.61 stabilizes source-immutable RE:TRACE handoff preparation: automatic no-reembed vector maintenance is settled before the source fingerprint is taken, new vector-maintenance scheduling is deferred while the source handoff freeze is active, source-integrity mismatches now report which manifest/memory/vector components changed, and LIBRA IPC errors expose the remote error code. Canonical memories, source manifests, source vectors, and existing archives are never rewritten by the handoff itself. */
+/* v1.0.60 makes ordinary RisuAI chat-copy adoption completeness-safe: when explicit copy/branch metadata is absent, source selection is driven by the longest verified U+A transcript prefix and eligible five-turn canonical coverage instead of title priority; the copy receipt records expected canonical/inherited counts before writing; durable verification proves every eligible five-turn memory in the target; and legacy/partial v1 native-copy targets are repaired idempotently by filling only missing valid memories/vectors instead of being frozen by target_already_initialized. Existing target memories are preserved, RE:TRACE handoff remains separate/source-immutable, and no re-embedding is introduced. */
 /* v1.0.59 hotfixes the LIBRA Settings GUI scope regression: the 12,000-character dynamic recall ceiling is now exposed by LibraMemoryCore as a read-only public capability value, and the settings panel consumes that exported value instead of referencing a private IIFE constant. Recall, storage, embedding, native chat-copy, and RE:TRACE handoff behavior are unchanged. */
 /* v1.0.58 ports FLASHBACK-style native chat-copy continuity into LIBRA: copy detection can reuse the immediately previous resolved chat when the host chat list is incomplete, canonical-memory validation uses message-id-independent U+A content identity, cloned current memories are rebound to the copied chat's new message IDs/sourceDigest without re-embedding, and durable readback verifies every copied canonical memory/vector before the copy is marked complete. RE:TRACE handoff remains separate and source-immutable. */
 /* v1.0.57 makes WebRisu credential persistence update-safe by mirroring provider-preset secrets, active LLM/embedding provider secrets, and the hosting token into verified pluginStorage backups while retaining localPluginStorage; active llm_key/embedding_key/hosting-token arguments are also repaired when host argument writes are available, and startup reads reconcile surviving copies back into missing stores without changing provider/model selection. */
@@ -264,7 +267,7 @@
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '1.0.59';
+  const PLUGIN_VERSION = '1.0.62';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const LIBRA_RETRACE_IPC_SCHEMA = 'libra-retrace-ipc-v1';
   const LIBRA_RETRACE_IPC_REQUEST_CHANNEL = 'libra_memory_bridge_request_v1';
@@ -25774,6 +25777,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       embeddingMigrationScheduled: false,
       embeddingMigrationCheckedSignature: '',
       lastEmbeddingMigration: null,
+      handoffSourceFreezeDepth: 0,
+      embeddingMigrationDeferredByHandoff: false,
+      lastHandoffSourceIntegrity: null,
       queues: new Map(),
       timers: new Map(),
       deletingScopes: new Set(),
@@ -26741,6 +26747,10 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const scheduleAutomaticLegacyVectorMigration = (options = {}) => {
       if (state.disposed) return false;
+      if (state.handoffSourceFreezeDepth > 0 && options.handoffPreflight !== true) {
+        state.embeddingMigrationDeferredByHandoff = true;
+        return false;
+      }
       const timerKey = 'embedding_auto_migration';
       const currentConfig = state.embeddingSettings || normalizeEmbeddingSettings(DEFAULT_EMBEDDING);
       const currentSignature = embeddingConfigSignature(currentConfig);
@@ -26774,6 +26784,43 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       }, delay);
       state.timers.set(timerKey, timer);
       return true;
+    };
+
+    const settleAutomaticVectorMaintenanceBeforeHandoff = async () => {
+      const timerKey = 'embedding_auto_migration';
+      const cancelScheduled = () => {
+        const timer = state.timers.get(timerKey);
+        if (timer) clearTimeout(timer);
+        if (timer) state.timers.delete(timerKey);
+        if (timer || state.embeddingMigrationScheduled) state.embeddingMigrationScheduled = false;
+        return !!timer;
+      };
+      let cancelledScheduled = cancelScheduled();
+      if (state.embeddingMigrationPromise) await state.embeddingMigrationPromise;
+      if (state.disposed) return { ok: false, reason: 'runtime_disposed', cancelledScheduled };
+      const config = state.embeddingSettings || await loadEmbeddingSettings();
+      // loadEmbeddingSettings may schedule the same startup migration while resolving
+      // a cold runtime cache. Cancel it again and run/verify it synchronously before
+      // the source fingerprint is captured.
+      cancelledScheduled = cancelScheduled() || cancelledScheduled;
+      const signature = embeddingConfigSignature(config);
+      let migration = null;
+      if (string(state.embeddingMigrationCheckedSignature || '') !== signature) {
+        migration = await runAutomaticLegacyVectorMigration({
+          reason: 'handoff_preflight_vector_stabilization',
+          force: false,
+          handoffPreflight: true
+        });
+      }
+      if (state.embeddingMigrationPromise) await state.embeddingMigrationPromise;
+      cancelScheduled();
+      return {
+        ok: true,
+        reason: migration?.reason || 'vector_maintenance_stable',
+        cancelledScheduled,
+        migration: clone(migration),
+        signature
+      };
     };
 
     const emptyEmbeddingRebuildCounts = () => ({
@@ -27381,7 +27428,9 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       || Number(a.revision || 0) - Number(b.revision || 0)
     ));
 
-    const NATIVE_CHAT_COPY_SCHEMA = 'libra.native_chat_copy.v1';
+    const NATIVE_CHAT_COPY_SCHEMA = 'libra.native_chat_copy.v2';
+    const NATIVE_CHAT_COPY_LEGACY_SCHEMAS = new Set(['libra.native_chat_copy.v1']);
+    const NATIVE_CHAT_COPY_COMPLETENESS_VERSION = 2;
     const NATIVE_CHAT_COPY_POSITIVE_TTL_MS = 5 * 60 * 1000;
     const NATIVE_CHAT_COPY_NEGATIVE_TTL_MS = 15 * 1000;
 
@@ -27469,6 +27518,45 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
     const nativeCopyManifestHasData = manifest => !!manifest && (
       listCurrentMemoryRefs(manifest).length > 0
       || listInheritedMemoryRefs(manifest).length > 0
+    );
+
+    const nativeCopyReceiptSchemaSupported = receipt => {
+      const schema = string(receipt?.schema || '');
+      return schema === NATIVE_CHAT_COPY_SCHEMA || NATIVE_CHAT_COPY_LEGACY_SCHEMAS.has(schema);
+    };
+
+    const nativeCopyInheritedRefIdentity = ref => [
+      ref?.archiveShared === true ? 'shared' : 'physical',
+      string(ref?.archiveCanonicalId || ref?.memoryId || ref?.key || ''),
+      Number(ref?.turnRange?.start || 0),
+      Number(ref?.turnRange?.end || 0),
+      Number(ref?.revision || 0)
+    ].join('\u0001');
+
+    const nativeCopyExpectedCurrentStarts = (manifest, sourcePairsForCopy, targetPairs) => {
+      const starts = [];
+      for (const [slot, sourceRef] of Object.entries(asObject(manifest?.memories))) {
+        if (sourceRef?.status !== 'committed' || !sourceRef?.key) continue;
+        const startTurn = Number(sourceRef?.turnRange?.start || slot || 0);
+        if (!(startTurn > 0)) continue;
+        const sourceBatch = batchForStart(sourcePairsForCopy, startTurn);
+        const targetBatch = batchForStart(targetPairs, startTurn);
+        if (sourceBatch.length !== BATCH_SIZE || targetBatch.length !== BATCH_SIZE) continue;
+        const sourceCanonicalDigest = sourceDigest(sourceBatch);
+        if (!sourceCanonicalDigest || string(sourceRef.sourceDigest || '') !== sourceCanonicalDigest) continue;
+        if (nativeCopyBatchContentDigest(sourceBatch) !== nativeCopyBatchContentDigest(targetBatch)) continue;
+        starts.push(startTurn);
+      }
+      return [...new Set(starts.map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
+    };
+
+    const nativeCopyReceiptIsCompletenessVerified = receipt => Boolean(
+      nativeCopyReceiptSchemaSupported(receipt)
+      && Number(receipt?.completenessVersion || 0) >= NATIVE_CHAT_COPY_COMPLETENESS_VERSION
+      && receipt?.complete === true
+      && receipt?.durableVerified === true
+      && Number(receipt?.expectedMemories || 0) === Number(receipt?.verifiedMemories || 0)
+      && Number(receipt?.expectedInheritedMemories || 0) === Number(receipt?.verifiedInheritedMemories || 0)
     );
 
     const findStoredScopeForChat = async (characterId, chatId) => {
@@ -27612,8 +27700,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const explicitId = ignoreExplicit ? '' : nativeCopyExplicitSourceChatId(targetChat);
       const branchId = nativeCopyBranchSourceChatId(targetChat);
       const targetTitle = nativeCopyTitleInfo(firstFilled(targetChat?.name, targetChat?.title, targetChat?.chatName, targetChat?.filename, targetScope.chatId));
-      const targetPairCount = buildPairs(targetChat).length;
-      const allowTranscriptFallback = !explicitId && !branchId && !targetTitle.marked && targetPairCount >= BATCH_SIZE;
+      const targetPairsForCopy = buildPairs(targetChat);
+      const targetPairCount = targetPairsForCopy.length;
+      // Title markers are discovery hints only. When the host does not provide an
+      // authoritative copiedFrom/branch id, transcript evidence must stay available
+      // even for "(Copy 2)" style titles so a short sibling cannot outrank the
+      // actual immediate source.
+      const allowTranscriptFallback = !explicitId && !branchId && targetPairCount >= BATCH_SIZE;
 
       const candidates = [];
       for (const candidateEntry of candidateEntries) {
@@ -27637,8 +27730,11 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         if (!explicit && !branch && titleDetected && !shared.prefixCompatible && !(immediateTitle && shared.leftCount === 0 && shared.rightCount === 0)) continue;
         const stored = await findStoredScopeForChat(targetScope.characterId, candidateChatId);
         if (!stored?.manifest || !nativeCopyManifestHasData(stored.manifest)) continue;
-        const dataWeight = listCurrentMemoryRefs(stored.manifest).length * 4
-          + listInheritedMemoryRefs(stored.manifest).length * 2;
+        const candidatePairs = buildPairs(candidateChat);
+        const expectedCurrentStarts = nativeCopyExpectedCurrentStarts(stored.manifest, candidatePairs, targetPairsForCopy);
+        const expectedInheritedCount = listInheritedMemoryRefs(stored.manifest).length;
+        const dataWeight = expectedCurrentStarts.length * 8
+          + expectedInheritedCount * 2;
         const previousResolved = candidateEntry.source === 'previous_resolved_context';
         const reason = explicit ? 'explicit_copy_source'
           : branch ? 'risu_branch_marker'
@@ -27646,15 +27742,22 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               : previousResolved ? 'previous_scope_transcript_copy'
                 : 'risu_native_chat_copy_transcript';
         const priority = explicit ? 1000 : branch ? 900 : immediateTitle ? 650 : titleDetected ? 550 : previousResolved ? 500 : 400;
+        const authoritativeRank = explicit ? 2 : branch ? 1 : 0;
         candidates.push({
           chat: candidateChat, chatId: candidateChatId, scope: stored.scope, manifest: stored.manifest,
-          reason, priority, dataWeight, sharedPairs: shared.common,
+          reason, priority, authoritativeRank, dataWeight, sharedPairs: shared.common,
+          expectedCurrentStarts, expectedEligibleMemories: expectedCurrentStarts.length, expectedInheritedCount,
           updatedAt: Date.parse(string(stored.manifest.updatedAt || '')) || 0, chatIndex: index, source: candidateEntry.source
         });
       }
-      candidates.sort((a, b) => b.priority - a.priority
+      // Explicit host lineage remains authoritative. For heuristic candidates, real
+      // shared U+A coverage and eligible canonical-memory coverage outrank title
+      // proximity; title is only a tie-breaker.
+      candidates.sort((a, b) => b.authoritativeRank - a.authoritativeRank
         || b.sharedPairs - a.sharedPairs
+        || b.expectedEligibleMemories - a.expectedEligibleMemories
         || b.dataWeight - a.dataWeight
+        || b.priority - a.priority
         || b.updatedAt - a.updatedAt
         || b.chatIndex - a.chatIndex);
       const selected = candidates[0] || null;
@@ -27674,7 +27777,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         candidateCount: candidates.length,
         selectedSourceChatId: selected?.chatId || '',
         selectedSourceScopeKey: selected?.scope?.scopeKey || '',
-        selectedSharedPairs: Number(selected?.sharedPairs || 0)
+        selectedSharedPairs: Number(selected?.sharedPairs || 0),
+        selectedExpectedMemories: Number(selected?.expectedEligibleMemories || 0),
+        candidates: candidates.slice(0, 6).map(item => ({
+          chatId: item.chatId, reason: item.reason, sharedPairs: item.sharedPairs,
+          expectedMemories: item.expectedEligibleMemories, expectedInherited: item.expectedInheritedCount,
+          authoritativeRank: item.authoritativeRank, titlePriority: item.priority
+        }))
       });
       return selected;
     };
@@ -27732,45 +27841,53 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
 
     const verifyNativeChatCopyStorage = async (targetScope, targetPairs, expected = {}) => {
       const manifest = await storage.getJson(key.manifest(targetScope), null);
-      if (!manifest || manifest.schema !== MANIFEST_SCHEMA || manifest?.nativeChatCopy?.schema !== NATIVE_CHAT_COPY_SCHEMA || manifest?.nativeChatCopy?.complete !== true) {
-        return { verified: false, durable: false, reason: 'native_copy_manifest_missing', memories: 0, vectors: 0 };
+      if (!manifest || manifest.schema !== MANIFEST_SCHEMA || manifest?.nativeChatCopy?.schema !== NATIVE_CHAT_COPY_SCHEMA) {
+        return { verified: false, durable: false, reason: 'native_copy_manifest_missing', memories: 0, inheritedMemories: 0, vectors: 0 };
       }
-      const refs = Object.values(asObject(manifest.memories)).filter(ref => ref?.status === 'committed' && ref?.key);
-      const rows = await mapWithConcurrency(refs, async ref => {
+      const expectedStarts = [...new Set(asArray(expected.expectedStartTurns).map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
+      const rows = await mapWithConcurrency(expectedStarts, async startTurn => {
+        const ref = memoryRefForStart(manifest, startTurn);
+        if (!ref?.key || ref?.status !== 'committed') return { ok: false, vector: false, startTurn, reason: 'memory_ref_missing' };
         const memory = await storage.getJson(ref.key, null);
         if (!memory || memory.status !== 'committed' || string(memory.scopeKey || '') !== string(targetScope.scopeKey)) {
-          return { ok: false, vector: false, reason: 'memory_missing' };
+          return { ok: false, vector: false, startTurn, reason: 'memory_missing' };
         }
-        const startTurn = Number(ref?.turnRange?.start || memory?.turnRange?.start || 0);
-        const batch = startTurn > 0 ? batchForStart(targetPairs, startTurn) : [];
+        const batch = batchForStart(targetPairs, startTurn);
         const expectedDigest = batch.length === BATCH_SIZE ? sourceDigest(batch) : '';
         if (!expectedDigest || string(memory.sourceDigest || '') !== expectedDigest || string(ref.sourceDigest || '') !== expectedDigest) {
-          return { ok: false, vector: false, reason: 'target_source_identity_mismatch' };
+          return { ok: false, vector: false, startTurn, reason: 'target_source_identity_mismatch' };
         }
         const vectorKey = string(memory?.embedding?.vectorKey || '');
         if (memory?.embedding?.status === 'ready' && vectorKey) {
           const vector = await storage.getJson(vectorKey, null);
-          if (!projectionHasVectorPayload(vector)) return { ok: false, vector: false, reason: 'vector_missing' };
-          return { ok: true, vector: true, reason: 'ok' };
+          if (!projectionHasVectorPayload(vector)) return { ok: false, vector: false, startTurn, reason: 'vector_missing' };
+          return { ok: true, vector: true, startTurn, reason: 'ok' };
         }
-        if (memory?.embedding?.status === 'ready' && !vectorKey) return { ok: false, vector: false, reason: 'ready_vector_key_missing' };
-        return { ok: true, vector: false, reason: 'ok' };
+        if (memory?.embedding?.status === 'ready' && !vectorKey) return { ok: false, vector: false, startTurn, reason: 'ready_vector_key_missing' };
+        return { ok: true, vector: false, startTurn, reason: 'ok' };
       }, 8);
-      const expectedMemories = Math.max(0, Number(expected.memories || 0) || 0);
-      const expectedInherited = Math.max(0, Number(expected.inheritedMemories || 0) || 0);
-      const inherited = asArray(manifest.inheritedMemories).filter(ref => ref?.status === 'committed');
+      const inherited = listInheritedMemoryRefs(manifest);
+      const presentInherited = new Set(inherited.map(nativeCopyInheritedRefIdentity));
+      const expectedInheritedIdentities = [...new Set(asArray(expected.expectedInheritedIdentities).map(string).filter(Boolean))];
+      const missingInherited = expectedInheritedIdentities.filter(identity => !presentInherited.has(identity));
       const rowsOk = rows.every(row => row?.ok === true);
-      const countsOk = refs.length === expectedMemories && inherited.length === expectedInherited;
+      const inheritedOk = missingInherited.length === 0;
       const markerOk = string(manifest?.nativeChatCopy?.sourceScopeKey || '') === string(expected.sourceScopeKey || '')
         && string(manifest?.nativeChatCopy?.targetScopeKey || '') === string(targetScope.scopeKey);
       return {
-        verified: rowsOk && countsOk && markerOk,
-        durable: rowsOk && countsOk && markerOk,
-        reason: rowsOk && countsOk && markerOk ? 'native_copy_storage_verified' : 'native_copy_storage_verification_failed',
-        memories: refs.length,
-        inheritedMemories: inherited.length,
+        verified: rowsOk && inheritedOk && markerOk,
+        durable: rowsOk && inheritedOk && markerOk,
+        reason: rowsOk && inheritedOk && markerOk ? 'native_copy_storage_verified' : 'native_copy_storage_verification_failed',
+        memories: rows.filter(row => row?.ok === true).length,
+        expectedMemories: expectedStarts.length,
+        inheritedMemories: expectedInheritedIdentities.length - missingInherited.length,
+        expectedInheritedMemories: expectedInheritedIdentities.length,
         vectors: rows.filter(row => row?.vector === true).length,
-        diagnostics: { rowsOk, countsOk, markerOk, failures: rows.filter(row => row?.ok !== true).slice(0, 8) }
+        diagnostics: {
+          rowsOk, inheritedOk, markerOk,
+          failures: rows.filter(row => row?.ok !== true).slice(0, 8),
+          missingInherited: missingInherited.slice(0, 8)
+        }
       };
     };
 
@@ -27782,29 +27899,50 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
       const sourceManifest = await loadManifest(sourceScope, sourcePairsForCopy.length);
       const targetLoaded = await storage.getJson(key.manifest(targetScope), null);
       const targetManifest = targetLoaded ? await loadManifest(targetScope, targetPairs.length) : defaultManifest(targetScope, targetPairs.length);
-      if (nativeCopyManifestHasData(targetManifest)) return { ok: false, skipped: true, reason: 'target_not_empty' };
+      const priorReceipt = asObject(targetManifest.nativeChatCopy);
+      const repairMode = nativeCopyReceiptSchemaSupported(priorReceipt);
+      if (nativeCopyManifestHasData(targetManifest) && !repairMode) return { ok: false, skipped: true, reason: 'target_not_empty' };
       if (targetManifest.inFlight?.runId) return { ok: false, skipped: true, reason: 'target_in_flight' };
 
+      const expectedStartTurns = nativeCopyExpectedCurrentStarts(sourceManifest, sourcePairsForCopy, targetPairs);
+      const expectedInheritedRefs = listInheritedMemoryRefs(sourceManifest);
+      const expectedInheritedIdentities = expectedInheritedRefs.map(nativeCopyInheritedRefIdentity).filter(Boolean);
+      if (!expectedStartTurns.length && !expectedInheritedRefs.length) {
+        return { ok: false, skipped: true, reason: 'source_has_no_target_valid_records' };
+      }
+
       const writtenKeys = [];
-      const clonedMemoryIds = new Set();
-      const clonedRunIds = new Set();
-      const copiedMemories = {};
-      const copiedInherited = [];
+      const copiedMemories = { ...asObject(targetManifest.memories) };
+      const copiedInherited = listInheritedMemoryRefs(targetManifest).map(ref => clone(ref));
+      const inheritedIdentitySet = new Set(copiedInherited.map(nativeCopyInheritedRefIdentity));
       let vectorCount = 0;
       let reboundMessageIdBatches = 0;
+      let newlyCopiedMemories = 0;
+      let newlyCopiedInherited = 0;
       try {
+        const expectedStartSet = new Set(expectedStartTurns);
         for (const [slot, sourceRef] of Object.entries(asObject(sourceManifest.memories))) {
           if (sourceRef?.status !== 'committed' || !sourceRef?.key) continue;
           const startTurn = Number(sourceRef?.turnRange?.start || slot || 0);
-          const sourceBatch = startTurn > 0 ? batchForStart(sourcePairsForCopy, startTurn) : [];
-          const targetBatch = startTurn > 0 ? batchForStart(targetPairs, startTurn) : [];
-          if (sourceBatch.length !== BATCH_SIZE || targetBatch.length !== BATCH_SIZE) continue;
+          if (!expectedStartSet.has(startTurn)) continue;
+          const sourceBatch = batchForStart(sourcePairsForCopy, startTurn);
+          const targetBatch = batchForStart(targetPairs, startTurn);
           const sourceCanonicalDigest = sourceDigest(sourceBatch);
           const targetDigest = sourceDigest(targetBatch);
-          const sourceContentDigest = nativeCopyBatchContentDigest(sourceBatch);
-          const targetContentDigest = nativeCopyBatchContentDigest(targetBatch);
-          if (!sourceCanonicalDigest || !targetDigest || sourceContentDigest !== targetContentDigest) continue;
-          if (string(sourceRef.sourceDigest || '') !== sourceCanonicalDigest) continue;
+          const existingRef = memoryRefForStart({ memories: copiedMemories }, startTurn);
+          if (existingRef?.key && existingRef?.status === 'committed') {
+            const existingMemory = await storage.getJson(existingRef.key, null);
+            if (existingMemory?.status === 'committed'
+              && string(existingMemory.scopeKey || '') === string(targetScope.scopeKey)
+              && string(existingMemory.sourceDigest || '') === targetDigest
+              && string(existingRef.sourceDigest || '') === targetDigest) {
+              continue;
+            }
+            // Never overwrite an existing target canonical record during automatic
+            // repair. A conflicting target needs explicit branch reconciliation;
+            // native-copy repair is limited to filling genuinely missing batches.
+            throw new Error(`LIBRA native chat-copy repair found conflicting target memory at T${startTurn}.`);
+          }
           const sourceMemory = await storage.getJson(sourceRef.key, null);
           if (!sourceMemory || sourceMemory.status !== 'committed' || string(sourceMemory.sourceDigest || '') !== sourceCanonicalDigest) continue;
           const revision = Number(sourceMemory.revision || sourceRef.revision || 1);
@@ -27837,19 +27975,19 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           );
           if (sourceCanonicalDigest !== targetDigest) reboundMessageIdBatches += 1;
           if (memory.embedding?.vectorKey) vectorCount += 1;
-          const targetRef = {
+          copiedMemories[String(startTurn)] = {
             ...clone(sourceRef),
             ...memoryRefFromStoredMemory(memory, memoryKey, history, sourceRef.createdAt || memory.createdAt || ''),
             key: memoryKey, history, status: 'committed', nativeCopiedFromScopeKey: sourceScope.scopeKey
           };
-          copiedMemories[String(startTurn)] = targetRef;
-          clonedMemoryIds.add(string(memory.memoryId));
-          if (memory.runId) clonedRunIds.add(string(memory.runId));
+          newlyCopiedMemories += 1;
         }
 
         const copyTransferId = `nativecopy_${stableDraftHash(`${sourceScope.scopeKey}|${targetScope.scopeKey}`)}`;
-        for (let index = 0; index < listInheritedMemoryRefs(sourceManifest).length; index += 1) {
-          const sourceRef = listInheritedMemoryRefs(sourceManifest)[index];
+        for (let index = 0; index < expectedInheritedRefs.length; index += 1) {
+          const sourceRef = expectedInheritedRefs[index];
+          const identity = nativeCopyInheritedRefIdentity(sourceRef);
+          if (identity && inheritedIdentitySet.has(identity)) continue;
           if (sourceRef?.archiveShared === true) {
             copiedInherited.push({
               ...clone(sourceRef),
@@ -27857,8 +27995,8 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
               nativeCopiedFromScopeKey: sourceScope.scopeKey,
               sourceSessionScopeKey: string(sourceRef.sourceSessionScopeKey || sourceScope.scopeKey)
             });
-            clonedMemoryIds.add(string(sourceRef.memoryId || ''));
-            if (sourceRef.runId) clonedRunIds.add(string(sourceRef.runId));
+            if (identity) inheritedIdentitySet.add(identity);
+            newlyCopiedInherited += 1;
             continue;
           }
           const sourceMemory = await storage.getJson(sourceRef.key, null);
@@ -27872,7 +28010,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             sourceScope.scopeKey, writtenKeys
           );
           if (memory.embedding?.vectorKey) vectorCount += 1;
-          copiedInherited.push({
+          const copiedRef = {
             ...clone(sourceRef),
             ...memoryRefFromStoredMemory(memory, memoryKey, [], sourceRef.createdAt || memory.createdAt || ''),
             key: memoryKey, status: 'committed', inheritedSessionHistory: true,
@@ -27881,18 +28019,13 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             sourceSessionChatId: string(sourceRef.sourceSessionChatId || memory.sourceSessionChatId || ''),
             sourceSessionScopeKey: string(sourceRef.sourceSessionScopeKey || memory.sourceSessionScopeKey || ''),
             nativeCopiedFromScopeKey: sourceScope.scopeKey
-          });
-          clonedMemoryIds.add(memoryId);
-          if (memory.runId) clonedRunIds.add(string(memory.runId));
+          };
+          copiedInherited.push(copiedRef);
+          if (identity) inheritedIdentitySet.add(identity);
+          newlyCopiedInherited += 1;
         }
 
-        const copiedCurrentRefs = Object.values(copiedMemories);
-        if (!copiedCurrentRefs.length && !copiedInherited.length) {
-          for (const storageKey of writtenKeys.reverse()) {
-            try { await storage.remove(storageKey); } catch (_) {}
-          }
-          return { ok: false, skipped: true, reason: 'source_has_no_target_valid_records' };
-        }
+        const copiedCurrentRefs = Object.values(copiedMemories).filter(ref => ref?.status === 'committed');
         const committedTurn = Math.max(0, ...copiedCurrentRefs.map(ref => Number(ref.turnRange?.end || 0)));
         const copiedAt = nowIso();
         const manifest = {
@@ -27910,7 +28043,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             updatedAt: copiedAt
           }),
           memories: copiedMemories, inheritedMemories: copiedInherited,
-          archiveRef: normalizeLibraArchiveRef(sourceManifest.archiveRef),
+          archiveRef: normalizeLibraArchiveRef(targetManifest.archiveRef) || normalizeLibraArchiveRef(sourceManifest.archiveRef),
           inFlight: null,
           stats: {
             ...defaultManifest(targetScope, targetPairs.length).stats,
@@ -27918,17 +28051,31 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
             nativeCopyImports: Number(targetManifest.stats?.nativeCopyImports || 0) + 1
           },
           nativeChatCopy: {
-            schema: NATIVE_CHAT_COPY_SCHEMA, complete: true, reason: sourceCandidate.reason,
+            schema: NATIVE_CHAT_COPY_SCHEMA,
+            completenessVersion: NATIVE_CHAT_COPY_COMPLETENESS_VERSION,
+            complete: false,
+            durableVerified: false,
+            reason: sourceCandidate.reason,
+            repair: repairMode,
+            repairedFromSchema: repairMode ? string(priorReceipt.schema || '') : '',
             sourceChatId: sourceScope.chatId, sourceScopeKey: sourceScope.scopeKey,
             targetChatId: targetScope.chatId, targetScopeKey: targetScope.scopeKey,
-            memories: copiedCurrentRefs.length, inheritedMemories: copiedInherited.length,
-            archiveId: string(sourceManifest.archiveRef?.archiveId || ''),
-            archiveRecords: Math.max(0, Number(sourceManifest.archiveRef?.recordCount || 0) || 0),
+            sourcePairCount: sourcePairsForCopy.length,
+            targetPairCount: targetPairs.length,
+            sharedPairs: Number(sourceCandidate.sharedPairs || 0),
+            expectedStartTurns,
+            expectedMemories: expectedStartTurns.length,
+            expectedInheritedMemories: expectedInheritedIdentities.length,
+            memories: copiedCurrentRefs.length,
+            inheritedMemories: copiedInherited.length,
+            newlyCopiedMemories,
+            newlyCopiedInheritedMemories: newlyCopiedInherited,
+            archiveId: string((normalizeLibraArchiveRef(targetManifest.archiveRef) || normalizeLibraArchiveRef(sourceManifest.archiveRef))?.archiveId || ''),
+            archiveRecords: Math.max(0, Number((normalizeLibraArchiveRef(targetManifest.archiveRef) || normalizeLibraArchiveRef(sourceManifest.archiveRef))?.recordCount || 0) || 0),
             physicalInheritedCopies: copiedInherited.filter(ref => ref?.archiveShared !== true).length,
             vectors: vectorCount,
             contentIdentityVersion: 2,
             reboundMessageIdBatches,
-            durableVerified: false,
             copiedAt
           },
           updatedAt: copiedAt
@@ -27936,21 +28083,23 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         await saveManifest(targetScope, manifest);
         const persistedManifest = await storage.getJson(key.manifest(targetScope), null);
         if (persistedManifest?.nativeChatCopy?.schema !== NATIVE_CHAT_COPY_SCHEMA
-          || persistedManifest?.nativeChatCopy?.complete !== true
           || string(persistedManifest?.nativeChatCopy?.sourceScopeKey) !== string(sourceScope.scopeKey)
           || string(persistedManifest?.nativeChatCopy?.targetScopeKey) !== string(targetScope.scopeKey)) {
           throw new Error('LIBRA native chat-copy manifest durable readback failed.');
         }
         const copyVerification = await verifyNativeChatCopyStorage(targetScope, targetPairs, {
           sourceScopeKey: sourceScope.scopeKey,
-          memories: copiedCurrentRefs.length,
-          inheritedMemories: copiedInherited.length
+          expectedStartTurns,
+          expectedInheritedIdentities
         });
-        if (copyVerification.verified !== true || copyVerification.durable !== true) {
-          throw new Error(`LIBRA native chat-copy durable verification failed: ${string(copyVerification.reason || 'unknown')}`);
+        if (copyVerification.verified !== true || copyVerification.durable !== true
+          || copyVerification.memories !== expectedStartTurns.length
+          || copyVerification.inheritedMemories !== expectedInheritedIdentities.length) {
+          throw new Error(`LIBRA native chat-copy completeness verification failed: ${string(copyVerification.reason || 'unknown')}`);
         }
         persistedManifest.nativeChatCopy = {
           ...asObject(persistedManifest.nativeChatCopy),
+          complete: true,
           durableVerified: true,
           verifiedMemories: copyVerification.memories,
           verifiedInheritedMemories: copyVerification.inheritedMemories,
@@ -27959,12 +28108,12 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
         };
         await saveManifest(targetScope, persistedManifest);
         const finalManifest = await storage.getJson(key.manifest(targetScope), null);
-        if (finalManifest?.nativeChatCopy?.durableVerified !== true
+        if (!nativeCopyReceiptIsCompletenessVerified(finalManifest?.nativeChatCopy)
           || string(finalManifest?.nativeChatCopy?.sourceScopeKey || '') !== string(sourceScope.scopeKey)
           || string(finalManifest?.nativeChatCopy?.targetScopeKey || '') !== string(targetScope.scopeKey)) {
           throw new Error('LIBRA native chat-copy verification marker durable readback failed.');
         }
-        for (const startTurn of Object.keys(copiedMemories).map(Number).filter(Number.isFinite)) {
+        for (const startTurn of expectedStartTurns) {
           try { await storage.remove(key.work(targetScope, startTurn)); } catch (_) {}
         }
         state.recallCatalogCache.delete(string(targetScope.scopeKey));
@@ -27995,8 +28144,15 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           return { ok: false, skipped: true, reason: 'native_copy_suppressed' };
         }
         const existing = await storage.getJson(key.manifest(context.scope), null);
-        if (existing?.nativeChatCopy?.complete === true || nativeCopyManifestHasData(existing)) {
-          return { ok: true, skipped: true, reason: 'target_already_initialized', nativeChatCopy: clone(existing?.nativeChatCopy || null) };
+        const existingReceipt = asObject(existing?.nativeChatCopy);
+        if (nativeCopyReceiptIsCompletenessVerified(existingReceipt)) {
+          return { ok: true, skipped: true, reason: 'native_copy_already_complete', nativeChatCopy: clone(existingReceipt) };
+        }
+        // Never reinterpret an ordinary established chat as a native copy. Legacy
+        // or partial native-copy receipts, however, must be re-evaluated so missing
+        // five-turn canonical memories can be filled idempotently.
+        if (nativeCopyManifestHasData(existing) && !nativeCopyReceiptSchemaSupported(existingReceipt)) {
+          return { ok: true, skipped: true, reason: 'target_already_initialized', nativeChatCopy: null };
         }
         if (existing?.inFlight?.runId) return { ok: false, skipped: true, reason: 'target_in_flight' };
         const source = await locateNativeChatCopySource(context);
@@ -28012,7 +28168,7 @@ const EmbeddingProviderRegistry = LibraProviderBridge.embeddingRegistry;
           targetChatId: string(context?.scope?.chatId || state.lastNativeCopyCheck?.targetChatId || ''),
           targetScopeKey: string(context?.scope?.scopeKey || '')
         });
-        const positive = result?.ok === true || ['target_already_initialized', 'native_copy_suppressed', 'session_handoff_target'].includes(result?.reason);
+        const positive = result?.ok === true || ['native_copy_already_complete', 'target_already_initialized', 'native_copy_suppressed', 'session_handoff_target'].includes(result?.reason);
         state.nativeCopyChecks.set(scopeKey, {
           expiresAt: Date.now() + (positive ? NATIVE_CHAT_COPY_POSITIVE_TTL_MS : NATIVE_CHAT_COPY_NEGATIVE_TTL_MS),
           result: clone(result)
@@ -33704,8 +33860,19 @@ ${string(queryBundle?.sceneText || '')}`;
         const memory = await storage.getJson(string(ref?.key || ''), null);
         if (!memory) missingMemories += 1;
         const vectorKey = string(memory?.embedding?.vectorKey || ref?.vectorKey || '').trim();
-        const vector = vectorKey ? await storage.getJson(vectorKey, null) : null;
-        if (vectorKey && !projectionHasVectorPayload(vector)) missingVectors += 1;
+        // Fingerprint the exact durable pluginStorage representation. storage.getJson()
+        // hydrates compact Float32 vectors and adds runtime-only provenance such as
+        // localVectorHydrated / portableVectorHydrated. Which flag is set depends on
+        // whether the RAM/local cache was warm, so hashing the hydrated object can
+        // falsely report a source-vector mutation even when pluginStorage never changed.
+        const vector = vectorKey ? await storage.getStoredJson(vectorKey, null) : null;
+        const portablePayload = asObject(vector?.[PORTABLE_VECTOR_PAYLOAD_FIELD]);
+        const durableVectorAvailable = projectionHasVectorPayload(vector)
+          || (portablePayload?.schema === LOCAL_VECTOR_PAYLOAD_SCHEMA
+            && asArray(portablePayload.keys).length > 0
+            && asArray(portablePayload.lengths).length === asArray(portablePayload.keys).length
+            && string(portablePayload.data || '').length > 0);
+        if (vectorKey && !durableVectorAvailable) missingVectors += 1;
         return {
           key: string(ref?.key || ''),
           memoryHash: memory ? digest(memory) : '',
@@ -33718,9 +33885,36 @@ ${string(queryBundle?.sceneText || '')}`;
         manifestHash: digest(rawManifest),
         records: records.sort((a, b) => a.key.localeCompare(b.key)),
         missingMemories,
-        missingVectors
+        missingVectors,
+        vectorFingerprintMode: 'durable_plugin_storage_record_v2'
       };
-      return { ...core, recordsCount: refs.length, fingerprint: digest(core), reason: missingMemories ? 'source_memory_missing' : 'ok' };
+      return { ...core, recordsCount: refs.length, fingerprint: digest(core), reason: missingMemories ? 'source_memory_missing' : (missingVectors ? 'source_vector_missing' : 'ok') };
+    };
+
+    const diffLibraHandoffIntegritySnapshots = (before, after) => {
+      const beforeRows = new Map(asArray(before?.records).map(row => [string(row?.key || ''), row]));
+      const afterRows = new Map(asArray(after?.records).map(row => [string(row?.key || ''), row]));
+      const keys = [...new Set([...beforeRows.keys(), ...afterRows.keys()])].filter(Boolean).sort();
+      const changedRecords = [];
+      for (const keyValue of keys) {
+        const left = beforeRows.get(keyValue);
+        const right = afterRows.get(keyValue);
+        if (!left || !right) {
+          changedRecords.push({ key: keyValue, missingBefore: !left, missingAfter: !right, memoryChanged: true, vectorChanged: true });
+          continue;
+        }
+        const memoryChanged = string(left.memoryHash || '') !== string(right.memoryHash || '');
+        const vectorChanged = string(left.vectorHash || '') !== string(right.vectorHash || '')
+          || string(left.vectorKey || '') !== string(right.vectorKey || '');
+        if (memoryChanged || vectorChanged) changedRecords.push({ key: keyValue, memoryChanged, vectorChanged });
+      }
+      return {
+        manifestChanged: string(before?.manifestHash || '') !== string(after?.manifestHash || ''),
+        missingMemoriesChanged: Number(before?.missingMemories || 0) !== Number(after?.missingMemories || 0),
+        missingVectorsChanged: Number(before?.missingVectors || 0) !== Number(after?.missingVectors || 0),
+        changedRecords: changedRecords.slice(0, 24),
+        changedRecordCount: changedRecords.length
+      };
     };
 
     const verifyLibraHandoffSourceBranchesReadOnly = (manifest, pairs) => {
@@ -33790,6 +33984,7 @@ ${string(queryBundle?.sceneText || '')}`;
           lastMigration: clone(state.lastEmbeddingMigration),
           ...clone(state.localVectorStats)
         },
+        handoffDiagnostics: clone(state.lastHandoffSourceIntegrity),
         inspectedAt: nowIso()
       };
       if (!includeRecords) {
@@ -33870,11 +34065,19 @@ ${string(queryBundle?.sceneText || '')}`;
     const prepareSessionHandoff = async (options = {}) => {
       const transferId = normalizeHandoffTransferId(options.transferId || id('libra_handoff'));
       await cleanupExpiredHandoffPackages();
-      const initialContext = await resolveContext();
-      const expectedScopeKey = string(initialContext?.scope?.scopeKey || '');
-      if (!expectedScopeKey) throw new Error('LIBRA handoff source scope를 계산하지 못했습니다.');
+      // Automatic portable-vector promotion is legitimate maintenance, but it must
+      // never race the immutable-source fingerprint. Freeze new scheduling first,
+      // finish/cancel any already-scheduled maintenance, then capture the source.
+      state.handoffSourceFreezeDepth += 1;
+      let maintenance = null;
+      let expectedScopeKey = '';
 
-      return await enqueue(expectedScopeKey, async () => {
+      try {
+        maintenance = await settleAutomaticVectorMaintenanceBeforeHandoff();
+        const initialContext = await resolveContext();
+        expectedScopeKey = string(initialContext?.scope?.scopeKey || '');
+        if (!expectedScopeKey) throw new Error('LIBRA handoff source scope를 계산하지 못했습니다.');
+        return await enqueue(expectedScopeKey, async () => {
         const context = await resolveContext();
         if (string(context?.scope?.scopeKey || '') !== expectedScopeKey) {
           throw new Error('LIBRA handoff 준비 중 활성 source scope가 변경되었습니다.');
@@ -33897,9 +34100,22 @@ ${string(queryBundle?.sceneText || '')}`;
         const expectedRecords = options.expectedRecords == null ? memoryRefs.length : Math.max(0, Number(options.expectedRecords || 0) || 0);
         if (expectedRecords !== memoryRefs.length) throw new Error('LIBRA handoff source count changed before preparation.');
         const sourceIntegrityAfter = await libraSourceHandoffIntegritySnapshot(context.scope);
+        const sourceIntegrityDiff = diffLibraHandoffIntegritySnapshots(sourceIntegrityBefore, sourceIntegrityAfter);
+        state.lastHandoffSourceIntegrity = {
+          at: Date.now(),
+          transferId,
+          scopeKey: expectedScopeKey,
+          maintenance: clone(maintenance),
+          beforeFingerprint: sourceIntegrityBefore.fingerprint,
+          afterFingerprint: sourceIntegrityAfter.fingerprint,
+          diff: clone(sourceIntegrityDiff),
+          sourcePreserved: sourceIntegrityBefore.fingerprint === sourceIntegrityAfter.fingerprint
+        };
+        Runtime.lastLibraHandoffSourceIntegrity = clone(state.lastHandoffSourceIntegrity);
         if (sourceIntegrityBefore.fingerprint !== sourceIntegrityAfter.fingerprint) {
-          const error = new Error('LIBRA source mutation detected during handoff preparation.');
+          const error = new Error(`LIBRA source mutation detected during handoff preparation. ${JSON.stringify(sourceIntegrityDiff)}`);
           error.code = 'SOURCE_MUTATION_DETECTED';
+          error.details = clone(sourceIntegrityDiff);
           throw error;
         }
         const preparedAt = nowIso();
@@ -33948,7 +34164,14 @@ ${string(queryBundle?.sceneText || '')}`;
           sourceFingerprintAfter: sourceIntegrityAfter.fingerprint,
           preparedAt, expiresAt: packageValue.expiresAt
         });
-      });
+        });
+      } finally {
+        state.handoffSourceFreezeDepth = Math.max(0, Number(state.handoffSourceFreezeDepth || 0) - 1);
+        if (state.handoffSourceFreezeDepth === 0 && state.embeddingMigrationDeferredByHandoff) {
+          state.embeddingMigrationDeferredByHandoff = false;
+          scheduleAutomaticLegacyVectorMigration({ reason: 'handoff_postflight_deferred_vector_maintenance', delayMs: 1200 });
+        }
+      }
     };
 
     const inheritedMemoryRefForTransfer = (ref, transferId, sourceScope, headGeneration = 1) => {
@@ -40722,6 +40945,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       let ok = true;
       let result = null;
       let error = '';
+      let errorCode = '';
       try {
         if (action === 'ping' || action === 'capabilities') result = LibraMemoryCore.retraceCapabilities();
         else if (action === 'inspect') result = await LibraMemoryCore.inspectForRetrace(request.payload || {});
@@ -40738,12 +40962,13 @@ html,body{width:100%;height:100%;overflow:hidden}
       } catch (caught) {
         ok = false;
         error = compact(caught?.message || caught, 1200);
+        errorCode = compact(caught?.code || '', 120);
       }
       if (LibraMemoryCore.state.disposed) return;
       await ipcApi.postPluginChannelMessage(RETRACE_PLUGIN_ID, LIBRA_RETRACE_IPC_RESPONSE_CHANNEL, {
         schema: LIBRA_RETRACE_IPC_SCHEMA,
         kind: 'response', requestId, action, ok,
-        ...(ok ? { result: safeClone(result) } : { error })
+        ...(ok ? { result: safeClone(result) } : { error, errorCode })
       });
     };
     const registration = await ipcApi.addPluginChannelListener(LIBRA_RETRACE_IPC_REQUEST_CHANNEL, handler);
