@@ -1,6 +1,6 @@
 //@name libra
-//@display-name LIBRA v2.3.101
-//@version 2.3.101
+//@display-name LIBRA v2.3.103
+//@version 2.3.103
 /* 2.3.95: Improve only Character Cabinet reading, field evidence and explicit world links. */
 /* 2.3.94: Rebuild only the Narrative Almanac page with typed history, evidence and scope-safe pagination. */
 /* 2.3.93: Expand only the World Atlas page with linked records and evidence; restore truncated runtime spans from verified backups. */
@@ -1345,7 +1345,7 @@ function __libraNarrativeStripPatch(value) {
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '2.3.101';
+  const PLUGIN_VERSION = '2.3.103';
   const RISUAI_AUX_PRESET_NAME = 'risuai_aux';
   const RISUAI_AUX_PROVIDER = 'risuai_aux';
   const RISUAI_AUX_MODE = 'risuai_otherax';
@@ -60531,7 +60531,7 @@ html,body{width:100%;height:100%;overflow:hidden}
 .libra-book-settings-mobile-picker{display:none}@media(max-width:980px){.libra-book-settings-mobile-picker{display:flex;gap:12px;align-items:center;margin-bottom:16px}.libra-book-settings-mobile-picker select{min-width:0;flex:1}}
 .libra-book-mobile-nav{display:none}
 @media(max-width:980px){.libra-book-metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.libra-book-reading-grid{grid-template-columns:minmax(0,1fr)}}
-@media(max-width:760px){.libra-book-current-page{display:none}.libra-book-page{min-height:auto;margin:0 8px 76px;padding:20px 16px;border-radius:16px}.libra-book-page-head h1{font-size:25px}.libra-book-page-head p{font-size:13px}.libra-book-metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.libra-book-sidebar{display:none!important}.libra-book-mobile-nav{position:fixed;z-index:100;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));height:64px;padding-bottom:env(safe-area-inset-bottom,0);border-top:1px solid #3b2a1f;background:#15100c}.libra-book-mobile-nav button{display:grid;place-items:center;align-content:center;gap:2px;border:0;border-bottom:3px solid transparent;background:transparent;color:#9f8d7a}.libra-book-mobile-nav button.active{border-color:#b57d3f;background:#21170f;color:#f0dfca}.libra-book-mobile-nav span{font:15px Georgia,"Noto Serif KR",serif}.libra-book-mobile-nav small{font-size:9px;white-space:nowrap}.libra-book-drawer{width:100%}.libra-book-drawer-head{display:grid}.libra-book-top{grid-template-columns:minmax(0,1fr) auto!important}.libra-book-top>.libra-book-current-page{display:none}.libra-book-brand-copy small{display:none}.libra-book-head-actions .sga-btn:not(.libra-book-quick-button):not(.libra-book-settings-button){display:none}.libra-book-settings-button{display:inline-flex!important}.sga-shell{grid-template-columns:minmax(0,1fr)!important}.sga-main{padding:10px 0 70px!important}.libra-section-layout{display:block}.libra-book-page .libra-reader-layout,.libra-book-page .libra-world-manager-layout,.libra-book-page .sga-grid.two,.libra-book-page .sga-grid.three{grid-template-columns:minmax(0,1fr)!important}.libra-book-page .libra-chapter-list{display:flex!important;max-height:none!important;overflow-x:auto!important;overflow-y:hidden!important}.libra-book-page .libra-chapter-item{flex:0 0 min(78vw,260px)!important}.libra-book-page pre,.libra-book-page .sga-live-result-code{max-width:100%;overflow:auto}.libra-book-page *{min-width:0}}
+@media(max-width:760px){.libra-book-current-page{display:none}.libra-book-page{min-height:auto;margin:0 8px 76px;padding:20px 16px;border-radius:16px}.libra-book-page-head h1{font-size:25px}.libra-book-page-head p{font-size:13px}.libra-book-metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.libra-book-sidebar{display:none!important}.libra-book-mobile-nav{position:fixed;z-index:100;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));height:64px;padding-bottom:env(safe-area-inset-bottom,0);border-top:1px solid #3b2a1f;background:#15100c}.libra-book-mobile-nav button{display:grid;place-items:center;align-content:center;gap:2px;border:0;border-bottom:3px solid transparent;background:transparent;color:#9f8d7a}.libra-book-mobile-nav button.active{border-color:#b57d3f;background:#21170f;color:#f0dfca}.libra-book-mobile-nav span{font:15px Georgia,"Noto Serif KR",serif}.libra-book-mobile-nav small{font-size:9px;white-space:nowrap}.libra-book-drawer{width:100%}.libra-book-drawer-head{display:grid}.libra-book-top{grid-template-columns:minmax(0,1fr) auto!important}.libra-book-top>.libra-book-current-page{display:none}.libra-book-brand-copy small{display:none}.libra-book-head-actions .sga-btn:not(.libra-book-quick-button):not(.libra-book-settings-button):not(.libra-book-close-button){display:none}.libra-book-close-button{display:inline-flex!important;align-items:center;justify-content:center;min-width:44px!important;min-height:44px!important;padding:6px!important;flex-shrink:0}.libra-book-settings-button{display:inline-flex!important}.sga-shell{grid-template-columns:minmax(0,1fr)!important}.sga-main{padding:10px 0 70px!important}.libra-section-layout{display:block}.libra-book-page .libra-reader-layout,.libra-book-page .libra-world-manager-layout,.libra-book-page .sga-grid.two,.libra-book-page .sga-grid.three{grid-template-columns:minmax(0,1fr)!important}.libra-book-page .libra-chapter-list{display:flex!important;max-height:none!important;overflow-x:auto!important;overflow-y:hidden!important}.libra-book-page .libra-chapter-item{flex:0 0 min(78vw,260px)!important}.libra-book-page pre,.libra-book-page .sga-live-result-code{max-width:100%;overflow:auto}.libra-book-page *{min-width:0}}
 
 /* Book UX v5.9 · iOS contrast + mobile reading parity */
 .libra-book-page,.libra-book-drawer,.libra-book-family-menu{color-scheme:light}
@@ -60772,6 +60772,20 @@ html,body{width:100%;height:100%;overflow:hidden}
 .libra-book-setting-group summary{padding:10px 8px;color:#bca587;font-size:12px;cursor:pointer}.libra-book-setting-group .libra-book-side-item{padding:8px 12px}.libra-book-setting-group strong{font-size:12px}.libra-book-setting-group[open]{padding-bottom:6px}.libra-book-sidebar{overflow-y:auto}
 
 @media(max-width:760px){.sga-main:has(.libra-book-save-bar){padding-bottom:70px!important}}
+
+/* Book navigation: medium screens use a full-width wrapping menu, not a desktop-width strip. */
+@media(min-width:761px) and (max-width:980px){
+ .libra-book-app>.sga-shell{display:flex!important;flex-direction:column;min-width:0}
+ .libra-book-app .libra-book-sidebar{width:100%;max-width:none;height:auto;max-height:38vh;flex:0 0 auto;align-self:stretch;overflow-x:hidden;overflow-y:auto;padding:10px}
+ .libra-book-app .libra-book-side-label{display:none}
+ .libra-book-app .libra-book-side-nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;min-height:0;overflow:visible;padding:0}
+ .libra-book-app .libra-book-side-item{width:100%;min-width:0;min-height:44px;white-space:normal;margin:0;padding:8px}
+ .libra-book-app .libra-book-side-copy small{display:none}
+ .libra-book-app .libra-book-side-divider{grid-column:1/-1;margin:2px 0}
+ .libra-book-app .libra-book-setting-group{grid-column:1/-1;min-width:0}
+ .libra-book-app>.sga-shell>.sga-main{min-width:0;min-height:0;flex:1 1 auto}
+}
+
 
 
   /* --- MemorySuite shared design tokens -------------------------------------------------------------
@@ -72562,7 +72576,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('span', { class: 'libra-book-boot-status', text: 'JS ACTIVE', title: `LIBRA v${PLUGIN_VERSION}` }),
         guiEl('button', { class: 'sga-btn libra-book-settings-button', type: 'button', text: '설정실', onClick: () => bookNavigate('settings') }),
         guiEl('button', { class: 'sga-btn libra-book-quick-button', type: 'button', text: '빠른 설정', onClick: () => bookOpenQuickSettings(Gui.bookQuickSection || 'response') }),
-        guiEl('button', { class: 'sga-btn', type: 'button', text: '닫기', onClick: async () => { await hideSettingsGui(); } })
+        guiEl('button', { class: 'sga-btn libra-book-close-button', type: 'button', text: '닫기', 'aria-label': '설정 화면 닫기', onClick: async () => { await hideSettingsGui(); } })
       ])
     ]);
     const requestedRegions = new Set(Gui.invalidations);
