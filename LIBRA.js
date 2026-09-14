@@ -1,6 +1,6 @@
 //@name libra
-//@display-name LIBRA v2.3.119
-//@version 2.3.119
+//@display-name LIBRA v2.3.121
+//@version 2.3.121
 /* Target-only handoff storage preparation v1. Authenticated owner handlers only. */
 async function prepareMemorySuiteHandoffTargetStorage(api, storage, owner, payload) {
   const readTarget = async () => {
@@ -1383,7 +1383,7 @@ function __libraNarrativeStripPatch(value) {
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '2.3.119';
+  const PLUGIN_VERSION = '2.3.121';
   const RISUAI_AUX_PRESET_NAME = 'risuai_aux';
   const RISUAI_AUX_PROVIDER = 'risuai_aux';
   const RISUAI_AUX_MODE = 'risuai_otherax';
@@ -3808,7 +3808,46 @@ function createMemorySuiteHostLineage() {
 /* END LIBRARIAN HOST LINEAGE SDK */
 const MemorySuiteHostLineage = createMemorySuiteHostLineage();
 
-/* LIBRARIAN SYSTEM STORAGE SDK v1.8.19
+/* LIBRA READ-ONLY SCOPE HEALTH v1.0.0 */
+const inspectLibraScopeHealthSnapshot = (snapshot, options = {}) => {
+  if(snapshot?.schema!=='libra.scope-health-snapshot.v1'||snapshot.readOnly!==true||!Array.isArray(snapshot.records)||!Array.isArray(snapshot.values))throw Error('LIBRA_SCOPE_HEALTH_SNAPSHOT_INVALID');
+  const issues=[], entries=new Map(), live=new Set(), issue=(code,detail='')=>issues.push({code,detail});
+  for(const r of snapshot.records)if(!r.tombstone&&r.space==='plugin'){live.add(r.name);}
+  for(const r of snapshot.values){
+    if(r.space!=='plugin')continue; // Local duplicates remain observable, never elected as canonical.
+    let value=r.value;try{if(typeof value==='string')value=JSON.parse(value);if(!value||typeof value!=='object'||Array.isArray(value))throw Error();entries.set(r.name,value);}catch(_){issue('STRUCTURAL_JSON_INVALID',r.name.split(':').slice(0,2).join(':'));}
+  }
+  const manifest=entries.get('manifest'),head=entries.get('continuity-state'),registry=entries.get('entity-registry:v2');
+  const counts={serverRecords:snapshot.liveRecords,tombstones:snapshot.tombstones,canonicalRefs:0,missingCanonicalRefs:0,pendingState:0,pendingVectors:0,pendingReplay:0,receipts:0,replayErrors:0,correctionRecords:0};
+  if(manifest){const refs=manifest.memories;if(!refs||typeof refs!=='object')issue('MANIFEST_REF_STRUCTURE_INVALID');else for(const ref of Object.values(refs)){
+    counts.canonicalRefs++;if(typeof ref?.key!=='string'){counts.missingCanonicalRefs++;continue;}const prefix='libra:v1:scope:'+snapshot.scopeKey+':';
+    if(!ref.key.startsWith(prefix)){issue('CANONICAL_REF_SCOPE_MISMATCH');counts.missingCanonicalRefs++;}
+    else if(snapshot.inventoryComplete&&!live.has(ref.key.slice(prefix.length)))counts.missingCanonicalRefs++;
+  }}else if(snapshot.liveRecords>0)issue('MANIFEST_NOT_OBSERVED','없음 또는 검사 상한으로 미확인');
+  if(counts.missingCanonicalRefs)issue('CANONICAL_REF_NOT_PRESENT',String(counts.missingCanonicalRefs));
+  for(const [name,value] of entries){
+    if(value.schema==='libra.unified_state_tx.v1'&&value.state==='prepared')counts.pendingState++;
+    if(value.schema==='libra.unified_server_vector_tx.v1')counts.pendingVectors++;
+    if(name.includes(':unified-replay-tx:'))counts.pendingReplay++;
+    if(name.startsWith('state-pipeline-receipt:'))counts.receipts++;
+    if(name==='state-replay-errors:v1')counts.replayErrors=Array.isArray(value.errors)?value.errors.length:Array.isArray(value.entries)?value.entries.length:0;
+    if(name==='state-corrections:v2')counts.correctionRecords=Array.isArray(value.corrections)?value.corrections.length:Array.isArray(value.entries)?value.entries.length:0;
+  }
+  if(counts.pendingState)issue('PREPARED_STATE_TRANSACTION',String(counts.pendingState));
+  if(counts.pendingReplay)issue('PENDING_REPLAY_TRANSACTION',String(counts.pendingReplay));
+  if(counts.pendingVectors)issue('PENDING_VECTOR_TRANSACTION',String(counts.pendingVectors));
+  if(counts.replayErrors)issue('REPLAY_ERRORS_RECORDED',String(counts.replayErrors));
+  if(head&&!registry)issue('REGISTRY_NOT_OBSERVED');if(registry&&!head)issue('HEAD_NOT_OBSERVED');
+  if(head&&registry&&head.entityRegistryFingerprint&&registry.fingerprint!==head.entityRegistryFingerprint)issue('HEAD_REGISTRY_FINGERPRINT_MISMATCH');
+  if(snapshot.skipped?.length||!snapshot.complete)issue('INSPECTION_INCOMPLETE','검사 상한 또는 읽기 실패. 정상으로 확정하지 않습니다.');
+  return {schema:'libra.scope-health-report.v1',at:snapshot.at,readOnly:true,scopeFingerprint:options.digest?options.digest(snapshot.scopeKey):snapshot.fingerprint,
+    snapshotFingerprint:snapshot.fingerprint,complete:snapshot.complete===true,status:!snapshot.complete?'incomplete':issues.length?'attention':snapshot.liveRecords===0?'empty':'no_detected_issue',
+    counts,throughTurn:Number(head?.throughTurn||0),issues,notChecked:['원문과 현재 채팅의 일치','모델 산출의 의미 정확도','전체 벡터 실체','과거 사용자 DATA 장애의 실제 원인'],
+    recommendations:counts.pendingState?['기존 Pending State 재시도 기능을 명시적으로 실행한 뒤 다시 검사','재시도 실패 시 진단을 보존하고 현재 scope만 안전 초기화 검토']:['자료를 자동 변경하지 않았습니다. 오류가 있으면 진단을 보존하세요.']};
+};
+/* END LIBRA READ-ONLY SCOPE HEALTH */
+
+/* LIBRARIAN SYSTEM STORAGE SDK v1.8.21
  * Scope-routed durable storage client shared by Flashback, HAYAKU, LIBRA, LIA and RE:TRACE.
  * The server stores opaque values. Each plugin keeps ownership of its own data schema.
  */
@@ -3969,6 +4008,60 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
     try { if (typeof TextEncoder === 'function') return new TextEncoder().encode(String(serialized)).byteLength; } catch (_) {}
     return String(serialized).length * 2;
   };
+
+
+  const createScopedSyncMetrics = () => ({
+    localReadCount: 0, localReadBytes: 0, localWriteCount: 0, localWriteBytes: 0,
+    localRemoveCount: 0, remoteReadCount: 0, remoteReadBytes: 0,
+    remoteListCount: 0, remoteListBytes: 0, remoteWriteCount: 0, remoteWriteBytes: 0,
+    byOperation: {}
+  });
+  const cloneScopedSyncMetrics = metrics => {
+    const value = metrics && typeof metrics === 'object' ? metrics : createScopedSyncMetrics();
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return createScopedSyncMetrics(); }
+  };
+  const recordScopedSyncMetric = (metrics, operation, values = {}) => {
+    if (!metrics || typeof metrics !== 'object') return;
+    const op = String(operation || 'unknown');
+    const row = metrics.byOperation[op] || { count: 0, localBytes: 0, remoteBytes: 0 };
+    row.count += Math.max(1, Number(values.count || 1) || 1);
+    row.localBytes += Math.max(0, Number(values.localBytes || 0) || 0);
+    row.remoteBytes += Math.max(0, Number(values.remoteBytes || 0) || 0);
+    metrics.byOperation[op] = row;
+    for (const field of ['localReadCount','localReadBytes','localWriteCount','localWriteBytes','localRemoveCount','remoteReadCount','remoteReadBytes','remoteListCount','remoteListBytes','remoteWriteCount','remoteWriteBytes']) {
+      if (Object.prototype.hasOwnProperty.call(values, field)) metrics[field] += Math.max(0, Number(values[field] || 0) || 0);
+    }
+  };
+  const mergeScopedSyncMetrics = (target, source) => {
+    if (!target || !source || typeof source !== 'object') return target;
+    for (const field of ['localReadCount','localReadBytes','localWriteCount','localWriteBytes','localRemoveCount','remoteReadCount','remoteReadBytes','remoteListCount','remoteListBytes','remoteWriteCount','remoteWriteBytes']) {
+      target[field] = Math.max(0, Number(target[field] || 0) || 0) + Math.max(0, Number(source[field] || 0) || 0);
+    }
+    for (const [operation, row] of Object.entries(source.byOperation || {})) {
+      const current = target.byOperation[operation] || { count: 0, localBytes: 0, remoteBytes: 0 };
+      current.count += Math.max(0, Number(row?.count || 0) || 0);
+      current.localBytes += Math.max(0, Number(row?.localBytes || 0) || 0);
+      current.remoteBytes += Math.max(0, Number(row?.remoteBytes || 0) || 0);
+      target.byOperation[operation] = current;
+    }
+    return target;
+  };
+  const scopedSyncRemoteValueBytes = remote => remote?.exists === true
+    ? Math.max(0, Number(remote?.valueBytes || 0) || storageValueBytes(remote?.value)) : 0;
+  const scopedSyncFailure = ({ key = '', stage = 'unknown', operation = 'unknown', error, localBytes = 0, remoteBytes = 0 } = {}) => {
+    const message = compact(error?.message || error || 'memory_suite_scope_sync_failed', 700);
+    const errorCode = String(error?.code || 'MEMORY_SUITE_SCOPE_SYNC_FAILED');
+    const retryable = typeof error?.retryable === 'boolean' ? error.retryable : retryableSyncError(error);
+    return {
+      key: String(key || ''), stage: String(stage || 'unknown'), errorCode, message,
+      operation: String(operation || 'unknown'),
+      localBytes: Math.max(0, Number(localBytes || 0) || 0),
+      remoteBytes: Math.max(0, Number(remoteBytes || 0) || 0), retryable,
+      error: message
+    };
+  };
+
+  // MEMORY_SUITE_SCOPE_SYNC_DIAGNOSTICS_V1
 
   // Batch-read values may legally use keys such as "__proto__".  Assigning
   // those keys with Object.assign or bracket notation can invoke inherited
@@ -5511,6 +5604,7 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
 
   const createBackgroundJob = async (kind, target = {}) => {
     const currentConfig = await readConfig(true);
+    const requestedMode = target.requestedMode ? normalizeMode(target.requestedMode) : (target.mode ? normalizeMode(target.mode) : currentConfig.mode);
     const existing = state.syncJob.current;
     if (existing && !syncJobTerminal(existing.status)) {
       const sameTarget = existing.kind === kind
@@ -5536,7 +5630,8 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
       phase: 'queued',
       sourceMode: currentConfig.mode,
       sourceUrl: currentConfig.url,
-      targetMode: target.mode ? normalizeMode(target.mode) : currentConfig.mode,
+      requestedMode, effectiveMode: currentConfig.mode,
+      targetMode: requestedMode,
       targetUrl: target.url ? normalizeServerUrl(target.url) : currentConfig.url,
       totalItems: 0,
       processedItems: 0,
@@ -5571,6 +5666,8 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
 
   const completeBackgroundJob = async (result = null) => {
     updateSyncJob({
+      requestedMode: result?.requestedMode || state.syncJob.current?.requestedMode || state.syncJob.current?.targetMode || '',
+      effectiveMode: result?.effectiveMode || state.syncJob.current?.sourceMode || '',
       status: 'completed', phase: 'completed', currentAction: '완료', currentKey: '',
       message: '작업이 안전하게 완료되었습니다.', result: result ? cloneSyncJob(result) : null,
       error: '', nextRetryAt: 0, finishedAt: Date.now()
@@ -5580,6 +5677,8 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
 
   const failBackgroundJob = async error => {
     updateSyncJob({
+      requestedMode: error?.requestedMode || state.syncJob.current?.requestedMode || state.syncJob.current?.targetMode || '',
+      effectiveMode: error?.effectiveMode || state.syncJob.current?.sourceMode || '',
       status: 'failed', phase: 'failed', currentAction: '작업 중단', currentKey: '',
       message: '작업을 완료하지 못했습니다.', error: compact(error?.message || error, 700),
       nextRetryAt: 0, finishedAt: Date.now()
@@ -5597,7 +5696,7 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
       try {
         let result;
         if (job.kind === 'connection_config') {
-          result = await configureConnection({ mode: job.targetMode, url: job.targetUrl }, { onProgress: applySyncProgressToJob });
+          result = await configureConnection({ mode: job.requestedMode || job.targetMode, url: job.targetUrl }, { onProgress: applySyncProgressToJob });
         } else if (job.kind === 'manual_sync') {
           result = await synchronizeAllLegacy({ allowOverwrite: true, restoreMissingLocal: true, onProgress: applySyncProgressToJob });
           if (!result.ok) throw new Error(`sync_failures:${result.failures.length}`);
@@ -7241,10 +7340,40 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
       Object.assign(progress, patch || {}, { phase: String(phase || progress.phase), lastActivityAt: Date.now() });
       try { onProgress?.({ ...progress }); } catch (_) {}
     };
+    const metrics = createScopedSyncMetrics();
+    const readLocal = async (key, operation = 'local_read') => {
+      const value = await legacyRead(legacy, key);
+      const bytes = isNullishStorageValue(value) ? 0 : storageValueBytes(value);
+      recordScopedSyncMetric(metrics, operation, { localReadCount: 1, localReadBytes: bytes, localBytes: bytes });
+      return value;
+    };
+    const writeLocal = async (key, value, operation = 'local_write') => {
+      const bytes = isNullishStorageValue(value) ? 0 : storageValueBytes(value);
+      recordScopedSyncMetric(metrics, operation, { localWriteCount: 1, localWriteBytes: bytes, localBytes: bytes });
+      return await legacyWriteVerified(legacy, key, value);
+    };
+    const removeLocal = async (key, operation = 'local_remove') => {
+      recordScopedSyncMetric(metrics, operation, { localRemoveCount: 1 });
+      return await legacyRemoveVerified(legacy, key);
+    };
+    const readRemote = async (remoteKey, operation = 'remote_read') => {
+      const remote = await remoteGet(space, remoteKey, { allowPluginOnly: true });
+      const bytes = scopedSyncRemoteValueBytes(remote);
+      recordScopedSyncMetric(metrics, operation, { remoteReadCount: 1, remoteReadBytes: bytes, remoteBytes: bytes });
+      return remote;
+    };
+    const writeRemote = async (...args) => {
+      const value = args[3];
+      const bytes = args[0] === 'set' ? storageValueBytes(value) : 0;
+      recordScopedSyncMetric(metrics, 'remote_write', { remoteWriteCount: 1, remoteWriteBytes: bytes, remoteBytes: bytes });
+      return await remoteMutate(...args);
+    };
     const integrityBefore = await remoteIntegrity({ allowPluginOnly: true });
+    recordScopedSyncMetric(metrics, 'integrity_before', { remoteReadCount: 1, remoteReadBytes: storageValueBytes(integrityBefore), remoteBytes: storageValueBytes(integrityBefore) });
     report('inventory', { message: `${scope.label || scope.scopeId} 데이터 목록을 조사하고 있습니다.` });
     const localRows = await collectScopedLegacyRows(legacy, space, scope);
     const listing = await remoteKeys(space, '', { allowPluginOnly: true });
+    recordScopedSyncMetric(metrics, 'remote_keys', { remoteReadCount: 1, remoteReadBytes: storageValueBytes(listing), remoteListCount: 1, remoteListBytes: storageValueBytes(listing), remoteBytes: storageValueBytes(listing) });
     const remoteRecords = new Map((Array.isArray(listing.records) ? listing.records : []).map(row => [String(row?.key || ''), row]));
     const remoteKeysForScope = new Set();
     for (const remoteKey of Array.isArray(listing.keys) ? listing.keys : []) {
@@ -7265,27 +7394,33 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
       schema: 'memory-suite.scope-sync.v1', namespace, space, scope, startedAt: progress.startedAt,
       totalItems: progress.totalItems, processedItems: 0, processedBytes: 0, transferredBytes: 0,
       uploaded: 0, restored: 0, matched: 0, removedByTombstone: 0,
-      plannedUploaded: 0, plannedRestored: 0, dryRun, conflicts: [], failures: [],
+      plannedUploaded: 0, plannedRestored: 0, dryRun, conflicts: [], failures: [], failureDetails: [],
+      metrics, requestedMode: syncOptions.requestedMode || '', effectiveMode: syncOptions.effectiveMode || '',
       integrityBefore, integrityAfter: null
     };
     for (const row of localRows) {
-      let bytes = 0, action = '비교';
+      let bytes = 0, localBytes = 0, remoteBytes = 0, stage = 'local_read', operation = 'local_compare', action = '비교';
       try {
         report('sync_local', { currentKey: row.key, currentAction: 'pluginStorage → 서버 비교' });
-        const local = await legacyRead(legacy, row.key);
+        stage = 'local_read'; operation = 'local_compare';
+        const local = await readLocal(row.key, operation);
+        localBytes = isNullishStorageValue(local) ? 0 : storageValueBytes(local);
         const projected = isNullishStorageValue(local) ? null : await routeProjectValue(row.route, local);
         bytes = isNullishStorageValue(projected) ? 0 : storageValueBytes(projected);
+        localBytes = bytes;
         if (isNullishStorageValue(projected)) action = '빈 값 건너뜀';
         else {
-          const remote = await remoteGet(space, row.route.remoteKey, { allowPluginOnly: true });
+          stage = 'remote_read'; operation = 'remote_compare';
+          const remote = await readRemote(row.route.remoteKey, operation);
+          remoteBytes = scopedSyncRemoteValueBytes(remote);
           if (remote.exists === true && jsonComparable(remote.value) === jsonComparable(projected)) { result.matched += 1; action = '일치 확인'; }
           else if (remote.tombstone === true && syncOptions.resurrectTombstones !== true) {
             if (!dryRun && syncOptions.allowOverwrite !== false && syncOptions.restoreMissingLocal === true) {
               const removed = await routeRemoveLocal(
                 row.route,
-                async()=>legacyRead(legacy,row.key),
-                async next=>legacyWriteVerified(legacy,row.key,next),
-                async()=>legacyRemoveVerified(legacy,row.key)
+                async()=>readLocal(row.key,'tombstone_local_read'),
+                async next=>writeLocal(row.key,next,'tombstone_local_write'),
+                async()=>removeLocal(row.key,'tombstone_local_remove')
               );
               if (!removed) throw new Error('pluginstorage_tombstone_apply_failed');
               result.removedByTombstone += 1;
@@ -7310,42 +7445,52 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
             result.plannedUploaded += 1;
             action = remote.exists === true ? '서버 덮어쓰기 예정' : '서버 업로드 예정';
           } else {
-            await remoteMutate('set', space, row.route.remoteKey, projected, { allowPluginOnly: true });
+            stage = 'remote_write'; operation = 'remote_write';
+            await writeRemote('set', space, row.route.remoteKey, projected, { allowPluginOnly: true });
             result.uploaded += 1; result.transferredBytes += bytes; action = '서버 저장·검증 완료';
           }
         }
-      } catch (error) { result.failures.push({ key: row.key, error: compact(error?.message || error, 240) }); action = '실패'; }
+      } catch (error) { const detail = scopedSyncFailure({ key: row.key, stage, operation, error, localBytes, remoteBytes }); result.failures.push(detail); result.failureDetails.push(detail); action = '실패'; }
       finally {
         result.processedItems += 1; result.processedBytes += bytes;
-        Object.assign(progress, { processedItems: result.processedItems, processedBytes: result.processedBytes, transferredBytes: result.transferredBytes, uploaded: result.uploaded, restored: result.restored, matched: result.matched, removedByTombstone: result.removedByTombstone, failureCount: result.failures.length, conflictCount: result.conflicts.length });
+        Object.assign(progress, { processedItems: result.processedItems, processedBytes: result.processedBytes, transferredBytes: result.transferredBytes, uploaded: result.uploaded, restored: result.restored, matched: result.matched, removedByTombstone: result.removedByTombstone, failureCount: result.failures.length, conflictCount: result.conflicts.length, metrics: cloneScopedSyncMetrics(metrics) });
         report('sync_local', { currentKey: row.key, currentAction: action });
       }
     }
     for (const remoteKey of missingRemoteRows) {
-      let bytes = Math.max(0, Number(remoteRecords.get(remoteKey)?.valueBytes || 0) || 0), action = '서버 → pluginStorage 복구';
+      let bytes = Math.max(0, Number(remoteRecords.get(remoteKey)?.valueBytes || 0) || 0), localBytes = 0, remoteBytes = bytes, stage = 'remote_read', operation = 'restore_remote_read', action = '서버 → pluginStorage 복구';
       try {
         const decoded = scopedRemoteKeyInfo(remoteKey);
         const route = await resolveScopedRoute(space, decoded.logicalKey, { scope, noCache: true });
-        const remote = await remoteGet(space, remoteKey, { allowPluginOnly: true });
+        stage = 'remote_read'; operation = 'restore_remote_read';
+        const remote = await readRemote(remoteKey, operation);
+        remoteBytes = scopedSyncRemoteValueBytes(remote) || bytes;
         if (remote.exists === true) {
-          const current = await legacyRead(legacy, decoded.logicalKey);
+          stage = 'local_read'; operation = 'restore_local_read';
+          const current = await readLocal(decoded.logicalKey, operation);
+          localBytes = isNullishStorageValue(current) ? 0 : storageValueBytes(current);
           const merged = await routeMergeValue(route, remote.value, current);
           if (dryRun) {
             result.plannedRestored += 1; action = '복구 가능 확인';
           } else {
-            if (!await legacyWriteVerified(legacy, decoded.logicalKey, merged)) throw new Error('pluginstorage_restore_failed');
+            stage = 'local_write'; operation = 'restore_local_write';
+            if (!await writeLocal(decoded.logicalKey, merged, operation)) throw new Error('pluginstorage_restore_failed');
             result.restored += 1; result.transferredBytes += bytes; action = '복구·readback 완료';
           }
         }
-      } catch (error) { result.failures.push({ key: remoteKey, error: compact(error?.message || error, 240) }); action = '복구 실패'; }
+      } catch (error) { const detail = scopedSyncFailure({ key: remoteKey, stage, operation, error, localBytes, remoteBytes }); result.failures.push(detail); result.failureDetails.push(detail); action = '복구 실패'; }
       finally {
         result.processedItems += 1; result.processedBytes += bytes;
-        Object.assign(progress, { processedItems: result.processedItems, processedBytes: result.processedBytes, transferredBytes: result.transferredBytes, uploaded: result.uploaded, restored: result.restored, matched: result.matched, removedByTombstone: result.removedByTombstone, failureCount: result.failures.length, conflictCount: result.conflicts.length });
+        Object.assign(progress, { processedItems: result.processedItems, processedBytes: result.processedBytes, transferredBytes: result.transferredBytes, uploaded: result.uploaded, restored: result.restored, matched: result.matched, removedByTombstone: result.removedByTombstone, failureCount: result.failures.length, conflictCount: result.conflicts.length, metrics: cloneScopedSyncMetrics(metrics) });
         report('sync_remote', { currentKey: remoteKey, currentAction: action });
       }
     }
     report('integrity_after', { currentKey: '', currentAction: dryRun ? '사전검사 완료' : '최종 무결성 확인', message: dryRun ? '쓰기 없는 모드 전환 사전검사를 완료했습니다.' : '현재 스코프 동기화 후 서버 DATA 무결성을 확인하고 있습니다.' });
     result.integrityAfter = dryRun ? integrityBefore : await remoteIntegrity({ allowPluginOnly: true });
+    if (!dryRun) recordScopedSyncMetric(metrics, 'integrity_after', { remoteReadCount: 1, remoteReadBytes: storageValueBytes(result.integrityAfter), remoteBytes: storageValueBytes(result.integrityAfter) });
+    result.metrics = cloneScopedSyncMetrics(metrics);
+    result.failureDetails = result.failures.slice();
+    result.diagnostics = { schema: 'memory-suite.scope-sync-diagnostics.v1', metrics: result.metrics, failures: result.failureDetails.slice() };
     result.ok = result.failures.length === 0 && result.conflicts.length === 0;
     report(result.ok ? 'scope_complete' : 'scope_incomplete', { currentKey: '', currentAction: result.ok ? '스코프 동기화 완료' : '확인 필요', message: result.ok ? `${scope.label || scope.scopeId} 동기화를 완료했습니다.` : `실패 ${result.failures.length} · 충돌 ${result.conflicts.length}` });
     if (!result.ok) {
@@ -7358,17 +7503,51 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
   const scopedSynchronizeAll = async (syncOptions = {}) => {
     const scope = normalizeScopeDescriptor(syncOptions.scope || await resolveCurrentScope(true));
     if (syncOptions.allowRecoveryRequired !== true) await assertRecoveryActionAllowed(scope, 'synchronize');
-    const result = { schema: 'memory-suite.scope-sync-all.v1', namespace, scope, plugin: null, local: null, uploaded: 0, restored: 0, matched: 0, removedByTombstone:0, plannedUploaded:0, plannedRestored:0, failures: [], totalItems: 0, processedItems: 0, processedBytes: 0, transferredBytes: 0 };
+    const modeState = await readScopeMode(scope, true);
+    const requestedMode = normalizeMode(syncOptions.requestedMode || syncOptions.mode || modeState.mode);
+    const result = {
+      schema: 'memory-suite.scope-sync-all.v1', namespace, scope, plugin: null, local: null,
+      requestedMode, effectiveMode: modeState.mode,
+      uploaded: 0, restored: 0, matched: 0, removedByTombstone: 0,
+      plannedUploaded: 0, plannedRestored: 0, failures: [], failureDetails: [], conflicts: [],
+      totalItems: 0, processedItems: 0, processedBytes: 0, transferredBytes: 0,
+      metrics: createScopedSyncMetrics()
+    };
     const forward = progress => { try { syncOptions.onProgress?.(progress); } catch (_) {} };
-    if (state.legacy.plugin) {
-      result.plugin = await scopedSynchronizeSpace(state.legacy.plugin, 'plugin', { ...syncOptions, scope, onProgress: forward });
-      for (const field of ['uploaded','restored','matched','removedByTombstone','plannedUploaded','plannedRestored','totalItems','processedItems','processedBytes','transferredBytes']) result[field] += Number(result.plugin?.[field] || 0);
+    const addPart = (space, part) => {
+      result[space] = part;
+      for (const field of ['uploaded','restored','matched','removedByTombstone','plannedUploaded','plannedRestored','totalItems','processedItems','processedBytes','transferredBytes']) result[field] += Number(part?.[field] || 0);
+      mergeScopedSyncMetrics(result.metrics, part?.metrics);
+      for (const failure of Array.isArray(part?.failures) ? part.failures : []) {
+        const detail = { ...failure, space: String(space) };
+        result.failures.push(detail); result.failureDetails.push(detail);
+      }
+      for (const conflict of Array.isArray(part?.conflicts) ? part.conflicts : []) result.conflicts.push({ ...conflict, space: String(space) });
+    };
+    const runPart = async (legacy, space) => {
+      if (!legacy || (space === 'local' && typeof legacy.keys !== 'function')) return;
+      try {
+        const part = await scopedSynchronizeSpace(legacy, space, { ...syncOptions, scope, requestedMode, effectiveMode: modeState.mode, onProgress: forward });
+        addPart(space, part);
+      } catch (error) {
+        const part = error?.result && typeof error.result === 'object' ? error.result : null;
+        if (part) addPart(space, part);
+        else {
+          const detail = scopedSyncFailure({ key: '', stage: 'scope', operation: space + '_scope_sync', error });
+          result.failures.push({ ...detail, space }); result.failureDetails.push({ ...detail, space });
+        }
+      }
+    };
+    await runPart(state.legacy.plugin, 'plugin');
+    await runPart(state.legacy.local, 'local');
+    result.metrics = cloneScopedSyncMetrics(result.metrics);
+    result.diagnostics = { schema: 'memory_suite.scope-sync-diagnostics.v1', metrics: result.metrics, failures: result.failureDetails.slice(), conflicts: result.conflicts.slice() };
+    result.ok = result.failures.length === 0 && result.conflicts.length === 0;
+    if (!result.ok) {
+      const error = new Error('memory_suite_scope_sync_incomplete:' + scope.scopeId + ':failures=' + result.failures.length + ',conflicts=' + result.conflicts.length);
+      error.code = 'MEMORY_SUITE_SCOPE_SYNC_INCOMPLETE'; error.result = result;
+      throw error;
     }
-    if (state.legacy.local && typeof state.legacy.local?.keys === 'function') {
-      result.local = await scopedSynchronizeSpace(state.legacy.local, 'local', { ...syncOptions, scope, onProgress: forward });
-      for (const field of ['uploaded','restored','matched','removedByTombstone','plannedUploaded','plannedRestored','totalItems','processedItems','processedBytes','transferredBytes']) result[field] += Number(result.local?.[field] || 0);
-    }
-    result.ok = true;
     return result;
   };
 
@@ -7774,28 +7953,30 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
     const recoveryLock = await recoveryLockForScope(scope);
     if (recoveryLock && target !== MODE_SERVER_ONLY) throw recoveryRequiredError(scope, recoveryLock, `set_mode_${target}`);
     const current = await readScopeMode(scope, true);
-    if (target === current.mode) return { changed:false, from:current.mode, to:target, scope, modeLabel:modeLabel(target) };
+    if (target === current.mode) return { changed:false, requestedMode:target, effectiveMode:current.mode, from:current.mode, to:target, scope, modeLabel:modeLabel(target) };
     if (!state.legacy.plugin) throw new Error('memory_suite_pluginstorage_unavailable');
     const onProgress = typeof operationOptions.onProgress === 'function' ? operationOptions.onProgress : null;
     try {
       if (current.mode === MODE_PLUGIN_ONLY && target !== MODE_PLUGIN_ONLY) {
         // Discover every deterministic conflict before the first server or local write.
         // This prevents a late key conflict from leaving an earlier key partially seeded.
-        const preflight = await scopedSynchronizeAll({ scope, dryRun:true, allowOverwrite:false, restoreMissingLocal:false, onProgress });
-        const seeded = await scopedSynchronizeAll({ scope, allowOverwrite:false, restoreMissingLocal:false, onProgress });
+        const preflight = await scopedSynchronizeAll({ scope, requestedMode:target, effectiveMode:current.mode, dryRun:true, allowOverwrite:false, restoreMissingLocal:false, onProgress });
+        const seeded = await scopedSynchronizeAll({ scope, requestedMode:target, effectiveMode:current.mode, allowOverwrite:false, restoreMissingLocal:false, onProgress });
         const settled = seeded;
         if (!preflight.ok || !seeded.ok || !settled.ok) throw new Error('memory_suite_scope_mode_seed_failed');
         await remoteIntegrity({ allowPluginOnly:true });
       } else if (current.mode === MODE_MIRROR && target === MODE_SERVER_ONLY) {
-        await scopedSynchronizeAll({ scope, allowOverwrite:true, restoreMissingLocal:true, onProgress });
+        await scopedSynchronizeAll({ scope, requestedMode:target, effectiveMode:current.mode, allowOverwrite:true, restoreMissingLocal:true, onProgress });
         await remoteIntegrity({ allowPluginOnly:true });
       } else if ((current.mode === MODE_SERVER_ONLY && target !== MODE_SERVER_ONLY) || (current.mode === MODE_MIRROR && target === MODE_PLUGIN_ONLY)) {
         await scopedRestoreAll({ scope, onProgress });
       }
       const saved = await persistScopedMode(target, scope, { source:'safe_scope_mode_transition' });
-      return { changed:true, from:current.mode, to:target, scope, modeLabel:modeLabel(target), config:saved };
+      return { changed:true, requestedMode:target, effectiveMode:target, from:current.mode, to:target, scope, modeLabel:modeLabel(target), config:saved };
     } catch (error) {
       state.scopeRouting.transientModes.delete(scope.scopeId);
+      error.requestedMode = target; error.effectiveMode = current.mode;
+      error.modeTransition = { requestedMode: target, effectiveMode: current.mode, from: current.mode, to: target, scope };
       throw error;
     }
   };
@@ -7840,10 +8021,13 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
         urlChanged = true;
       }
       const modeResult = await scopedSetModeSafely(targetMode, { ...operationOptions, scope });
-      const from = { mode:currentMode, modeLabel:modeLabel(currentMode), url:currentUrl, scope };
-      const to = { mode:targetMode, modeLabel:modeLabel(targetMode), url:targetUrl, scope };
-      return { ok:true, scope, url:targetUrl, mode:targetMode, modeLabel:modeLabel(targetMode), from, to, transition:modeResult, modeResult, connectionTest };
+      const effectiveMode = normalizeMode(modeResult?.effectiveMode || targetMode);
+      const from = { mode:currentMode, modeLabel:modeLabel(currentMode), requestedMode:currentMode, effectiveMode:currentMode, url:currentUrl, scope };
+      const to = { mode:effectiveMode, modeLabel:modeLabel(effectiveMode), requestedMode:targetMode, effectiveMode, url:targetUrl, scope };
+      return { ok:true, scope, url:targetUrl, mode:effectiveMode, modeLabel:modeLabel(effectiveMode), requestedMode:targetMode, effectiveMode, from, to, transition:modeResult, modeResult, connectionTest };
     } catch (error) {
+      error.requestedMode = targetMode; error.effectiveMode = currentMode;
+      error.modeTransition = { requestedMode: targetMode, effectiveMode: currentMode, from: currentMode, to: targetMode, scope };
       if (urlChanged) {
         try { await persistServerUrl(currentUrl); resetBootstrapCache(); }
         catch (rollbackError) { error.urlRollbackError = compact(rollbackError?.message || rollbackError, 300); }
@@ -7890,13 +8074,14 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
     if (!random) random = `${now.toString(36)}_${Math.random().toString(36).slice(2,10)}`;
     const jobId = `${namespace}_${kind}_${scope.scopeId}_${random}`.replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 240);
     const currentMode = (await readScopeMode(scope, true)).mode;
+    const requestedMode = target.requestedMode ? normalizeMode(target.requestedMode) : (target.mode ? normalizeMode(target.mode) : currentMode);
     const currentUrl = normalizeServerUrl(await getArgumentValue(urlArguments, defaultUrl));
     state.syncJob.current = {
       schema: SYNC_JOB_SCHEMA, namespace, pluginId, pluginVersion,
       jobId, id: jobId, kind: String(kind || 'manual_sync'),
       scopeId: scope.scopeId, scopeKey: scope.scopeKey, scopeLabel: scope.label,
-      sourceMode: currentMode, sourceUrl: currentUrl,
-      targetMode: target.mode ? normalizeMode(target.mode) : currentMode,
+      sourceMode: currentMode, sourceUrl: currentUrl, requestedMode, effectiveMode: currentMode,
+      targetMode: requestedMode,
       targetUrl: target.url ? normalizeServerUrl(target.url) : currentUrl,
       status: 'queued', phase: 'queued', message: '작업을 준비하고 있습니다.',
       startedAt: now, updatedAt: now, lastActivityAt: now, finishedAt: 0,
@@ -7928,7 +8113,7 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
       try {
         let result;
         if (job.kind === 'connection_config') {
-          result = await scopedConfigureConnection({ mode: job.targetMode, url: job.targetUrl }, { scope, onProgress: applySyncProgressToJob });
+          result = await scopedConfigureConnection({ mode: job.requestedMode || job.targetMode, url: job.targetUrl }, { scope, onProgress: applySyncProgressToJob });
         } else if (job.kind === 'manual_sync') {
           await assertRecoveryActionAllowed(scope, 'manual_sync');
           const mode = (await readScopeMode(scope, true)).mode;
@@ -7942,6 +8127,8 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
           throw new Error(`memory_suite_unknown_background_job:${job.kind}`);
         }
         updateSyncJob({
+          requestedMode: result?.requestedMode || state.syncJob.current?.requestedMode || state.syncJob.current?.targetMode || '',
+          effectiveMode: result?.effectiveMode || state.syncJob.current?.sourceMode || '',
           status: 'completed', phase: 'completed', currentAction: '완료', currentKey: '',
           message: '작업이 안전하게 완료되었습니다.', result: cloneSyncJob(result), error: '',
           nextRetryAt: 0, finishedAt: Date.now()
@@ -7964,6 +8151,8 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
           return null;
         }
         updateSyncJob({
+          requestedMode: error?.requestedMode || state.syncJob.current?.requestedMode || state.syncJob.current?.targetMode || '',
+          effectiveMode: error?.effectiveMode || state.syncJob.current?.sourceMode || '',
           status: 'failed', phase: 'failed', currentAction: '작업 중단', currentKey: '',
           message: '작업을 완료하지 못했습니다.', error: compact(error?.message || error, 700),
           result:compactRestoreEvidence(error?.result || null),
@@ -8241,21 +8430,24 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
       card.classList.add('show'); const total=Math.max(0,Number(job.totalItems||0)), done=Math.max(0,Number(job.processedItems||0)); const percent=total?Math.min(100,Math.round(done/total*100)):0;
       card.classList.toggle('terminal',terminal); card.classList.toggle('failed',job.status==='failed');
       q('[data-job-title]').textContent = `${job.message || (terminal?'작업 결과':'작업 진행 중')}${total ? ` · ${terminal&&job.status==='completed'?100:percent}%` : ''}`; q('[data-job-bar]').style.width=`${terminal&&job.status==='completed'?100:percent}%`;
-      q('[data-job-phase]').textContent=`현재 단계: ${job.phase || '준비'}`; q('[data-job-count]').textContent=`진행: ${done.toLocaleString()} / ${total ? total.toLocaleString() : '조사 중'}`;
+      q('[data-job-phase]').textContent=`현재 단계: ${job.phase || '준비'}`; q('[data-job-count]').textContent=`진행: ${done.toLocaleString()} / ${total || terminal ? total.toLocaleString() : '조사 중'}${job.status==='completed' && total===0 ? ' · 이동할 데이터 없음' : ''}`;
       q('[data-job-bytes]').textContent=`처리: ${formatBytes(job.processedBytes)} · 전송: ${formatBytes(job.transferredBytes)}`; q('[data-job-time]').textContent=`경과: ${Math.max(0,Math.floor((Date.now()-Number(job.startedAt||Date.now()))/1000))}초`;
       q('[data-job-retry]').textContent=`재시도 ${Number(job.retryCount||0)} · 실패 ${Number(job.failures||0)}`; q('[data-job-key]').textContent=`현재: ${job.currentKey || job.currentAction || '-'}`;
       const terminalActions=q('[data-job-terminal-actions]'); terminalActions.style.display=terminal?'flex':'none';
       const result=job.result&&typeof job.result==='object'?job.result:{};
       q('[data-job-result]').textContent=terminal
-        ? [job.status==='completed'?'완료 결과':'실패 결과',integratesCompute?`저장 방식 ${modeLabel(job.targetMode || initial.mode)} · 연산 ${normalizeMode(job.targetMode || initial.mode) === MODE_PLUGIN_ONLY ? '로컬' : '서버 우선 · 실패 시 로컬'}`:'',`복원 ${Number(job.restored||result.restored||0)} · 업로드 ${Number(job.uploaded||result.uploaded||0)} · 일치 ${Number(job.matched||result.matched||0)}`,`삭제 표식 ${Number(job.removedByTombstone||result.removed||0)} · 검증 ${Number(result.verified||0)}`,job.recoveryRequired?'복구 필수 잠금: 활성 · 서버 단독 유지':'복구 필수 잠금: 없음',job.error?`오류: ${job.error}`:''].filter(Boolean).join('\n')
+        ? [job.status==='completed'?'완료 결과':'실패 결과',`요청 모드: ${modeLabel(job.requestedMode || job.targetMode || initial.mode)}`,`현재 적용 모드: ${modeLabel(job.effectiveMode || result.effectiveMode || job.sourceMode || initial.mode)}`,job.status==='failed'?'전환 미완료 · 현재 적용 모드를 확인하세요.':'',integratesCompute?`연산: ${normalizeMode(job.effectiveMode || result.effectiveMode || job.sourceMode || initial.mode) === MODE_PLUGIN_ONLY ? '로컬' : '서버 우선 · 실패 시 로컬'}`:'',`복원 ${Number(job.restored||result.restored||0)} · 업로드 ${Number(job.uploaded||result.uploaded||0)} · 일치 ${Number(job.matched||result.matched||0)}`,`삭제 표식 ${Number(job.removedByTombstone||result.removed||0)} · 검증 ${Number(result.verified||0)}`,job.recoveryRequired?'복구 필수 잠금: 활성 · 서버 단독 유지':'복구 필수 잠금: 없음',job.error?`오류: ${job.error}`:''].filter(Boolean).join('\n')
         : '';
+      const diagnosticText = terminal ? JSON.stringify({ schema:'memory-suite.scope-sync-diagnostics.v1', requestedMode:job.requestedMode || job.targetMode || '', effectiveMode:job.effectiveMode || job.sourceMode || '', failures:result.failures || [], metrics:result.metrics || {}, result }, null, 2) : '';
+      const diagnosticBox = q('[data-job-diagnostics]'); if (diagnosticBox) { diagnosticBox.value = diagnosticText; diagnosticBox.style.display = terminal && diagnosticText ? 'block' : 'none'; }
+      const copyButton = q('[data-job-copy]'); if (copyButton && !copyButton.dataset.bound) { copyButton.dataset.bound = '1'; copyButton.onclick = async () => { try { const value = q('[data-job-diagnostics]')?.value || ''; if (navigator?.clipboard?.writeText) await navigator.clipboard.writeText(value); else { q('[data-job-diagnostics]')?.select?.(); document.execCommand?.('copy'); } setMessage('Detailed diagnostics copied','good'); } catch (error) { setMessage('Detailed diagnostics copy failed\n' + (error?.message || error),'error'); } }; }
       if(terminal&&job.status==='completed'&&normalizeMode(job.targetMode)!==MODE_PLUGIN_ONLY&&computeProbeJobId!==job.jobId){computeProbeJobId=job.jobId;try{computeBridge?.scheduleProbe?.(0);}catch(_){}}
       if(terminal&&job.jobId!==terminalRefreshId){terminalRefreshId=job.jobId;scheduleLifecycleTimeout(()=>{void scopedGetConnectionSettings({scope:initial.scope,force:true}).then(settings=>applyRecoveryGuard(settings.recoveryRequired)).catch(()=>{});},0);}
     };
     for(const [selector,choice] of [['[data-reset-empty]','empty'],['[data-reset-upload]','upload']]){
       q(selector).onclick=async()=>{try{await acceptServerReset(choice);setMessage('선택을 저장했습니다. 기존 실행의 재업로드를 막기 위해 RisuAI를 새로고침한 뒤 사용하세요.','good');}catch(error){setMessage(error.message,'error');}};
     }
-    q('[data-test]').onclick = async()=>{ setMessage(integratesCompute?'Storage와 Compute 연결을 확인하고 있습니다…':'서버 연결을 확인하고 있습니다…'); const storageResult=await testConnection(q('[data-url]').value); let computeResult=null; if(integratesCompute&&storageResult.ok&&computeBridge?.probe){try{computeResult=await computeBridge.probe({force:true,reason:'integrated_connection_test'});}catch(error){computeResult={ok:false,error:compact(error?.message||error,300)};}} const storageLine=storageResult.ok?`${integratesCompute?'Storage: ':''}연결됨 · Librarian System ${storageResult.serverVersion} · 항목 ${storageResult.liveRecords}`:`${integratesCompute?'Storage: ':''}연결 실패 · ${storageResult.error}`; const computeLine=!integratesCompute?'':!storageResult.ok?'Compute: Storage 연결 실패로 확인하지 않음':computeResult?.ok?`Compute: 연결됨 · ${Number(computeResult.operations?.length||computeResult.operationCount||0)}개 연산`:`Compute: 연결 실패 · 연산 시 로컬 폴백 · ${computeResult?.error||computeResult?.reason||'unavailable'}`; setMessage([storageLine,computeLine].filter(Boolean).join('\n'),storageResult.ok&&(!integratesCompute||computeResult?.ok)?'good':storageResult.ok?'':'error'); };
+    q('[data-test]').onclick = async()=>{ setMessage(integratesCompute?'Storage와 Compute 연결을 확인하고 있습니다…':'서버 연결을 확인하고 있습니다…'); const storageResult=await testConnection(q('[data-url]').value); let computeResult=null; if(integratesCompute&&storageResult.ok&&computeBridge?.probe){try{computeResult=await computeBridge.probe({force:true,deep:true,reason:'integrated_connection_test'});}catch(error){computeResult={ok:false,error:compact(error?.message||error,300)};}} const storageLine=storageResult.ok?`${integratesCompute?'Storage: ':''}연결됨 · Librarian System ${storageResult.serverVersion} · 항목 ${storageResult.liveRecords}`:`${integratesCompute?'Storage: ':''}연결 실패 · ${storageResult.error}`; const computeLine=!integratesCompute?'':!storageResult.ok?'Compute: Storage 연결 실패로 확인하지 않음':computeResult?.ok?`Compute: 연결됨 · ${Number(computeResult.operations?.length||computeResult.operationCount||0)}개 연산`:`Compute: 연결 실패 · 연산 시 로컬 폴백 · ${computeResult?.error||computeResult?.reason||'unavailable'}`; setMessage([storageLine,computeLine].filter(Boolean).join('\n'),storageResult.ok&&(!integratesCompute||computeResult?.ok)?'good':storageResult.ok?'':'error'); };
     q('[data-apply]').onclick = async()=>{ const mode=root.querySelector(`input[name="${rootId}-mode"]:checked`)?.value||MODE_PLUGIN_ONLY; try{const job=await scopedStartConnectionConfigurationJob({mode,url:q('[data-url]').value,scope:initial.scope}); setMessage('설정 적용과 현재 스코프 초기 동기화를 시작했습니다.'); renderJob(job);}catch(error){setMessage(`설정 적용 시작 실패\n${error?.message||error}`,'error');} };
     q('[data-sync]').onclick = async()=>{ try{const job=await scopedStartSynchronizationJob({scope:initial.scope});setMessage('현재 스코프 동기화를 시작했습니다.');renderJob(job);}catch(error){setMessage(`동기화 시작 실패\n${error?.userMessage||error?.message||error}`,'error');} };
     q('[data-restore]').onclick = async()=>{ try{const job=await scopedStartRestoreJob({scope:initial.scope});setMessage('현재 스코프 복구를 시작했습니다.');renderJob(job);}catch(error){setMessage(`복구 시작 실패\n${error?.userMessage||error?.message||error}`,'error');} };
@@ -8870,6 +9062,33 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
     prepareConditionalBatch,
     commitConditionalBatch,
     getConditionalBatchBoundary: conditionalBatchBoundary,
+    inspectOwnedScopeHealth: async scopeKey => {
+      // Diagnostic reads must remain available when a *write* recovery lock is
+      // active. Never borrow a writable batch permit or clear that lock.
+      const readBoundary=async()=>{
+        if(lifecycle.disposed)throw new Error('libra_scope_health_disposed');
+        const scope=await resolveCurrentScope(true),mode=(await readScopeMode(scope,true)).mode;
+        if(namespace!=='libra'||!scope?.scopeId||![MODE_SERVER_ONLY,MODE_MIRROR].includes(mode))throw new Error('libra_scope_health_server_scope_required');
+        const config=await readConfig();return {scopeId:scope.scopeId,mode,url:config.url};
+      };
+      const boundary=await readBoundary(),connection=await bootstrap(false,true);
+      if(connection.capabilities?.['libra-scope-health.v1']!==true)throw new Error('libra_scope_health_server_update_required');
+      const result=(await request('POST','/v1/owner/scope-health',{scopeKey},{scopeId:boundary.scopeId,storageMode:boundary.mode})).result;
+      if(jsonComparable(boundary)!==jsonComparable(await readBoundary()))throw new Error('libra_scope_health_context_changed');
+      return result;
+    },
+    planOwnedScopeDeletion: async scopeKey => {
+      await conditionalBatchBoundary();
+      return (await request('POST','/v1/owner/scope-delete/plan',{scopeKey})).result;
+    },
+    executeOwnedScopeDeletion: async plan => {
+      await conditionalBatchBoundary();
+      const result=(await request('POST','/v1/owner/scope-delete/execute',plan)).result;
+      if(result?.verified!==true||result?.durable!==true)throw new Error('scope_delete_unverified');
+      // Do not allow the old mirror cache to repopulate the deleted server.
+      await acceptServerReset('empty');
+      return result;
+    },
     get: scopedGet,
     set: scopedSet,
     remove: scopedRemove,
@@ -8918,6 +9137,13 @@ const createMemorySuiteStorageBridge = (rawOptions = {}) => {
     getCachedDiagnostics,
     decorateDebugExport,
     decorateDebugExportSync,
+    managerPortable: async (action, body = {}) => {
+      const allowed=['capabilities','export-start','upload-start','upload-chunk','upload-finish','download-chunk','status','cancel','restore-plan','restore-execute'];
+      if(!allowed.includes(action))throw new Error('portable_action_not_supported');
+      const connection=await managerConnection();
+      if(connection.capabilities?.['portable-transfer.v1']!==true)throw new Error('portable_transfer_server_upgrade_required');
+      return (await managerRequest('POST','/v1/manager/portable/'+action,body)).result;
+    },
     managerControl: async (action, body = {}) => {
       const allowed=['status','backups','history','backup-create','backup-check','restore-plan','restore-execute'];
       if(!allowed.includes(action))throw new Error('control_action_not_supported');
@@ -9091,7 +9317,7 @@ const createMemorySuiteSearchClient = function createMemorySuiteSearchClient(opt
   return {execute,vectors,status:bridge.status,dispose:async()=>{disposed=true;corpora.clear();retainedBytes=0;await bridge.dispose();}};
 };
 // END MEMORY SUITE SEARCH
-/* LIBRARIAN SYSTEM COMPUTE SDK v0.3.5
+/* LIBRARIAN SYSTEM COMPUTE SDK v0.3.6
  * Optional deterministic-compute client shared by Librarian System owner plugins.
  *
  * The plugin remains authoritative: local execution is always available, the
@@ -9257,51 +9483,54 @@ const createMemorySuiteComputeBridge = (rawOptions = {}) => {
     return () => state.listeners.delete(listener);
   };
 
-  const capturedApis = [];
-  const captureApi = value => {
-    if (value && (typeof value === 'object' || typeof value === 'function') && !capturedApis.includes(value)) capturedApis.push(value);
+  const collectApis = () => {
+    const apis = [];
+    const captureApi = value => {
+      if (value && (typeof value === 'object' || typeof value === 'function') && !apis.includes(value)) apis.push(value);
+    };
+    captureApi(options.api);
+    try { if (typeof risuai !== 'undefined') captureApi(risuai); } catch (_) {}
+    try { if (typeof risuApi !== 'undefined') captureApi(risuApi); } catch (_) {}
+    try { if (typeof risuAPI !== 'undefined') captureApi(risuAPI); } catch (_) {}
+    try { if (typeof Risuai !== 'undefined') captureApi(Risuai); } catch (_) {}
+    try { if (typeof RisuAI !== 'undefined') captureApi(RisuAI); } catch (_) {}
+    try {
+      if (typeof globalThis !== 'undefined') {
+        captureApi(globalThis.risuai);
+        captureApi(globalThis.risuApi);
+        captureApi(globalThis.risuAPI);
+        captureApi(globalThis.Risuai);
+        captureApi(globalThis.RisuAI);
+        captureApi(globalThis.__pluginApis__);
+      }
+    } catch (_) {}
+    return apis;
   };
-  captureApi(options.api);
-  try { if (typeof risuai !== 'undefined') captureApi(risuai); } catch (_) {}
-  try { if (typeof risuApi !== 'undefined') captureApi(risuApi); } catch (_) {}
-  try { if (typeof risuAPI !== 'undefined') captureApi(risuAPI); } catch (_) {}
-  try { if (typeof Risuai !== 'undefined') captureApi(Risuai); } catch (_) {}
-  try { if (typeof RisuAI !== 'undefined') captureApi(RisuAI); } catch (_) {}
-  try {
-    if (typeof globalThis !== 'undefined') {
-      captureApi(globalThis.risuai);
-      captureApi(globalThis.risuApi);
-      captureApi(globalThis.risuAPI);
-      captureApi(globalThis.Risuai);
-      captureApi(globalThis.RisuAI);
-      captureApi(globalThis.__pluginApis__);
+  const capturedFetch = (...args) => {
+    if (typeof options.fetch === 'function') return options.fetch(...args);
+    for (const api of collectApis()) {
+      if (typeof api?.nativeFetch === 'function') return api.nativeFetch(...args);
+      if (typeof api?.risuFetch === 'function') return api.risuFetch(...args);
     }
-  } catch (_) {}
-  const capturedFetch = (() => {
-    if (typeof options.fetch === 'function') return options.fetch;
-    for (const api of capturedApis) {
-      if (typeof api?.nativeFetch === 'function') return api.nativeFetch.bind(api);
-      if (typeof api?.risuFetch === 'function') return api.risuFetch.bind(api);
-    }
-    try { if (typeof fetch === 'function') return fetch.bind(globalThis); } catch (_) {}
+    if (typeof fetch === 'function') return fetch(...args);
     return null;
-  })();
-  const capturedGetArgument = (() => {
-    if (typeof options.getArgument === 'function') return options.getArgument;
-    for (const api of capturedApis) {
-      if (typeof api?.getArgument === 'function') return api.getArgument.bind(api);
-      if (typeof api?.getArg === 'function') return api.getArg.bind(api);
+  };
+  const capturedGetArgument = (...args) => {
+    if (typeof options.getArgument === 'function') return options.getArgument(...args);
+    for (const api of collectApis()) {
+      if (typeof api?.getArgument === 'function') return api.getArgument(...args);
+      if (typeof api?.getArg === 'function') return api.getArg(...args);
     }
     return null;
-  })();
-  const capturedSetArgument = (() => {
-    if (typeof options.setArgument === 'function') return options.setArgument;
-    for (const api of capturedApis) {
-      if (typeof api?.setArgument === 'function') return api.setArgument.bind(api);
-      if (typeof api?.setArg === 'function') return api.setArg.bind(api);
+  };
+  const capturedSetArgument = (...args) => {
+    if (typeof options.setArgument === 'function') return options.setArgument(...args);
+    for (const api of collectApis()) {
+      if (typeof api?.setArgument === 'function') return api.setArgument(...args);
+      if (typeof api?.setArg === 'function') return api.setArg(...args);
     }
     return null;
-  })();
+  };
 
   const readMode = async (force = false) => {
     assertActive();
@@ -9310,7 +9539,7 @@ const createMemorySuiteComputeBridge = (rawOptions = {}) => {
     let raw = defaultMode;
     try {
       if (typeof options.modeProvider === 'function') raw = await options.modeProvider({ namespace, pluginId });
-      else if (capturedGetArgument) raw = await capturedGetArgument(modeArgument);
+      else raw = await capturedGetArgument(modeArgument);
     } catch (_) { raw = state.mode.value || defaultMode; }
     const value = normalizeMode(raw || defaultMode);
     state.mode = { value, at: now(), transient: state.mode.transient };
@@ -9324,7 +9553,7 @@ const createMemorySuiteComputeBridge = (rawOptions = {}) => {
       if (typeof options.modeSetter === 'function') {
         const accepted = await options.modeSetter(value, { namespace, pluginId });
         if (accepted === false) throw new Error('compute_mode_write_rejected');
-      } else if (capturedSetArgument) {
+      } else if (typeof options.setArgument === 'function' || collectApis().some(a => typeof a?.setArgument === 'function' || typeof a?.setArg === 'function')) {
         const accepted = await capturedSetArgument(modeArgument, value);
         if (accepted === false) throw new Error('compute_mode_write_rejected');
       } else {
@@ -9587,7 +9816,7 @@ const createMemorySuiteComputeBridge = (rawOptions = {}) => {
   const resolveServerUrl = async () => {
     let value = defaultUrl;
     if (typeof options.urlProvider === 'function') value = await options.urlProvider({ namespace, pluginId });
-    else if (capturedGetArgument && urlArgument) value = await capturedGetArgument(urlArgument);
+    else if (urlArgument) value = await capturedGetArgument(urlArgument);
     return normalizeServerUrl(value || defaultUrl);
   };
   const validateComputeBootstrap = (payload, requestedUrl) => {
@@ -9613,7 +9842,8 @@ const createMemorySuiteComputeBridge = (rawOptions = {}) => {
     }
     return {
       requestedUrl: normalizeServerUrl(requestedUrl),
-      url: normalizeServerUrl(payload.url),
+      url: normalizeServerUrl(requestedUrl || payload.url),
+      advertisedUrl: normalizeServerUrl(payload.url),
       token: String(payload.token),
       version: String(payload.version || ''),
       capabilities: { ...(payload.capabilities || {}) },
@@ -9714,6 +9944,13 @@ const createMemorySuiteComputeBridge = (rawOptions = {}) => {
     emitStatus('probing', String(probeOptions.reason || ''));
     try {
       const connection = await ensureComputeConnectionRaw(force, Math.max(250, Number(probeOptions.timeoutMs || probeTimeoutMs) || probeTimeoutMs), epoch);
+      if (probeOptions.deep === true) {
+        const checked = await fetchJson(connection.url + '/v1/compute/capabilities', {
+          method: 'GET', headers: { Authorization: 'Bearer ' + connection.token,
+            'X-Memory-Suite-Plugin': pluginId, 'X-Memory-Suite-Plugin-Version': pluginVersion }
+        }, 'Librarian System compute capabilities', Math.max(250, Number(probeOptions.timeoutMs || probeTimeoutMs)), epoch);
+        if (checked?.ok !== true) throw Object.assign(new Error('compute_capabilities_probe_failed'), { code: 'MEMORY_SUITE_COMPUTE_PROBE_FAILED' });
+      }
       circuitSuccess(ticket);
       emitStatus('ready');
       return {
@@ -40953,7 +41190,11 @@ async function showMemorySuiteSourceReview(config) {
   const overlay=doc.createElement('div');overlay.id='memorySuiteSourceReview';overlay.dataset.owner=owner;
   const theme=['libra','hayaku','flashback'].includes(owner)?owner:'libra';overlay.dataset.theme=theme;
   const ownerLabel={libra:'LIBRA',hayaku:'HAYAKU',flashback:'FLASHBACK MEMORY'}[theme];
-  overlay.dataset.minimized='true';
+  // Manual requests open directly; only automatic detection uses a dock.
+  const reviewOrigin=(config.origin==='manual'||config.manual===true)?'manual':'automatic';
+  const manualOrigin=reviewOrigin==='manual';
+  overlay.dataset.origin=reviewOrigin;
+  overlay.dataset.minimized=manualOrigin?'false':'true';
   const style=doc.createElement('style');style.textContent=`
 #memorySuiteSourceReview{--sr-paper:#f8efe1;--sr-ink:#35281d;--sr-muted:#645344;--sr-line:#b9a17e;--sr-soft:#efe0ca;--sr-button:#87561f;--sr-on:#fff;--sr-old:#f5dadd;--sr-old-ink:#6e202c;--sr-new:#d6eddd;--sr-new-ink:#194b2d;position:fixed;inset:0;z-index:${{libra:41,hayaku:42,flashback:43}[theme]};display:flex;align-items:center;justify-content:center;padding:16px;background:#10151b99;color:var(--sr-ink);font:15px/1.65 system-ui,-apple-system,'Malgun Gothic',sans-serif}
 #memorySuiteSourceReview[data-theme=hayaku]{--sr-paper:#fff;--sr-ink:#192139;--sr-muted:#506080;--sr-line:#bbc7de;--sr-soft:#f1f4fc;--sr-button:#4a4ed3;color-scheme:light}
@@ -40967,7 +41208,7 @@ async function showMemorySuiteSourceReview(config) {
 #memorySuiteSourceReview .sr-header,#memorySuiteSourceReview .sr-footer{padding:16px 20px;background:var(--sr-soft);flex:none}#memorySuiteSourceReview .sr-header{display:flex;align-items:flex-start;gap:14px;justify-content:space-between}#memorySuiteSourceReview h2{color:var(--sr-ink);font-size:20px;margin:0;line-height:1.45;word-break:keep-all;overflow-wrap:anywhere}#memorySuiteSourceReview p{margin:7px 0;color:var(--sr-muted);word-break:keep-all;overflow-wrap:anywhere}#memorySuiteSourceReview .sr-body{flex:1;overflow:auto;min-height:0;padding:16px 20px;overscroll-behavior:contain}#memorySuiteSourceReview .sr-controls,#memorySuiteSourceReview .sr-footer{display:flex;gap:9px;align-items:center;flex-wrap:wrap}#memorySuiteSourceReview .sr-footer{justify-content:flex-end;border-top:1px solid var(--sr-line)}
 #memorySuiteSourceReview button{font:inherit;font-size:14px;font-weight:650;min-height:42px;padding:8px 13px;border-radius:9px;border:1px solid var(--sr-line);color:var(--sr-ink);background:var(--sr-paper);cursor:pointer;white-space:normal;word-break:keep-all;overflow-wrap:anywhere}#memorySuiteSourceReview button.sr-primary{background:var(--sr-button);color:var(--sr-on);border-color:var(--sr-button)}#memorySuiteSourceReview button:disabled{opacity:.55;cursor:not-allowed}#memorySuiteSourceReview :focus-visible{outline:3px solid var(--sr-button);outline-offset:2px}
 #memorySuiteSourceReview .sr-close{flex:none;white-space:nowrap}#memorySuiteSourceReview article{margin:14px 0;padding:14px;border:1px solid var(--sr-line);border-radius:10px}#memorySuiteSourceReview label{display:flex;align-items:flex-start;gap:9px;cursor:pointer;color:var(--sr-ink);overflow-wrap:anywhere}#memorySuiteSourceReview input[type=checkbox]{flex:none;width:19px;height:19px;margin:4px 0;accent-color:var(--sr-button)}#memorySuiteSourceReview .sr-sides{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}#memorySuiteSourceReview .sr-sides strong{display:block;margin:9px 0 4px}#memorySuiteSourceReview pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;max-height:44vh;overflow:auto;background:var(--sr-soft);border:1px solid var(--sr-line);border-radius:8px;padding:12px;font:14px/1.75 system-ui,sans-serif;margin:0 0 10px;color:var(--sr-ink)}#memorySuiteSourceReview .sr-removed{background:var(--sr-old);color:var(--sr-old-ink)}#memorySuiteSourceReview .sr-added{background:var(--sr-new);color:var(--sr-new-ink)}#memorySuiteSourceReview summary{cursor:pointer;padding:9px 0;color:var(--sr-ink)}#memorySuiteSourceReview .sr-warning{padding:9px 12px;border-left:4px solid var(--sr-old-ink);background:var(--sr-old);color:var(--sr-old-ink)}#memorySuiteSourceReview .sr-count{color:var(--sr-muted);font-variant-numeric:tabular-nums}
-@media(max-width:650px){#memorySuiteSourceReview{padding:5px;font-size:14px}#memorySuiteSourceReview .sr-panel{max-height:98vh;max-height:98dvh}#memorySuiteSourceReview .sr-header,#memorySuiteSourceReview .sr-footer{padding:11px}#memorySuiteSourceReview .sr-body{padding:10px}#memorySuiteSourceReview .sr-sides{grid-template-columns:minmax(0,1fr)}#memorySuiteSourceReview article{padding:10px}#memorySuiteSourceReview h2{font-size:17px}#memorySuiteSourceReview pre{max-height:32vh}#memorySuiteSourceReview .sr-footer button{flex:1}}
+@media(max-width:650px){#memorySuiteSourceReview{padding:5px;font-size:14px}#memorySuiteSourceReview .sr-panel{max-height:98vh;max-height:98dvh}#memorySuiteSourceReview .sr-header,#memorySuiteSourceReview .sr-footer{padding:11px}#memorySuiteSourceReview .sr-body{padding:10px}#memorySuiteSourceReview .sr-sides{grid-template-columns:minmax(0,1fr)}#memorySuiteSourceReview article{padding:10px}#memorySuiteSourceReview h2{font-size:17px}#memorySuiteSourceReview pre{max-height:32vh}#memorySuiteSourceReview .sr-footer{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}#memorySuiteSourceReview .sr-footer>label{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;justify-content:space-between}#memorySuiteSourceReview .sr-footer>p{grid-column:1/-1;margin:0}#memorySuiteSourceReview .sr-footer>p:empty{display:none}#memorySuiteSourceReview .sr-footer select{max-width:100%;min-width:0}#memorySuiteSourceReview .sr-footer button{min-width:0;width:100%;min-height:48px;white-space:normal;word-break:keep-all;overflow-wrap:anywhere;line-height:1.4;padding:10px 8px}}
 `;
   const el=(tag,cls,body)=>{const n=doc.createElement(tag);if(cls)n.className=cls;if(body!==undefined)n.textContent=body;return n;};
   const button=(text,cls,attr)=>{const n=el('button',cls,text);n.type='button';if(attr)n.setAttribute(attr,'');return n;};
@@ -41037,8 +41278,10 @@ async function showMemorySuiteSourceReview(config) {
       if(!wasVisible&&await config.show?.()===false){expanded=false;overlay.dataset.minimized='true';await dock?.show();return;}
       if(done){if(!wasVisible)await config.hide?.();return;}cancel.focus();
     }catch(_){expanded=false;overlay.dataset.minimized='true';await dock?.show();}finally{transition=false;}};
+    const ensureDock=async()=>{if(dock||done)return dock;try{dock=await makeDock();}catch(_){dock=null;}return dock;};
     const collapse=async()=>{if(done||!expanded||transition)return;transition=true;try{
       overlay.dataset.minimized='true';expanded=false;
+      await ensureDock();
       if(!wasVisible)await config.hide?.();
       await dock?.show();
     }finally{transition=false;}};
@@ -41046,7 +41289,9 @@ async function showMemorySuiteSourceReview(config) {
       const nodes=[...overlay.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),summary')].filter(n=>n.getClientRects().length);
       const first=nodes[0],last=nodes.at(-1);if(e.shiftKey&&(doc.activeElement===first||!overlay.contains(doc.activeElement))){e.preventDefault();last?.focus();}else if(!e.shiftKey&&(doc.activeElement===last||!overlay.contains(doc.activeElement))){e.preventDefault();first?.focus();}
     }};
-    config.onOpen?.(()=>finish('cancel'));doc.addEventListener('keydown',keyed,true);
+    // Two DISTINCT capabilities: cancelling the review, and merely minimizing
+    // it to a dock. A host that only closes its window must use minimize.
+    config.onOpen?.(()=>finish('cancel'),{minimize:async()=>{await ensureDock();await collapse();return true;},origin:reviewOrigin});doc.addEventListener('keydown',keyed,true);
     minimize.onclick=()=>void collapse();cancel.onclick=()=>finish('cancel');close.onclick=()=>finish('cancel');
     approve.onclick=()=>{if(expanded&&selected().length)finish('approve');};overlay.onclick=e=>{if(expanded&&e.target===overlay)void collapse();};
     // Host-root SafeElement notification: no fullscreen iframe until clicked.
@@ -41081,7 +41326,13 @@ async function showMemorySuiteSourceReview(config) {
     };
     const tick=async()=>{if(done)return;try{if(!overlay.isConnected||await config.isCurrent?.()===false){finish('cancel');return;}}catch(_){finish('cancel');return;}if(!done){timer=setTimeout(tick,2000);timer?.unref?.();}};
     timer=setTimeout(tick,2000);timer?.unref?.();
-    makeDock().then(value=>{dock=value;if(done)return dock.dispose();}).catch(()=>finish('defer'));
+    if(manualOrigin){
+      // No dock is created for a manual review, so the plugin's fullscreen
+      // overlay cannot end up covering an unclickable host-document card.
+      expand().catch(()=>finish('defer'));
+    } else {
+      makeDock().then(value=>{dock=value;if(done)return dock.dispose();}).catch(()=>finish('defer'));
+    }
   });
 }
 /* LIBRARIAN SYSTEM SOURCE REVIEW v1.0.0 END */
@@ -41603,9 +41854,9 @@ function createMemorySuiteSourceEditConsent(config) {
     reviewTimer?.unref?.();
   }
   const deferPrompt = () => ({ decision: 'defer' });
-  async function ask(tasks, reviewSet = null) {
+  async function ask(tasks, reviewSet = null, origin = 'automatic') {
     if (typeof config.prompt === 'function') {
-      const answer = await config.prompt({ question: QUESTION, owner: config.owner, scopeKey: currentScope, tasks: clone(tasks), review: reviewSet, tracking:boundary?{mode:mode(),setMode}:null });
+      const answer = await config.prompt({ origin, manual: origin === 'manual', question: QUESTION, owner: config.owner, scopeKey: currentScope, tasks: clone(tasks), review: reviewSet, tracking:boundary?{mode:mode(),setMode}:null });
       if (answer) return answer;
     }
     const api = config.api?.();
@@ -41685,7 +41936,7 @@ function createMemorySuiteSourceEditConsent(config) {
         if(reviewSet.scopeKey!==key || !Array.isArray(reviewSet.rows) || reviewSet.rows.length!==candidates.length
           || candidates.some(t=>reviewSet.rows.filter(r=>r.key===t.key).length!==1))throw new Error('SOURCE_REVIEW_SET_INVALID');
       }
-      const answer=await ask(candidates,reviewSet);
+      const answer=await ask(candidates,reviewSet,manual===true?'manual':'automatic');
       if(boundary&&reviewGeneration!==generation)return {ok:false,reason:'tracking_mode_changed'};
       if(requestChanged())return {ok:false,reason:'source_edit_request_changed'};
       if(disposed || answer?.decision==='defer') return {ok:false,reason:'confirmation_deferred'};
@@ -41856,7 +42107,7 @@ function createMemorySuiteSourceEditConsent(config) {
     let libraSourceReviewClose = null;
     const promptLibraSourceReview = async request => {
       if(typeof document==='undefined'||!document.body)return null;
-      return await showMemorySuiteSourceReview({owner:'libra',document,rootDocument:()=>getLiveApi(['getRootDocument'])?.getRootDocument?.(),review:request.review,question:request.question,tracking:request.tracking,
+      return await showMemorySuiteSourceReview({owner:'libra',origin:request.origin,manual:request.manual===true,document,rootDocument:()=>getLiveApi(['getRootDocument'])?.getRootDocument?.(),review:request.review,question:request.question,tracking:request.tracking,
         description:'이전 승인 본문과 현재 본문을 비교하고 재분석할 5턴 문서를 선택하세요. 기존 정본은 새 결과가 저장될 때까지 유지됩니다.',
         isContainerVisible:()=>typeof Gui!=='undefined'&&Gui.visible===true,
         show:()=>getLiveApi(['showContainer'])?.showContainer?.('fullscreen'),
@@ -41950,6 +42201,15 @@ function createMemorySuiteSourceEditConsent(config) {
     const inspectLibraSourceEdits = async (context,pairs,manifest) => {
       const snap=await libraSourceEditSnapshot(context,pairs,manifest);
       return getLibraSourceEdits().inspect(snap);
+    };
+    const reviewLibraSourceEdits = async ({ expectedScopeKey = '', startTurns = [] } = {}) => {
+      const sourceGuard = getLibraSourceEdits();
+      const observed = await sourceGuard.refresh({ prompt: false });
+      const current = sourceGuard.status();
+      if (!observed || current.error) throw new Error(current.error || 'SOURCE_EDIT_SCOPE_UNAVAILABLE');
+      if (expectedScopeKey && String(current.scopeKey) !== String(expectedScopeKey)) throw new Error('SOURCE_REVIEW_SCOPE_CHANGED');
+      const keys = asArray(startTurns).map(value => String(Number(value))).filter(value => value !== '0');
+      return await sourceGuard.review(true, keys.length ? keys : null);
     };
 
     // LIBRA unified engine v1. C0/C1 opt-in: one source-bound artifact, no normal Observer.
@@ -43365,7 +43625,7 @@ function createMemorySuiteSourceEditConsent(config) {
       }
       for(const[k,rs]of groups)if(rs.length>1 && new Set(rs.map(r=>digest(r.state))).size>1)relationConflicts.push({key:`duplicate:${k}`,kind:'duplicate',choices:rs.map(r=>r.id),relations:rs.map(r=>r.id)});
       const body={schema:'libra.unified_identity_merge_preview.v1',scopeKey:head.scopeKey,worldlineId:head.worldlineId||'main',anchorTurn:head.throughTurn,basisFingerprint:head.basis?.sourceFingerprint||'',
-        sourceId,targetId,sourceType,sourceName:source.name,targetName:target.name,source:unifiedIdentitySemanticRow(source),target:unifiedIdentitySemanticRow(target),
+        sourceId,targetId,sourceType,sourceName:source.name,targetName:target.name,source:unifiedIdentitySemanticRow(source),target:unifiedIdentitySemanticRow(target),targetBeforeHash:stateCorrectionRecordHash(target),
         fieldConflicts,relationConflicts,referenceDigest:digest({characters:asArray(head.characters).map(unifiedIdentitySemanticRow),world:asArray(head.world).map(unifiedIdentitySemanticRow),relationships:asArray(head.relationships).map(r=>({id:r.id,subjectId:r.subjectId,targetId:r.targetId,dimension:r.dimension,state:r.state})),narrative:unifiedIdentitySemanticNarrative(head.narrative)})};
       return {...body,previewDigest:digest(body)};
     };
@@ -43380,7 +43640,7 @@ function createMemorySuiteSourceEditConsent(config) {
       unifiedAssert(Object.keys(choices).length===plan.fieldConflicts.length&&plan.fieldConflicts.every(r=>['source','target'].includes(choices[r.field])||(choices[r.field]==='both'&&unifiedIdentityCanKeepBoth(r))),'UNIFIED_MERGE_FIELD_CHOICE_REQUIRED');
       unifiedAssert(Object.keys(relations).length===plan.relationConflicts.length&&plan.relationConflicts.every(r=>r.choices.includes(relations[r.key])),'UNIFIED_MERGE_RELATION_CHOICE_REQUIRED');
       return {schema:UNIFIED_IDENTITY_MERGE_SCHEMA,sourceId:plan.sourceId,targetId:plan.targetId,sourceType:plan.sourceType,
-        sourceHash:digest(plan.source),targetHash:digest(plan.target),referenceDigest:plan.referenceDigest,fieldChoices:clone(choices),relationChoices:clone(relations)};
+        sourceHash:digest(plan.source),targetHash:digest(plan.target),referenceDigest:plan.referenceDigest,targetBeforeHash:string(plan.targetBeforeHash||''),fieldChoices:clone(choices),relationChoices:clone(relations)};
     };
     const applyUnifiedIdentityMerge=(headValue,group,correction)=>{
       unifiedAssert(group?.schema===UNIFIED_IDENTITY_MERGE_SCHEMA,'UNIFIED_MERGE_SCHEMA_INVALID');
@@ -44824,6 +45084,16 @@ function createMemorySuiteSourceEditConsent(config) {
       }
     };
 
+    const getServerScopeHealth = async () => {
+      const before=await resolveContext(),mode=await MemorySuiteStorageBridge.getMode();
+      if(mode==='plugin_only')return {schema:'libra.scope-health-report.v1',readOnly:true,status:'not_applicable',complete:false,mode,message:'현재 저장 방식은 플러그인 단독입니다. 서버로 전환하거나 자료를 업로드하지 않았습니다.'};
+      const snapshot=await MemorySuiteStorageBridge.inspectOwnedScopeHealth(before.scope.scopeKey);
+      const after=await resolveContext();
+      if(before.scope.scopeKey!==after.scope.scopeKey||mode!==await MemorySuiteStorageBridge.getMode())throw Error('LIBRA_SCOPE_HEALTH_CONTEXT_CHANGED');
+      if(snapshot.scopeKey!==before.scope.scopeKey)throw Error('LIBRA_SCOPE_HEALTH_SCOPE_MISMATCH');
+      return {...inspectLibraScopeHealthSnapshot(snapshot,{digest}),mode};
+    };
+
     const getUnifiedStorageStatus = async () => {
       const context=await resolveContext(),mode=await MemorySuiteStorageBridge.getMode();
       const base={schema:'libra.unified_storage_status.v1',scopeKey:context.scope.scopeKey,mode,singleOwnerOnly:true,
@@ -44834,7 +45104,7 @@ function createMemorySuiteSourceEditConsent(config) {
         await requireUnifiedStorageBackend(context);
         return {...base,eligible:true,atomicity:'single_namespace_sqlite',capability:'conditional-batch.v1',summary:mode==='mirror'?'미러 · 서버 조건부 커밋 + 로컬 검증 복사':'서버 전용 · 현재 main / all-v4 / 단일 writer',
           supported:['normal_analysis','source_edit','state_correction','local_replay','embedding'],
-          blocked:['native_lineage','portable','selected_legacy','identity_split','rollback_view','canonical_variant_delete','scope_delete','distributed_writer'],limits:{maxBatchItems:64,maxBatchBytes:4*1024*1024}};
+          blocked:['native_lineage','portable','selected_legacy','identity_split','rollback_view','canonical_variant_delete','distributed_writer'],limits:{maxBatchItems:64,maxBatchBytes:4*1024*1024}};
       }catch(error){return {...base,eligible:false,atomicity:'unsupported',summary:'이 저장 구성에서는 새 통합 쓰기를 보류합니다.',blocked:[string(error.code||error.message||error)]};}
     };
 
@@ -55241,7 +55511,19 @@ ${string(queryBundle?.sceneText || '')}`;
       const context = await resolveContext();
       if((await MemorySuiteStorageBridge.getMode())!=='plugin_only'){
         const saved=await storage.getJson(key.manifest(context.scope),null);
-        unifiedAssert((await loadMemorySettings()).memoryEngine==='legacy'&&!fullContinuityRefs(saved||{}).some(unifiedRefIsV4),'UNIFIED_SERVER_SCOPE_DELETE_NOT_SUPPORTED');
+        if((await loadMemorySettings()).memoryEngine!=='legacy'||fullContinuityRefs(saved||{}).some(unifiedRefIsV4)) {
+          const scopeKey=string(context.scope.scopeKey);
+          if(state.deletingScopes.has(scopeKey))throw new Error('scope_delete_busy');
+          state.deletingScopes.add(scopeKey);
+          try {
+            const plan=await MemorySuiteStorageBridge.planOwnedScopeDeletion(scopeKey);
+            const queued=state.queues.get(scopeKey);if(queued)await queued.catch(()=>{});
+            const current=await resolveContext();if(string(current.scope.scopeKey)!==scopeKey)throw new Error('scope_delete_scope_changed');
+            const result=await MemorySuiteStorageBridge.executeOwnedScopeDeletion(plan);
+            Runtime.lastScopeDeletion=result;
+            return result;
+          } finally { state.deletingScopes.delete(scopeKey); }
+        }
       }
       const scopeKey = string(context.scope.scopeKey);
       state.deletingScopes.add(scopeKey);
@@ -55479,6 +55761,8 @@ ${string(queryBundle?.sceneText || '')}`;
       for (const row of requested) {
         const actual = currentByStart.get(Number(row.startTurn));
         if (!actual || !row.sourceDigest || row.sourceDigest !== actual.sourceDigest) throw new Error('selected_batch_source_changed');
+        const expectedStatus = selection.mode === 'regenerate' ? 'saved' : selection.mode === 'failed' ? 'failed' : 'missing';
+        if (actual.status !== expectedStatus) throw new Error('selected_batch_status_changed');
         if (!selected.some(item => item.startTurn === actual.startTurn)) selected.push(actual);
       }
       selected.sort((a,b) => a.startTurn - b.startTurn);
@@ -57230,12 +57514,30 @@ ${string(queryBundle?.sceneText || '')}`;
       }
       return { identitySet, expectedFieldHashes };
     };
+    const structuralLayerBaseHashesFor = (current, correctionStore) => {
+      const row = asObject(current); const provenance = [row.correctionProvenance, ...Object.values(asObject(row.identityCorrectionProvenance)), ...Object.values(asObject(row.fieldCorrectionProvenance))];
+      const ids = [...new Set(provenance.filter(value => ['identity_merge','identity_split'].includes(string(value?.policy || ''))).map(value => string(value?.correctionId || '')).filter(Boolean))];
+      const hashes = {};
+      for (const correctionId of ids) {
+        const correction = asArray(correctionStore?.records).find(value => string(value?.correctionId || '') === correctionId && value?.status === 'active');
+        for (const patch of asArray(correction?.compiledAfter?.patches)) {
+          if (patch?.domain !== 'identity' || patch?.operation !== 'merge') continue;
+          const beforeHash = string(patch?.merge?.targetBeforeHash || '');
+          if (beforeHash) hashes[correctionId] = beforeHash;
+          else {
+            const before = asObject(patch?.merge?.targetBefore);
+            if (string(before?.id || '') === string(row.id || '')) hashes[correctionId] = stateCorrectionRecordHash(before);
+          }
+        }
+      }
+      return hashes;
+    };
     const stateCorrectionRelationshipState = (value, fallback = {}, unified = false) => {
       if(unified)return asObject(normalizeUnifiedStateValueForRead(value===undefined?fallback:isPlainObject(value)?value:{value:string(value||'')}));
       if (value === undefined) return normalizeContinuityStateSet(fallback);
       return isPlainObject(value) ? normalizeContinuityStateSet(value) : { value: compact(value || '', 800) };
     };
-    const compileStateCorrectionPatch = ({ requested, domain, head, identityHead = null, anchorTurn = 0 } = {}) => {
+    const compileStateCorrectionPatch = ({ requested, domain, head, identityHead = null, anchorTurn = 0, correctionStore = null } = {}) => {
       const source = asObject(requested);
       const identitySource = identityHead || head;
       const patches = [];
@@ -57252,12 +57554,14 @@ ${string(queryBundle?.sceneText || '')}`;
         });
         const identityDiff = stateCorrectionIdentityDiff({ current, requested: row.renameTo!==undefined ? {...row,name:row.renameTo} : row });
         const expectedFieldHashes = { ...fieldDiff.expectedFieldHashes, ...identityDiff.expectedFieldHashes };
+        const structuralLayerBaseHashes = structuralLayerBaseHashesFor(current, correctionStore);
         if (!Object.keys(fieldDiff.set).length && !fieldDiff.clear.length && !Object.keys(identityDiff.identitySet).length) return;
         patches.push({
           patchId: `correction_character_${digest([identity.id, index, expectedFieldHashes]).slice(0, 24)}`,
           domain: 'characters', operation: fieldDiff.clear.length && !Object.keys(fieldDiff.set).length && !Object.keys(identityDiff.identitySet).length ? 'clear_fields' : 'upsert',
           entityId: string(identity.id || ''), set: fieldDiff.set, clear: fieldDiff.clear,
-          identitySet: identityDiff.identitySet, expectedRecordHash: stateCorrectionRecordHash(current), expectedFieldHashes
+          identitySet: identityDiff.identitySet, expectedRecordHash: stateCorrectionRecordHash(current), expectedFieldHashes,
+          ...(Object.keys(structuralLayerBaseHashes).length ? { structuralLayerBaseHashes } : {})
         });
       };
       const appendWorld = (rowValue, index) => {
@@ -57273,12 +57577,14 @@ ${string(queryBundle?.sceneText || '')}`;
         });
         const identityDiff = stateCorrectionIdentityDiff({ current, requested: row.renameTo!==undefined ? {...row,name:row.renameTo} : row, includeKind: true });
         const expectedFieldHashes = { ...fieldDiff.expectedFieldHashes, ...identityDiff.expectedFieldHashes };
+        const structuralLayerBaseHashes = structuralLayerBaseHashesFor(current, correctionStore);
         if (!Object.keys(fieldDiff.set).length && !fieldDiff.clear.length && !Object.keys(identityDiff.identitySet).length) return;
         patches.push({
           patchId: `correction_world_${digest([identity.id, index, expectedFieldHashes]).slice(0, 24)}`,
           domain: 'world', operation: fieldDiff.clear.length && !Object.keys(fieldDiff.set).length && !Object.keys(identityDiff.identitySet).length ? 'clear_fields' : 'upsert',
           entityId: string(identity.id || ''), set: fieldDiff.set, clear: fieldDiff.clear,
-          identitySet: identityDiff.identitySet, expectedRecordHash: stateCorrectionRecordHash(current), expectedFieldHashes
+          identitySet: identityDiff.identitySet, expectedRecordHash: stateCorrectionRecordHash(current), expectedFieldHashes,
+          ...(Object.keys(structuralLayerBaseHashes).length ? { structuralLayerBaseHashes } : {})
         });
       };
       const appendRelationship = (rowValue, index) => {
@@ -57300,12 +57606,14 @@ ${string(queryBundle?.sceneText || '')}`;
           replace: !explicitSparse && Object.prototype.hasOwnProperty.call(row, 'state')
         });
         if (!Object.keys(fieldDiff.set).length && !fieldDiff.clear.length) return;
+        const structuralLayerBaseHashes = structuralLayerBaseHashesFor(current, correctionStore);
         patches.push({
           patchId: `correction_relationship_${digest([current.id, index, fieldDiff.expectedFieldHashes]).slice(0, 24)}`,
           domain: 'relationships', operation: fieldDiff.clear.length && !Object.keys(fieldDiff.set).length ? 'clear_fields' : 'upsert',
           relationId: string(current.id || ''), subjectId: string(subject.id || ''), targetId: string(target.id || ''), dimension,
           set: fieldDiff.set, clear: fieldDiff.clear, identitySet: {},
-          expectedRecordHash: stateCorrectionRecordHash(current), expectedFieldHashes: fieldDiff.expectedFieldHashes
+          expectedRecordHash: stateCorrectionRecordHash(current), expectedFieldHashes: fieldDiff.expectedFieldHashes,
+          ...(Object.keys(structuralLayerBaseHashes).length ? { structuralLayerBaseHashes } : {})
         });
       };
       const appendNarrative = narrativeValue => {
@@ -57378,7 +57686,10 @@ ${string(queryBundle?.sceneText || '')}`;
     };
     const assertStateCorrectionPatchCas = (patch, current) => {
       if (!current) throw stateCorrectionFailure('STATE_CORRECTION_TARGET_STALE');
-      if (string(patch?.expectedRecordHash || '') !== stateCorrectionRecordHash(current)) throw stateCorrectionFailure('STATE_CORRECTION_STALE_RECORD');
+      const actualRecordHash = stateCorrectionRecordHash(current);
+      const expectedRecordHash = string(patch?.expectedRecordHash || '');
+      const structuralAlternativeHashes = Object.values(asObject(patch?.structuralLayerBaseHashes)).map(string);
+      if (expectedRecordHash !== actualRecordHash && !structuralAlternativeHashes.includes(actualRecordHash)) throw stateCorrectionFailure('STATE_CORRECTION_STALE_RECORD');
       for (const [field, expectedHash] of Object.entries(asObject(patch?.expectedFieldHashes))) {
         const semanticField = field.startsWith('state.') ? field.slice(6) : field.split('.').at(-1);
         const actualHash = stateCorrectionFieldHash(semanticField, stateCorrectionCurrentFieldValue(patch, current, field));
@@ -57618,7 +57929,7 @@ ${string(queryBundle?.sceneText || '')}`;
       }
       return { head:next, applied };
     };
-    const normalizeStateCorrectionPayload = ({ patch, target, head, manifest, anchorTurn, identityHead = null }) => {
+    const normalizeStateCorrectionPayload = ({ patch, target, head, manifest, anchorTurn, identityHead = null, correctionStore = null }) => {
       const domain = string(target?.domain || 'head').toLowerCase();
       if (!['head','characters','relationships','world','narrative'].includes(domain)) throw stateCorrectionFailure('STATE_CORRECTION_TARGET_INVALID');
       const mode = string(target?.mode || (domain === 'narrative' ? 'narrative_patch' : 'profile_patch'));
@@ -57634,11 +57945,11 @@ ${string(queryBundle?.sceneText || '')}`;
       if (domain === 'narrative' && !Object.keys(asObject(requested.narrative || requested)).length) {
         throw stateCorrectionFailure('STATE_CORRECTION_PATCH_INVALID');
       }
-      const compiledPatch = compileStateCorrectionPatch({ requested, domain, head, identityHead, anchorTurn });
+      const compiledPatch = compileStateCorrectionPatch({ requested, domain, head, identityHead, anchorTurn, correctionStore });
       if (!asArray(compiledPatch?.patches).length) throw stateCorrectionFailure('STATE_CORRECTION_NO_CHANGE');
       return { target: normalizedTarget, patch: requested, compiledPatch };
     };
-    const stateCorrectionPreflight = async ({ context, manifest, patch, target, anchorTurn, basisFingerprint, worldlineId, supersedes = '' }) => {
+    const stateCorrectionPreflight = async ({ context, manifest, patch, target, anchorTurn, basisFingerprint, worldlineId, supersedes = '', correctionStore = null }) => {
       const meta=await loadStateWorldlineMeta(context.scope,{strict:true});
       const activeId=string(worldlineId||meta.activeWorldlineId||'main');
       if (!meta.worldlines?.[activeId]) throw stateCorrectionFailure('STATE_CORRECTION_WORLDLINE_NOT_FOUND');
@@ -57659,7 +57970,7 @@ ${string(queryBundle?.sceneText || '')}`;
       const expectedBasis=correctionBasisFingerprintForCanonicalRef(manifest,boundary);
       if (basisFingerprint && string(basisFingerprint)!==string(expectedBasis)) throw stateCorrectionFailure('STATE_CORRECTION_BASIS_MISMATCH');
       if (string(head?.basis?.sourceFingerprint||'')!==string(expectedBasis)) throw stateCorrectionFailure('STATE_CORRECTION_HEAD_BASIS_MISMATCH');
-      const normalized=normalizeStateCorrectionPayload({patch,target,head,manifest,anchorTurn:turn});
+      const normalized=normalizeStateCorrectionPayload({patch,target,head,manifest,anchorTurn:turn,correctionStore});
       if(isReadableUnifiedEngineVersion(head.unifiedApplied?.engineVersion))validateUnifiedCorrectionPatch(normalized.compiledPatch,head);
       const boundaryFingerprint=stateReplayBoundaryFingerprint({scope:context.scope,manifest,meta,worldlineId:activeId});
       return {meta,activeId,turn,expectedBasis,head,normalized,supersedes:string(supersedes||''),boundaryRef:clone(boundary),boundaryFingerprint};
@@ -57891,7 +58202,7 @@ ${string(queryBundle?.sceneText || '')}`;
         const pairs=buildPairs(context.chat,context?.scope?.scopeKey||''); const manifest=await loadManifest(context.scope,pairs.length);
         let store=await migrateLegacyContinuityOverrides(context.scope,manifest);
         const baseline={registry:await storage.getJson(key.entityRegistry(context.scope),null),journal:await storage.getJson(key.stateCorrections(context.scope),null),correctionMeta:await storage.getJson(key.stateCorrectionMeta(context.scope),null),correctionCommit:await storage.getJson(key.stateCorrectionCommit(context.scope),null),head:await storage.getJson(key.continuityState(context.scope),null),cache:await storage.getJson(key.stateReplayCache(context.scope),null),lastContinuityState:clone(state.lastContinuityState),snapshotContinuityState:sameSnapshotScope(state.snapshot?.scope,context.scope)?clone(state.snapshot?.continuityState):undefined};
-        const preflight=await stateCorrectionPreflight({context,manifest,patch,target,anchorTurn,basisFingerprint,worldlineId,supersedes});
+        const preflight=await stateCorrectionPreflight({context,manifest,patch,target,anchorTurn,basisFingerprint,worldlineId,supersedes,correctionStore:store});
         const unifiedResolutions=resolvePendingFacts.length?validateUnifiedPendingResolution(preflight.head,preflight.normalized.compiledPatch,resolvePendingFacts):[];
         const correctionId=id('state_correction'); const serverAtomic=isReadableUnifiedEngineVersion(preflight.head.unifiedApplied?.engineVersion) && !!(await requireUnifiedStorageBackend(context,manifest));let mutationStarted=false;
         try {
@@ -59080,12 +59391,13 @@ ${string(queryBundle?.sceneText || '')}`;
       executeUnifiedStage, validateUnifiedArtifact, applyUnifiedFactPatch, renderUnifiedArtifact,
       loadSettings: loadMemorySettings, saveSettings: saveMemorySettings,
       listPerformancePresets, applyPerformancePreset, listRecallQualityPresets, applyRecallQualityPreset, resetEmbeddingProviderDefaults,
-      getUnifiedStorageStatus, loadEmbeddingSettings, saveEmbeddingSettings, testEmbeddingConnection, getLastMultilingualEmbeddingProbe,
+      getUnifiedStorageStatus,
+      getServerScopeHealth, loadEmbeddingSettings, saveEmbeddingSettings, testEmbeddingConnection, getLastMultilingualEmbeddingProbe,
       loadEmbeddingRebuildState, refreshEmbeddingRebuildInventory, startEmbeddingRebuild, stopEmbeddingRebuild,
       retryFailedEmbeddingRebuild, cleanupQuarantinedVectors, runAutomaticLegacyVectorMigration, scheduleAutomaticLegacyVectorMigration, purgeLegacyWorldAdditionalData,
       resolveContext, buildPairs, pairRevisionProjection, pairRevisionCacheKeyForChat, sourceDigest, transcript, buildAriadneReferenceContext, buildItoLoreReferenceContext, rerankMemoryLoreForStage, executeStage, scan, scheduleScan, scheduleLegacyOutputBoundaryScan, beforeRequest, afterRequest,
       recoverPendingStateTrackingJournal, flushUnifiedDerivedVectors, unifiedStateReadProjection, unifiedWorldReadContext,
-      listCanonicalBatchRanges, startSelectedCanonicalBatches, failureDiagnostic: libraMemoryFailureDiagnostic, unwrapTypedResponse: unwrapLibraTypedResponse,
+      listCanonicalBatchRanges, startSelectedCanonicalBatches, reviewLibraSourceEdits, failureDiagnostic: libraMemoryFailureDiagnostic, unwrapTypedResponse: unwrapLibraTypedResponse,
       startManualColdStart, startManualCanonicalScan, startFailedRetry, deleteFailedRun, getCanonicalJobStatus, listCanonicalJobs, cancelCanonicalJob, resumeCanonicalJob, recoverCanonicalJobAtStartup,
       listCanonicalVariants, regenerateCanonicalMemory, createCanonicalEditDraft, saveCanonicalEditDraft,
       getCanonicalCandidateComparison, resolveCanonicalCandidate, selectCanonicalVariant, deleteCanonicalVariant,
@@ -66943,12 +67255,23 @@ html,body{width:100%;height:100%;overflow:hidden}
     };
     const keydown = event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } };
     Gui.canonicalRangeDrawerClose = close;
-    const eligible = row => currentMode === 'regenerate' ? row.status === 'saved' : currentMode === 'failed' ? row.status === 'failed' : row.status !== 'saved';
+    const eligible = row => currentMode === 'regenerate' ? row.status === 'saved' : currentMode === 'failed' ? row.status === 'failed' : row.status === 'missing';
+    const sourceChangedNotice = guiEl('div', { class: 'sga-callout danger', dataset: { sourceChangedNotice: 'true' } });
+    const sourceReviewButton = guiEl('button', { class: 'sga-btn', type: 'button', dataset: { sourceReviewCta: 'true' }, text: 'Review source changes', disabled: true });
+    let sourceReviewBusy = false;
     const paint = () => {
       if (!alive || !inventory) return;
       const rows = inventory.ranges;
       for (const start of [...selection]) if (!rows.some(row => row.startTurn === start && eligible(row))) selection.delete(start);
       const labels = { saved: '저장됨', missing: '미생성', failed: '미완료 · 새 분석 가능', source_changed: '원문 수정 · 동의 확인 필요' };
+      const sourceChanged = rows.filter(row => row.status === 'source_changed');
+      sourceChangedNotice.hidden = sourceChanged.length === 0;
+      sourceReviewButton.disabled = sourceReviewBusy || sourceChanged.length === 0;
+      sourceChangedNotice.replaceChildren(
+        guiEl('strong', { text: 'Source-changed ranges are handled separately.' }),
+        guiEl('p', { text: sourceChanged.length ? `${sourceChanged.length} source-changed range(s) require original comparison and explicit consent before reanalysis.` : '' }),
+        sourceReviewButton
+      );
       tiles.replaceChildren(...rows.map(row => guiEl('button', {
         type: 'button', class: `libra-range-tile${selection.has(row.startTurn) ? ' selected' : ''}`,
         disabled: !eligible(row), 'aria-pressed': String(selection.has(row.startTurn)),
@@ -66967,12 +67290,23 @@ html,body{width:100%;height:100%;overflow:hidden}
       guiEl('option', { value: 'failed', text: '실패 구간 새 분석', selected: mode === 'failed' }),
       guiEl('option', { value: 'regenerate', text: '기존 기억 재생성', selected: mode === 'regenerate' })
     ]);
+    sourceReviewButton.addEventListener('click', async () => {
+      if (sourceReviewBusy || !inventory) return;
+      sourceReviewBusy = true; sourceReviewButton.disabled = true;
+      try {
+        const result = await LibraMemoryCore.reviewLibraSourceEdits({ expectedScopeKey: inventory.scopeKey, startTurns: inventory.ranges.filter(row => row.status === 'source_changed').map(row => row.startTurn) });
+        if (!result?.ok && result?.reason && !['user_declined', 'confirmation_deferred', 'no_selection'].includes(String(result.reason))) status.textContent = `Source review did not complete: ${String(result.reason)}`;
+        inventory = await LibraMemoryCore.listCanonicalBatchRanges({ expectedScopeKey: inventory.scopeKey });
+        paint();
+      } catch (error) { status.textContent = `Could not start source review: ${String(error?.message || error)}`; }
+      finally { sourceReviewBusy = false; paint(); }
+    });
     const controls = guiEl('div', { class: 'sga-actions' }, [choices,
       guiEl('button', { type: 'button', class: 'sga-btn', text: '전체 선택', onClick: () => { inventory?.ranges.filter(eligible).forEach(row => selection.add(row.startTurn)); paint(); } }),
       guiEl('button', { type: 'button', class: 'sga-btn', text: '전체 해제', onClick: () => { selection.clear(); paint(); } })
     ]);
     panel.append(guiEl('div', { class: 'libra-range-head' }, [guiEl('div', {}, [guiEl('small', { text: 'MEMORY WORKBENCH' }), guiEl('h2', { text: '기억 생성 구간 선택' })]), guiEl('button', { class: 'sga-btn', type: 'button', text: '닫기', onClick: close })]));
-    body.append(notice, controls, status, tiles); panel.append(body, guiEl('div', { class: 'libra-range-footer' }, [count, submit])); overlay.append(panel);
+    body.append(notice, controls, status, sourceChangedNotice, tiles); panel.append(body, guiEl('div', { class: 'libra-range-footer' }, [count, submit])); overlay.append(panel);
     overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
     submit.addEventListener('click', () => {
       if (!alive || running || !inventory || !selection.size) return;
@@ -67328,17 +67662,36 @@ html,body{width:100%;height:100%;overflow:hidden}
         ]),
         guiEl('div', { class: 'sga-note', text: '유사/최근 비율은 관련성 증거 게이트를 없애지 않습니다. Exact anchor와 현재 장면 강제 후보는 보호되고, “예전·당시·처음” 같은 과거 회상 질의에서는 최근성 비중이 자동 완화됩니다. 자동 따라잡기는 이미 Librarian를 사용 중인 세션에서 놓친 5턴 경계만 제한적으로 복구하며, 사용 이력이 없는 세션은 계속 수동 콜드스타트만 허용합니다. 5턴당 정본 하나라는 저장 계약은 그대로 유지됩니다.' }),
         buildLibraLiveContextSettingsPanel(),
+        buildLibraServerScopeHealthPanel(),
         guiEl('div', { class: 'sga-actions' }, [
           guiEl('button', { class: 'sga-btn good', type: 'button', text: '리콜 · 최근 대화 설정 저장', onClick: async () => { await saveGuiState(); await LibraMemoryCore.saveSettings(LibraMemoryCore.state.settings || settings); await renderSettingsGui(); guiSetStatus('LIBRA 성능 프리셋, 리콜, 최근 대화 설정을 저장했습니다.'); } }),
           guiEl('button', { class: 'sga-btn danger', type: 'button', text: '현재 채팅 LIBRA 데이터 삭제', onClick: async () => {
             if (typeof confirm === 'function' && !confirm('현재 채팅의 LIBRA 메모리·벡터·실행 기록을 모두 삭제할까요?')) return;
-            await LibraMemoryCore.deleteCurrentScope({ suppressGuiSchedule: true, snapshotLimits: guiSnapshotLimits(), trackGuiLimits: true });
+            let deletion;
+            try { deletion=await LibraMemoryCore.deleteCurrentScope({ suppressGuiSchedule: true, snapshotLimits: guiSnapshotLimits(), trackGuiLimits: true }); }
+            catch(error) { if(typeof alert==='function')alert('삭제하지 못했습니다: '+string(error?.message||error)); return; }
+            if(deletion?.reloadRequired){if(typeof alert==='function')alert('현재 채팅의 서버 자료를 삭제하고 백업을 보존했습니다. 이전 작업과 로컬 자료의 재업로드를 차단했습니다. RisuAI를 새로고침해 주세요.');return;}
             if (Gui.refreshTimer) { clearTimeout(Gui.refreshTimer); Gui.refreshTimer = null; }
             await renderSettingsGui();
           } })
         ])
       ])
     ]);
+  };
+
+  const buildLibraServerScopeHealthPanel = () => {
+    const output=guiEl('pre',{class:'sga-note',id:'libraServerScopeHealthResult',style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},text:'읽기 전용 검사입니다. 기억·원문·비교 기준을 변경하거나 자동 재분석하지 않습니다.'});
+    let last=null;
+    const inspect=guiEl('button',{class:'sga-btn',type:'button',id:'libraServerScopeHealthInspect',text:'현재 서버 scope 건강 검사',onClick:async()=>{
+      inspect.disabled=true;copy.disabled=true;output.textContent='현재 채팅의 서버 기록을 검사 중입니다. 아직 정상으로 확정하지 않았습니다.';
+      try{last=await LibraMemoryCore.getServerScopeHealth();output.textContent=JSON.stringify(last,null,2);copy.disabled=false;}
+      catch(error){last=null;output.textContent='검사 미완료: '+string(error?.message||error)+'\nDATA를 삭제하지 말고 저장 연결과 진단을 확인하세요.';}
+      finally{inspect.disabled=false;}
+    }});
+    const copy=guiEl('button',{class:'sga-btn',type:'button',disabled:true,text:'건강 검사 진단 복사',onClick:async()=>{
+      if(!last)return;const text=JSON.stringify(last,null,2);try{await navigator.clipboard.writeText(text);}catch(_){guiSetStatus('복사 권한이 없습니다. 아래 진단 텍스트를 선택해 복사해 주세요.');}
+    }});
+    return guiEl('div',{class:'sga-card wide'},[guiEl('h3',{text:'서버 기억 상태 진단'}),guiEl('div',{class:'sga-actions'},[inspect,copy]),output,guiEl('div',{class:'sga-note',text:'미완료 TX와 Head/Registry의 불일치를 관찰합니다. 검사 정상은 원문·벡터·모델 의미까지 전부 검증했다는 뜻이 아닙니다. 자동 초기화나 자동 수리를 수행하지 않습니다.'})]);
   };
 
   const buildLibraProviderPanel = () => {
@@ -69591,6 +69944,38 @@ html,body{width:100%;height:100%;overflow:hidden}
 
                   
   const worldManagerCorrectionId = row => text(row?.correctionProvenance?.correctionId || '');
+  // Corrections that BUILD identity/worldline structure. A profile edit layers on
+  // top of these; it must never supersede them, or the structure that produced
+  // the row being edited is removed from replay first.
+  const WORLD_MANAGER_STRUCTURAL_CORRECTION_POLICIES = new Set([
+    'identity_merge',
+    'identity_split',
+    'explicit_fact_role_allocation',
+    'worldline_fork',
+    'worldline_structure'
+  ]);
+  // Which correction, if any, THIS profile edit is allowed to supersede.
+  // Returns '' when the row's newest correction is structural, in which case the
+  // edit is recorded as a fresh correction instead of replacing anything.
+  const worldManagerPlainObject = value => (value && typeof value === 'object' ? value : {});
+  const worldManagerSupersedableProfileCorrectionId = (row, domain = '') => {
+    const provenance = worldManagerPlainObject(row?.correctionProvenance);
+    const correctionId = text(provenance.correctionId || '');
+    if (!correctionId) return '';
+    if (WORLD_MANAGER_STRUCTURAL_CORRECTION_POLICIES.has(text(provenance.policy || ''))) return '';
+    // identity merge/split also stamp identityCorrectionProvenance.merge/.split
+    // with the same correctionId; treat that as structural even if the policy
+    // string is absent or was written by an older build.
+    const identityProvenance = worldManagerPlainObject(row?.identityCorrectionProvenance);
+    for (const key of ['merge', 'split']) {
+      const structuralId = text(worldManagerPlainObject(identityProvenance[key]).correctionId || '');
+      if (structuralId && structuralId === correctionId) return '';
+    }
+    // Only supersede a correction recorded for the domain being edited.
+    const provenanceDomain = text(provenance.domain || worldManagerPlainObject(provenance.target).domain || '');
+    if (domain && provenanceDomain && provenanceDomain !== text(domain)) return '';
+    return correctionId;
+  };
   const worldManagerIsUnified = view => isReadableUnifiedEngineVersion(view?.head?.unifiedApplied?.engineVersion);
   const worldManagerRelationshipDefinition = row => typeof row?.state==='string'?row.state:text(row?.state?.value||row?.definition||'');
   const worldManagerDisplayReferences = (value, view, field = '', depth = 0) => {
@@ -69679,7 +70064,7 @@ html,body{width:100%;height:100%;overflow:hidden}
   const openWorldManagerCorrectionEditor = (domain, row, view) => {
     const common={
       key:worldManagerDraftKey(domain,row),domain,recordId:text(row?.id||''),anchorTurn:Number(view?.throughTurn||0),
-      basisFingerprint:text(view?.basis?.sourceFingerprint||''),supersedes:worldManagerCorrectionId(row),values:{},
+      basisFingerprint:text(view?.basis?.sourceFingerprint||''),supersedes:worldManagerSupersedableProfileCorrectionId(row,domain),values:{},
       unified:worldManagerIsUnified(view),originalName:text(row?.name||''),resolvePendingFacts:[],
       pending:guiAsArray(view?.head?.unifiedApplied?.pending).filter(p=>p.recordId===row?.id && ['missing_current_binding','same_source_order_conflict','dependency_pending'].includes(p.reason)),
       originalNarrative:domain==='narrative_thread'&&worldManagerIsUnified(view)?cloneJson(view.narrative):null
@@ -73686,6 +74071,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       return safeClone(LibraMemoryCore.unifiedWorldReadContext(head,String(locationName)));
     },
     getUnifiedStateReadProjection(head={}) { return safeClone(LibraMemoryCore.unifiedStateReadProjection(head)); },
+    async getServerScopeHealth() { return safeClone(await LibraMemoryCore.getServerScopeHealth()); },
     async getUnifiedStorageStatus() { return safeClone(await LibraMemoryCore.getUnifiedStorageStatus()); },
     async retryPendingUnifiedState() {
       return safeClone(await LibraMemoryCore.recoverPendingStateTrackingJournal(await LibraMemoryCore.resolveContext(),{force:true,unifiedOnly:true}));
