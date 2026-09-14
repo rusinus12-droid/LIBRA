@@ -1,6 +1,6 @@
 //@name libra
-//@display-name LIBRA v2.3.121
-//@version 2.3.121
+//@display-name LIBRA v2.3.122
+//@version 2.3.122
 /* Target-only handoff storage preparation v1. Authenticated owner handlers only. */
 async function prepareMemorySuiteHandoffTargetStorage(api, storage, owner, payload) {
   const readTarget = async () => {
@@ -1383,7 +1383,7 @@ function __libraNarrativeStripPatch(value) {
   };
 
   const PLUGIN_NAME = 'libra';
-  const PLUGIN_VERSION = '2.3.121';
+  const PLUGIN_VERSION = '2.3.122';
   const RISUAI_AUX_PRESET_NAME = 'risuai_aux';
   const RISUAI_AUX_PROVIDER = 'risuai_aux';
   const RISUAI_AUX_MODE = 'risuai_otherax';
@@ -3847,7 +3847,7 @@ const inspectLibraScopeHealthSnapshot = (snapshot, options = {}) => {
 };
 /* END LIBRA READ-ONLY SCOPE HEALTH */
 
-/* LIBRARIAN SYSTEM STORAGE SDK v1.8.21
+/* LIBRARIAN SYSTEM STORAGE SDK v1.8.22
  * Scope-routed durable storage client shared by Flashback, HAYAKU, LIBRA, LIA and RE:TRACE.
  * The server stores opaque values. Each plugin keeps ownership of its own data schema.
  */
